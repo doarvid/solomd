@@ -103,6 +103,17 @@ pub mod cookbook;
 pub mod dev_bridge;
 pub mod portable;
 
+// 内嵌浏览器（知识检索入口）。`WebviewBuilder` / `Window::add_child`
+// gate 在 `#[cfg(all(desktop, feature = "unstable"))]`，所以桌面走真实
+// 实现，移动端走返回错误的 stub。两边的模块名都叫 `browser`，
+// 这样下面的 generate_handler! 不必按平台分叉。
+pub mod browser_types;
+#[cfg(desktop)]
+mod browser;
+#[cfg(mobile)]
+#[path = "browser_mobile.rs"]
+mod browser;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before any webview exists: moves WebView2 data next to the exe when a
@@ -276,6 +287,18 @@ pub fn run() {
             capture_endpoint::capture_regenerate_token,
             capture_endpoint::capture_set_inbox_folder,
             capture_endpoint::capture_set_workspace,
+            // 内嵌浏览器。只有这 9 个 —— 没有 browser_capture /
+            // browser_selection，采集数据经 on_navigation 的哨兵 URL 回传，
+            // 子 webview 不调用任何命令。
+            browser::browser_create,
+            browser::browser_set_bounds,
+            browser::browser_show,
+            browser::browser_hide,
+            browser::browser_navigate,
+            browser::browser_destroy,
+            browser::browser_request_capture,
+            browser::browser_request_selection,
+            browser::browser_platform_supported,
             quick_capture::quick_capture_open,
             quick_capture::quick_capture_close,
             quick_capture::quick_capture_write,
