@@ -1121,6 +1121,30 @@ function scheduleStarPrompt() {
 onMounted(async () => {
   scheduleStarPrompt();
   void reconcileIosFolder();
+
+  // TEMP — P0 debug entry for the embedded browser. Deleted in P1 when the
+  // browser tab type and the file-tree context-menu item land (Task 9).
+  // There is no other way to create a browser tab until then, and the P0
+  // security probes in Task 5 need one.
+  if (import.meta.env.DEV) {
+    (window as any).__p0OpenBrowser = async (url = 'https://chat.deepseek.com/') => {
+      await invoke('browser_create', { tabId: 'p0', url, x: 300, y: 120, w: 800, h: 600 });
+      console.log('[p0] browser created at 300,120 800x600');
+    };
+    (window as any).__p0Nav = async (url: string) => {
+      await invoke('browser_navigate', { tabId: 'p0', url });
+    };
+    (window as any).__p0Bounds = async (x: number, y: number, w: number, h: number) => {
+      await invoke('browser_set_bounds', { tabId: 'p0', x, y, w, h });
+    };
+    (window as any).__p0Capture = async () => {
+      await invoke('browser_request_capture', { tabId: 'p0' });
+    };
+    (window as any).__p0Destroy = async () => {
+      await invoke('browser_destroy', { tabId: 'p0' });
+    };
+    console.log('[p0] __p0OpenBrowser / __p0Nav / __p0Bounds / __p0Capture / __p0Destroy ready');
+  }
   // #153 (mobile) — Android's WebView reports env(safe-area-inset-top) as 0
   // under forced edge-to-edge, so the toolbar rendered under the status bar
   // and was untappable. Read the real bar heights natively and inject them as
