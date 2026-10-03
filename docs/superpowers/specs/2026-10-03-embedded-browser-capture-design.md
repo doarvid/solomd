@@ -25,6 +25,38 @@
 
 ## 修订记录
 
+### v3 —— 安全模型推倒重来（v2 的 ACL 方案在锁定版本上不成立）
+
+读 tauri 2.10.3 源码（`crates/tauri/src/webview/mod.rs:1801`）确认：
+
+```rust
+// we only check ACL on plugin commands or if the app defined its ACL manifest
+if (plugin_command.is_some() || has_app_acl_manifest)
+  && request.cmd != crate::ipc::channel::FETCH_CHANNEL_DATA_COMMAND
+  && invoke.acl.is_none()
+```
+
+本仓库的 `build.rs` 只调 `tauri_build::build()`，**没有 `AppManifest`**，所以 `has_app_acl_manifest == false`。**结果是：所有 app 自定义命令（含 `read_file`、`write_file`、`list_dir`）完全绕过 ACL，对本地和远程来源一视同仁。**
+
+也就是说 v2 的 `capabilities/browser.json` **拦不住任何东西**：子 webview 里的任意远程页面可以直接调 `read_file` 读走整个 vault。这不是 CVE，是 2.10.3 的设计。
+
+修复出现在 2.12.1（已核对源码）：门条件多了 `|| !is_local`，远程来源强制走 ACL：
+
+```rust
+if (plugin_command.is_some() || has_app_acl_manifest || !is_local)
+```
+
+**但补 `AppManifest` 是陷阱**：一旦声明，`has_app_acl_manifest` 变真，**本地来源也要过 ACL**，那就得给现有约 150 个 app 命令全部补授权。为了一个尚未验证的功能做全量迁移，代价不成比例。
+
+因此 v3 的结论：
+1. **必须把 tauri 升到 ≥2.12.1**（不升就有一个能读走 vault 的洞）。升完不加 `AppManifest`，本地来源行为不变，远程来源被拒。
+2. **采集回传不走 IPC**。改为 `WebviewBuilder::on_navigation` 拦截：注入脚本把 payload 塞进一个哨兵 URL 并赋值给 `location.href`，Rust 的导航处理器识别、解析、返回 `false` 取消导航。页面不跳转、登录态不丢。
+   - 不用 IPC → 不需要 capability、不需要 ACL、不需要 `AppManifest`、不需要回环 HTTP（也就绕开了 PNA）、没有 CORS、没有 URL 之外的传输限制。
+   - 这是唯一一个**在 2.10.3 上就能跑、且升级后依然成立**的方案。
+3. `capabilities/browser.json` **从设计中删除**。子 webview 不再需要调用任何命令。
+
+### v2 —— 两处判断错误
+
 v1 有两处判断错误，评审 + 独立验证后已推翻，此处保留以便追溯：
 
 1. **v1 说"回传走 localhost HTTP，因为不能也不该给子 webview 注入 Tauri IPC"。**
@@ -34,6 +66,12 @@ v1 有两处判断错误，评审 + 独立验证后已推翻，此处保留以�
 2. **v1 说 Linux "✅ WebKitGTK"。** 错。wry 的 `build_as_child` 在 Linux 上**仅支持 X11**，Wayland 直接报 `the window handle kind is not supported`。而 Wayland 是现代发行版的默认。
 
 ---
+
+## 前置条件
+
+**tauri 必须升到 ≥2.12.1**，且**不加 `AppManifest`**。原因见关键决策 1 与安全一节 —— 在 2.10.3 上这个功能会附带一个能让任意网页读走整个 vault 的洞。
+
+升级本身有风险（2.10 → 2.12 跨两个 minor），必须作为一个独立步骤先做完并跑通现有测试，再动浏览器功能。
 
 ## 平台矩阵
 
@@ -74,44 +112,58 @@ Tauri 的子 webview（`WebviewBuilder` + `Window::add_child`）**仅桌面可�
 └───────────────────────────────────────────────────────┘
 ```
 
-### 关键决策 1：回传走 Tauri IPC + 窄来源 capability
+### 关键决策 1：回传走 `on_navigation` 拦截，不用 IPC
 
-**不用 localhost HTTP**（PNA，见修订记录）。
+**不用 IPC**（v2 的 capability 方案在 2.10.3 上拦不住任何东西，见修订记录）。
+**不用 localhost HTTP**（Chrome 142+ 的 PNA，见 v2 修订记录）。
 
-子 webview 本来就带着 `__TAURI_INTERNALS__`，所以问题不是"要不要给 IPC"，而是"给远程来源开放哪些命令"。答案是：**只开放采集命令，且只对浏览器 webview 开放**。
+注入脚本把 payload 编码进一个哨兵 URL：
 
-新增 capability `app/src-tauri/capabilities/browser.json`：
-
-```jsonc
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "browser-capture",
-  "description": "嵌入式浏览器 webview 的只写采集通道。不含任何 fs / dialog / 既有命令。",
-  "local": false,                      // 关键：不适用于 app 自身来源
-  "remote": { "urls": ["https://*", "http://*"] },
-  "webviews": ["browser-*"],           // 关键：只对浏览器 webview 生效
-  "platforms": ["macOS", "windows", "linux"],
-  "permissions": ["browser:allow-capture", "browser:allow-selection"]
+```js
+const CHUNK = 200_000;
+const encoded = encodeURIComponent(JSON.stringify(payload));
+for (let i = 0, n = 0; i < encoded.length; i += CHUNK, n++) {
+  location.href = `https://solomd.invalid/capture/${n}#${encoded.slice(i, i + CHUNK)}`;
 }
 ```
 
-依据（已核 tauri `ipc/authority.rs`）：`Origin::Local` 只匹配 `ExecutionContext::Local`，`Origin::Remote { url }` 只匹配 URL 模式命中的 `Remote` 上下文。**应用自己注册的命令同样走这套 ACL**，远程来源没有对应 capability 时 `resolve_access` 返回 `None`，命令被拒。
+Rust 侧在 `on_navigation` 里识别 `solomd.invalid`，解码、拼接、发事件给主窗口，**返回 `false` 取消导航**。
 
-URL 模式必须放宽到 `https://*` / `http://*`，因为浏览器要能导航到任意站点（"选中片段"模式需要在任意页面上工作）。放宽是可接受的，因为这两个命令只写内存缓冲。
+为什么是它：
+
+| | IPC + capability | localhost HTTP | **`on_navigation`** |
+|---|---|---|---|
+| 2.10.3 上可用 | ❌ ACL 不拦 app 命令 | ✅ | ✅ |
+| 需要 `AppManifest` | ✅（触发全量迁移） | ❌ | ❌ |
+| Windows 可用 | ✅ | ❌ PNA | ✅ |
+| 需要新 capability | ✅ | ❌ | ❌ |
+| 页面能调到的能力 | 两个命令 | 一个 HTTP 路由 | **无** |
+
+`on_navigation` 是唯一一个**在锁定版本上就能跑、且升级后依然成立**的方案。子 webview 因此不需要调用任何命令，capability 文件从设计中删除。
+
+**已知限制**：payload 走 URL，受导航 URL 长度约束。按 200 KB 分片，普通对话（几十 KB）单片即可。**P0 必须实测单片上限**；若单次导航放不下，分片循环已经写好；若分片之间导航被合并（浏览器可能折叠同一 tick 内的多次 `location.href` 赋值），则在每片之间插入 `await new Promise(r => setTimeout(r, 30))`。
+
+**哨兵 host 必须是不能真正解析的域名**（`solomd.invalid` 是 RFC 2606 保留域名）。若 `on_navigation` 因平台差异没有拦住，页面会去请求一个不存在的域名 —— 表现为一次失败的导航，而不是把 payload 发到互联网上。
 
 ### 关键决策 2：捕获先入内存缓冲，用户确认后才落盘
 
-`browser_capture` 只把内容写进**按 tabId 索引的内存缓冲**，不碰文件系统。用户在右侧栏审阅后才点「写入」。
+`on_navigation` 收到的哨兵 URL 只解码进**按 tabId 索引的内存缓冲**，不碰文件系统。用户在右侧栏审阅后才点「写入」。
 
-这是第 1 层安全防线：即使远程页面能调这两个命令，它拿到的最坏结果是"污染一个待审列表"，无法向 vault 写任意文件。这也顺带满足了"先看再存"的产品需求。
+这是第 1 层安全防线：即使某个页面能伪造哨兵 URL，它拿到的最坏结果是"污染一个待审列表"，无法向 vault 写任意文件。这也顺带满足了"先看再存"的产品需求。
 
-### 关键决策 3：子 webview 强制导航白名单
+### 关键决策 3：`on_navigation` 一个处理器干两件事
 
-给子 webview 装 `on_navigation` 处理器，**只放行 `http` / `https`**，其余 scheme（`tauri://`、`asset://`、`file://`、以及任何应用注册的协议）一律 `return false` 拦截。
+`on_navigation` 同时承担回传和放行：
 
-这是第 2 层防线，针对 **CVE-2026-42184 / GHSA-7gmj-67g7-phm9**：Windows/Android 上 `Webview::is_local_url()` 只取域名第一段做判断，`http://asset.evil.com/` 会被误判为 Local 来源。SoloMD 开了 `assetProtocol`，`default.json` 又给 `windows: ["main"]` 发了 `fs:allow-read-file`（`**` 范围），而子 webview 正是 `main` 窗口的子 webview——**只要来源被误判成 Local，任意网站就能读用户全部笔记**。
+```
+url.host == "solomd.invalid"  → 解析采集 payload，发事件，return false   // 回传
+url.scheme ∈ {http, https}    → return true                              // 正常浏览
+其他一切（tauri:// / asset:// / file:// / 自定义 scheme）→ return false    // 拦截
+```
 
-因此 P0 必须包含一项安全验证（见分期）。同时 `default.json` **绝不能**加 `remote` 字段。
+白名单那一半针对 **CVE-2026-42184 / GHSA-7gmj-67g7-phm9**：Windows/Android 上 `Webview::is_local_url()` 只取域名第一段，`http://asset.evil.com/` 会被误判为 Local 来源。SoloMD 开了 `assetProtocol`，`default.json` 又给 `windows: ["main"]` 发了 `fs:allow-read-file`（`**` 范围），而子 webview 正是 `main` 窗口的子 webview。
+
+注意：**`browser_navigate` 命令里也要独立做同样的 scheme 校验**，不能只依赖 `on_navigation` —— 否则前端传什么就导航什么，把浏览器变成一个能加载本地协议的东西。两处都要挡。
 
 ### 关键决策 4：抽取三级流水线，前级命中即停
 
@@ -261,20 +313,34 @@ slug 由链接文字或 URL path 生成，CJK 安全，重名加 `-2` 后缀。
 browser_create(tab_id: String, url: String, capture_dir: String) -> Result<(), String>
 browser_set_bounds(tab_id: String, x: f64, y: f64, w: f64, h: f64)  // 逻辑像素
 browser_show(tab_id: String) / browser_hide(tab_id: String)
-browser_navigate(tab_id: String, url: String)
-browser_back(tab_id) / browser_forward(tab_id) / browser_reload(tab_id)
+browser_navigate(tab_id: String, url: String)   // 内部重复 scheme 校验
+browser_reload(tab_id: String)
 browser_destroy(tab_id: String)
 browser_request_capture(tab_id: String)     // eval 页面内已注入的采集函数
 browser_request_selection(tab_id: String)   // eval 取 window.getSelection()
 ```
 
-**仅由 capability 开放给远程来源的两个命令**：`browser_capture(payload)`、`browser_selection(payload)`。其余命令只能由本地前端（主窗口）调用。
+**没有 `browser_capture` / `browser_selection` 命令** —— 子 webview 不调任何命令（见关键决策 1）。所有命令都只由本地主窗口调用。
 
-事件：`browser://page-loaded {tabId,url,title}`、`browser://capture {tabId,payload}`、`browser://selection {tabId,text,url}`、`browser://error {tabId,message}`（沿用现有 `solomd://` 命名风格）。
+不做 `browser_back` / `browser_forward`：初始版本没有历史栈 UI，加这两个命令等于加两个没人调的东西。
 
-**导航白名单**：`WebviewBuilder::on_navigation(|url| matches!(url.scheme(), "http" | "https"))`。
+事件：`browser://capture {tabId,payload}`、`browser://selection {tabId,text,url}`、`browser://title {tabId,title}`（沿用现有 `solomd://` 命名风格）。
 
-`initialization_script` 注入全局命名空间化的采集函数，**不引入任何新能力**——它只调用那两个已被 capability 放行的命令。
+**`on_navigation` 处理器**（唯一同时负责回传与放行的位置）：
+
+```rust
+let app_for_nav = app.clone();
+.on_navigation(move |url| {
+    if url.host_str() == Some("solomd.invalid") {
+        // 解析并拼接分片，发 browser://capture 给主窗口
+        // 解析失败只记日志，不 panic —— 这是不可信输入
+        return false;                      // 取消导航，页面不跳转
+    }
+    matches!(url.scheme(), "http" | "https")
+})
+```
+
+`initialization_script` 注入的采集函数只做两件事：拼 payload，赋值 `location.href`。**不调用任何 Tauri API，不读 `__TAURI_INTERNALS__`。**
 
 ### Rust：`src/extract_rules.rs`
 
@@ -397,20 +463,22 @@ pub async fn ai_complete_once(provider, model, base_url, system, user) -> Result
 
 按重要性排序：
 
-1. **`default.json` 永远不加 `remote` 字段。** 这是把 `fs:allow-read-file`（`**` 范围）、`dialog`、`opener` 等既有能力挡在远程来源之外的唯一屏障。
-2. **采集 capability 只含 `browser:allow-capture` / `browser:allow-selection`**，`local: false` + `webviews: ["browser-*"]`，与既有 capability 完全隔离。
-3. **子 webview 装 `on_navigation` 白名单，只放行 http/https。** 拦住 CVE-2026-42184 的误判路径（`http://asset.evil.com/` → 被当成 Local）。
-4. **只缓冲，不落盘。** 远程页面能调的命令只有两个，且都只写内存。
-5. **平台边界**：不做移动端。
-6. 子 webview 加载页面的 CSP 由远端站点提供，与主窗口 `"csp": null` 无关。
+1. **tauri 必须 ≥2.12.1。** 在 2.10.3 上（本仓库当前锁定版本）**所有 app 自定义命令完全绕过 ACL**，远程页面可以直接调 `read_file` 读走整个 vault。这是本设计最严重的前置条件，不是可选项。
+2. **不要为了这个功能引入 `AppManifest`。** 它会翻转 `has_app_acl_manifest`，让本地来源也走 ACL，连锁要求给现有约 150 个命令补授权。升级到 2.12.1 且不加 `AppManifest` 时，本地来源行为完全不变，远程来源被 ACL 拒绝 —— 这正是我们要的。
+3. **`default.json` 永远不加 `remote` 字段。**
+4. **子 webview 不调用任何命令。** 没有 IPC 通道，就没有需要授权的东西。
+5. **`on_navigation` 白名单只放行 http/https**，且 `browser_navigate` 命令里独立重复同一校验。拦住 CVE-2026-42184 的误判路径。
+6. **只缓冲，不落盘。** 回传内容进内存待审列表，用户确认后才写文件。
+7. **平台边界**：不做移动端。
+8. 子 webview 加载页面的 CSP 由远端站点提供，与主窗口 `"csp": null` 无关。
 
-**P0 必须包含的安全验证**（不是形式）：
+**P0 必须包含的安全验证**（不是形式，任何一条不过就停）：
 
-- [ ] 确认 `tauri` 版本已包含 GHSA-7gmj-67g7-phm9 的修复（advisory 标注 fixed in 2.10.3；Cargo.lock 当前为 2.10.3，需确认该修复确实在该版本内）
-- [ ] 在浏览器 webview 里导航到一个恶意测试页（本地起一个模拟 `http://asset.evil.com/` 的页面），断言 `read_file` / `write_file` 被拒
-- [ ] 断言子 webview 导航到 `tauri://localhost` / `asset://` 被 `on_navigation` 拦截
-- [ ] 断言一个普通远程页面调 `browser_capture` 成功、调 `read_file` 失败
-- [ ] 断言主窗口（本地来源）调 `browser_capture` 被拒（capability 隔离是双向的）
+- [ ] `cargo tree -p tauri` 确认版本 ≥2.12.1；在 `src-tauri/src/webview/mod.rs` 对应的 crate 源码里确认门条件含 `!is_local`
+- [ ] 在浏览器 webview 里导航到一个**你自己控制的可疑页面**，页面里跑一段探针：调 `read_file` / `write_file` / `list_dir`，并**打印每条的实际结果到页面上**（不能只看控制台，因为失败可能表现为静默拒绝）。断言三条全部被拒
+- [ ] 同一次探针里，断言回传通道本身仍然可用（`on_navigation` 那条路能通到主窗口）
+- [ ] 从**页面内部**（`location.href = 'tauri://localhost/'`、`<a href="asset://...">`）触发导航，断言被拦。**不能**用 `browser_navigate` 命令测这条 —— 命令里自己就会先拒掉，测不到 `on_navigation`
+- [ ] 断言主窗口（本地前端）调 `read_file` **成功** —— 这是回归检查，确认升级没有把正常功能弄坏
 
 ---
 
@@ -422,7 +490,7 @@ pub async fn ai_complete_once(provider, model, base_url, system, user) -> Result
   - `extract_main`：对固定 HTML fixture 断言标题与正文，覆盖三级降级路径
   - 引用提取契约：同源过滤、去重、标题兜底
   - 路径穿越拒绝
-- **前端 vitest**（`lib/*.test.ts` 惯例）
+- **前端**：`node --test src/lib/*.test.ts`（项目用 Node 内置 runner + `node:assert/strict`，import 带 `.ts` 后缀；**没有 vitest，不要引入**）
   - `stores/browser.ts`：状态机（待审 → 采集中 → 成功/失败/重试）+ webview 生命周期（恢复时 create、关闭时 destroy、切工作区保留）
   - `useBrowserBounds` 的矩形换算
   - `saveTab` / `closeTabSafe` 对 browser tab 的短路
@@ -434,7 +502,7 @@ pub async fn ai_complete_once(provider, model, base_url, system, user) -> Result
 
 | 阶段 | 内容 | 出口条件 |
 |---|---|---|
-| **P0 风险闸门** | 加 `unstable` feature；`browser.rs` 骨架 + `#[cfg(desktop)]` 门禁；`add_child` 一个加载 `chat.deepseek.com` 的 webview；确认坐标空间；**跑完上面 5 项安全验证** | macOS + Windows 都能**手动登录并发一条消息**，且 5 项安全断言全过。**不通则本方案作废** |
+| **P0 风险闸门** | **先升 tauri 到 ≥2.12.1 并跑通现有测试**；加 `unstable` feature；`browser.rs` 骨架 + `#[cfg(desktop)]` 门禁；`add_child` 一个加载 `chat.deepseek.com` 的 webview；确认坐标空间；**实测 `on_navigation` 单片 payload 上限**；**跑完上面 5 项安全验证** | tauri 升级无回归 + macOS/Windows 都能**手动登录并发一条消息** + 采集能回传 + 5 项安全断言全过。**任一不通则本方案作废** |
 | P1 | browser tab 类型 + `PaneContent` 分支 + 全部 save/close/workspace guard + 工具栏 + 边界同步 + overlay 隐藏 | 能开 tab、正常浏览、resize/切 tab/拖分隔条/开命令面板都不出问题 |
 | P2 | 采集 capability + 两个命令 + 注入脚本 + 内存缓冲 + 审阅面板 | 「采集对话」把对话与引用抓进待审列表 |
 | P3 | 写 `index.md` + 引用清单 + 模式选择 UI（Full/Stub） | 对话落盘，引用列表可勾选 |
