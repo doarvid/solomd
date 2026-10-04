@@ -85,6 +85,7 @@ import { useWorkspaceIndexStore } from './stores/workspaceIndex';
 import { useSavedViewsStore } from './stores/savedViews';
 import { usePropertiesStore } from './stores/properties';
 import { useRagStore } from './stores/rag';
+import { useBrowserStore } from './stores/browser';
 import { IS_APP_STORE_BUILD } from './lib/app-build';
 import UiPreview from './components/UiPreview.vue';
 
@@ -153,6 +154,14 @@ githubSync.start();
 // offers to pick up tabs from a sibling device when one is fresher.
 const sessionRestore = useSessionRestore();
 sessionRestore.start();
+// Embedded browser: owns the native child webviews' lifecycle (created and
+// destroyed by diffing the tab list) and receives capture payloads. Must run
+// after the tabs store has hydrated from localStorage — start() does an
+// initial sync precisely so tabs restored from a previous session get their
+// webviews, which a $subscribe alone would never fire for.
+const browserStore = useBrowserStore();
+void browserStore.start();
+void browserStore.loadPlatformSupport();
 // v2.5 F4: pick up an in-progress focus session from before the reload.
 // Fire-and-forget — the store handles the (rare) "session already past
 // its end" case by short-circuiting into the completion path.
