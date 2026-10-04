@@ -124,6 +124,8 @@ mod cookbook;
 // `crate::browser_types`) precisely so the path resolves in both roots.
 #[path = "browser_types.rs"]
 mod browser_types;
+#[path = "extract_rules.rs"]
+mod extract_rules;
 #[cfg(desktop)]
 #[path = "browser.rs"]
 mod browser;

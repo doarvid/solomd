@@ -108,6 +108,8 @@ pub mod portable;
 // 实现，移动端走返回错误的 stub。两边的模块名都叫 `browser`，
 // 这样下面的 generate_handler! 不必按平台分叉。
 pub mod browser_types;
+// 站点抽取规则库（三级流水线的第 1 级）。
+pub mod extract_rules;
 #[cfg(desktop)]
 mod browser;
 #[cfg(mobile)]
