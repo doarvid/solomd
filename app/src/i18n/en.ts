@@ -191,8 +191,17 @@ export const en = {
     replaceOne: 'Replace',
     replaceAll: 'All',
   },
+  // Embedded browser tab (知识检索入口). Only en/zh are written by hand;
+  // the other locales fall back to English via t()'s lookup chain until
+  // someone translates them.
+  browser: {
+    capture: 'Capture chat',
+    addressPlaceholder: 'Enter a web address',
+    notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
+  },
   explorer: {
     heading: 'Explorer',
+    knowledgeSearch: 'Knowledge search',
     revealHidden: 'Could not show this file in the tree — it is outside the open workspace, or hidden by a tree filter.',
     loading: 'Loading…',
     truncated: '+ 10,000+ more —— folder is huge',

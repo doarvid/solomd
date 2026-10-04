@@ -191,7 +191,13 @@ export const sv: I18n = {
     replaceOne: 'Ersätt',
     replaceAll: 'Alla',
   },
+  browser: {
+    capture: 'Capture chat',
+    addressPlaceholder: 'Enter a web address',
+    notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
+  },
   explorer: {
+    knowledgeSearch: 'Knowledge search',
     deleteTitle: 'Radera',
     deleteFileMsg: 'Radera ”{name}”?',
     deleteFolderMsg: 'Radera mappen ”{name}” och allt i den?',

@@ -2054,7 +2054,7 @@ onBeforeUnmount(() => {
         class="ftree__ctx-item"
         @click="openKnowledgeBrowser(ctx.node)"
       >
-        🔎 {{ t('explorer.knowledgeSearch') || '知识检索' }}
+        🔎 {{ t('explorer.knowledgeSearch') }}
       </button>
       <!-- Only between the "new file / folder" section (folders) and the rest:
            on a file the menu would otherwise open with an empty divider. -->

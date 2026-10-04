@@ -191,7 +191,13 @@ export const uk: I18n = {
     replaceOne: 'Замінити',
     replaceAll: 'Усі',
   },
+  browser: {
+    capture: 'Capture chat',
+    addressPlaceholder: 'Enter a web address',
+    notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
+  },
   explorer: {
+    knowledgeSearch: 'Knowledge search',
     deleteTitle: 'Видалити',
     deleteFileMsg: 'Видалити «{name}»?',
     deleteFolderMsg: 'Видалити теку «{name}» разом з усім її вмістом?',

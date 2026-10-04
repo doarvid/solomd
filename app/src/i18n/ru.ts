@@ -191,7 +191,13 @@ export const ru: I18n = {
     replaceOne: 'Заменить',
     replaceAll: 'Все',
   },
+  browser: {
+    capture: 'Capture chat',
+    addressPlaceholder: 'Enter a web address',
+    notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
+  },
   explorer: {
+    knowledgeSearch: 'Knowledge search',
     heading: 'Проводник',
     revealHidden: 'Не удалось показать файл в дереве: он вне открытой рабочей папки или скрыт фильтром.',
     loading: 'Загрузка…',

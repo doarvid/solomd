@@ -191,7 +191,13 @@ export const pl: I18n = {
     replaceOne: 'Zamień',
     replaceAll: 'Wszystkie',
   },
+  browser: {
+    capture: 'Capture chat',
+    addressPlaceholder: 'Enter a web address',
+    notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
+  },
   explorer: {
+    knowledgeSearch: 'Knowledge search',
     deleteTitle: 'Usuń',
     deleteFileMsg: 'Usunąć „{name}”?',
     deleteFolderMsg: 'Usunąć folder „{name}” wraz z całą zawartością?',

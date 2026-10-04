@@ -163,36 +163,6 @@ sessionRestore.start();
 const browserStore = useBrowserStore();
 void browserStore.start();
 void browserStore.loadPlatformSupport();
-
-// A native child webview is a separate OS surface stacked ABOVE the app's
-// HTML — it is not part of the page. So while one is visible, the command
-// palette, settings, and the sidebar context menu would render *behind* it
-// and be invisible. Hide on open, restore on close.
-//
-// Only the active tab is re-shown: blanket-showing every browser tab would
-// put a background tab's webview on top of the note the user is editing.
-//
-// Known gap: component-local menus (the editor's context menu, dropdowns)
-// keep their own state that this cannot see. Those overlay before the
-// webview for now — see the "已知缺口" note in the design doc.
-const anyOverlayOpen = computed(
-  () => paletteOpen.value || settingsOpen.value || sidebarCtx.value !== null,
-);
-
-watch(anyOverlayOpen, async (open, wasOpen) => {
-  if (open === wasOpen) return;
-  if (open) {
-    for (const t of tabs.tabs.filter(isBrowserTab)) {
-      await browserStore.hide(t.id);
-    }
-    return;
-  }
-  const active = tabs.activeTab;
-  if (active && isBrowserTab(active)) await browserStore.show(active.id);
-  // The anchor's rect did not change while the overlay was up, so the bounds
-  // tick's dedupe would skip the re-sync and leave it mis-sized (or hidden).
-  browserStore.bumpBoundsVersion();
-});
 // v2.5 F4: pick up an in-progress focus session from before the reload.
 // Fire-and-forget — the store handles the (rare) "session already past
 // its end" case by short-circuiting into the completion path.
@@ -273,6 +243,42 @@ function openSidebarCtx(e: MouseEvent) {
   sidebarCtx.value = { x: e.clientX, y: e.clientY };
 }
 function closeSidebarCtx() { sidebarCtx.value = null; }
+
+// A native child webview is a separate OS surface stacked ABOVE the app's
+// HTML — it is not part of the page. So while one is visible, the command
+// palette, settings, and the sidebar context menu would render *behind* it
+// and be invisible. Hide on open, restore on close.
+//
+// Only the active tab is re-shown: blanket-showing every browser tab would
+// put a background tab's webview on top of the note the user is editing.
+//
+// This lives here, not next to the store setup near the top of this file,
+// because watch() eagerly evaluates its source to collect dependencies — so
+// referencing paletteOpen/settingsOpen/sidebarCtx before their `const`
+// declarations threw "Cannot access before initialization" and took down the
+// whole App setup.
+//
+// Known gap: component-local menus (the editor's context menu, dropdowns)
+// keep their own state that this cannot see. Those overlay behind the
+// webview for now — see the "已知缺口" note in the design doc.
+const anyOverlayOpen = computed(
+  () => paletteOpen.value || settingsOpen.value || sidebarCtx.value !== null,
+);
+
+watch(anyOverlayOpen, async (open, wasOpen) => {
+  if (open === wasOpen) return;
+  if (open) {
+    for (const t of tabs.tabs.filter(isBrowserTab)) {
+      await browserStore.hide(t.id);
+    }
+    return;
+  }
+  const active = tabs.activeTab;
+  if (active && isBrowserTab(active)) await browserStore.show(active.id);
+  // The anchor's rect did not change while the overlay was up, so the bounds
+  // tick's dedupe would skip the re-sync and leave it mis-sized (or hidden).
+  browserStore.bumpBoundsVersion();
+});
 
 function rsPaneSnapshot() {
   return {

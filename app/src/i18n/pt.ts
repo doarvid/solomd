@@ -193,7 +193,13 @@ export const pt: I18n = {
     replaceOne: 'Substituir',
     replaceAll: 'Tudo',
   },
+  browser: {
+    capture: 'Capture chat',
+    addressPlaceholder: 'Enter a web address',
+    notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
+  },
   explorer: {
+    knowledgeSearch: 'Knowledge search',
     deleteTitle: 'Excluir',
     deleteFileMsg: 'Excluir “{name}”?',
     deleteFolderMsg: 'Excluir a pasta “{name}” e tudo dentro dela?',

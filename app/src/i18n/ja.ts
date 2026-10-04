@@ -191,7 +191,13 @@ export const ja: I18n = {
     replaceOne: '置換',
     replaceAll: 'すべて',
   },
+  browser: {
+    capture: 'Capture chat',
+    addressPlaceholder: 'Enter a web address',
+    notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
+  },
   explorer: {
+    knowledgeSearch: 'Knowledge search',
     deleteTitle: '削除',
     deleteFileMsg: '「{name}」を削除しますか？',
     deleteFolderMsg: 'フォルダ「{name}」と中身をすべて削除しますか？',

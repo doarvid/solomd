@@ -191,7 +191,13 @@ export const ko: I18n = {
     replaceOne: '바꾸기',
     replaceAll: '모두',
   },
+  browser: {
+    capture: 'Capture chat',
+    addressPlaceholder: 'Enter a web address',
+    notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
+  },
   explorer: {
+    knowledgeSearch: 'Knowledge search',
     deleteTitle: '삭제',
     deleteFileMsg: '“{name}”을(를) 삭제할까요?',
     deleteFolderMsg: '폴더 “{name}”와 그 안의 모든 항목을 삭제할까요?',

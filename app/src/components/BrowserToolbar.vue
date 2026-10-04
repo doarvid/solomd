@@ -11,6 +11,8 @@ import { ref, watch } from 'vue';
 import type { Tab } from '../types';
 import { useBrowserStore } from '../stores/browser';
 import { useI18n } from '../i18n';
+import DsInput from '../ui/DsInput.vue';
+import DsButton from '../ui/DsButton.vue';
 
 const props = defineProps<{ tab: Tab }>();
 const emit = defineEmits<{ (e: 'captured'): void }>();
@@ -63,53 +65,37 @@ async function capture() {
 
 <template>
   <div class="browser-toolbar">
-    <input
+    <!-- DsInput/DsButton, not raw markup: they carry the app's real theme
+         vars (--text / --bg / --border / --text-faint). Hand-rolled styles
+         here picked a non-existent --input-bg and `color: inherit`, which
+         rendered the address text near-invisible against the surface. -->
+    <DsInput
       v-model="address"
       class="browser-toolbar__addr"
-      type="text"
-      spellcheck="false"
-      autocapitalize="off"
-      autocomplete="off"
-      :placeholder="'https://…'"
+      size="sm"
+      :placeholder="t('browser.addressPlaceholder')"
       @keydown.enter.prevent="go"
     />
-    <button class="browser-toolbar__btn" type="button" :disabled="busy" @click="capture">
-      {{ t('browser.capture') || '采集对话' }}
-    </button>
+    <DsButton class="browser-toolbar__btn" size="sm" :loading="busy" @click="capture">
+      {{ t('browser.capture') }}
+    </DsButton>
   </div>
 </template>
 
 <style scoped>
 .browser-toolbar {
   display: flex;
-  gap: 6px;
-  padding: 4px 6px;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
   align-items: center;
-  border-bottom: 1px solid var(--border, #e5e5e5);
+  border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
 .browser-toolbar__addr {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 12px;
-  padding: 3px 6px;
-  border-radius: 4px;
-  border: 1px solid var(--border, #e5e5e5);
-  background: var(--input-bg, #fff);
-  color: inherit;
 }
 .browser-toolbar__btn {
   flex: 0 0 auto;
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 4px;
-  border: 1px solid var(--border, #e5e5e5);
-  background: var(--btn-bg, transparent);
-  color: inherit;
-  cursor: pointer;
-}
-.browser-toolbar__btn:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 </style>
