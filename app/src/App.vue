@@ -1127,7 +1127,21 @@ onMounted(async () => {
   // There is no other way to create a browser tab until then, and the P0
   // security probes in Task 5 need one.
   if (import.meta.env.DEV) {
+    // `pnpm dev` alone serves the same JS to a normal browser, where there is
+    // no Tauri shell and no __TAURI_INTERNALS__ — every invoke() then dies with
+    // "Cannot read properties of undefined (reading 'invoke')", which reads
+    // like a bug in this code rather than the wrong launch command.
+    const assertTauriShell = () => {
+      if (!(window as any).__TAURI_INTERNALS__) {
+        throw new Error(
+          '[p0] Not running inside the Tauri shell — no __TAURI_INTERNALS__.\n' +
+            'Launch with `pnpm tauri dev` (not `pnpm dev`), and use the devtools ' +
+            'of the native window, not a browser tab on localhost:1420.',
+        );
+      }
+    };
     (window as any).__p0OpenBrowser = async (url = 'https://chat.deepseek.com/') => {
+      assertTauriShell();
       await invoke('browser_create', { tabId: 'p0', url, x: 300, y: 120, w: 800, h: 600 });
       console.log('[p0] browser created at 300,120 800x600');
     };
