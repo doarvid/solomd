@@ -244,42 +244,62 @@ browser tab 的其他字段取安全缺省：`content: ''`、`savedContent: ''`�
 
 **并发**：多条目并行抽取会对同一个 `extract-rules.json` 做读-改-写。用 `once_cell::sync::Lazy<Mutex<..>>` 串行化（沿用 `capture_endpoint.rs` 的 `STATE` 模式），写入用临时文件 + rename 保证原子性。
 
-预置种子（`source: "seed"`）：知乎、微信公众号、掘金、CSDN、Wikipedia。
+**预置种子：292 条**，来自简悦（SimpRead）的 `website_list.json`，由 `scripts/convert-simpread-rules.py` 转换，产物是 `app/src-tauri/resources/seed-extract-rules.json`（39 KB，`include_str!` 内嵌）。
+
+简悦把选择器写成 HTML 片段（`<div class='articleDetailContent'>`），能直接映射成 CSS，所以转换干净：599 个选择器里 598 个可解析。**61 个站点被丢弃** —— 它们的 `include` 用了简悦的 `[[{ JS 表达式 }]]`，Rust 侧没法求值；这些站点直接落到 readability 兜底，不会失败。
+
+覆盖：cnbeta / 36kr / ifanr / 少数派系 / 纽约时报中文 / 科学美国人 / 微信公众号（`div#js_content`，这条尤其值钱，微信文章否则基本抓不到）等。
+
+**这份列表停留在 2023 年且偏新闻媒体**，所以知乎 / 掘金 / CSDN 都不在里面 —— 需要后续手补。命中去重计数会自然淘汰已经过期的规则。
+
+**为什么用 292 条外部规则而不是自己写几条**：这是现成的、经过大量用户验证的语料，零维护成本。写错过不了 readability 那关，代价只是一次兜底。
 
 ### 笔记布局
 
-右键目录 D（绝对路径存进该 tab 的 `captureDir`）：
+右键目录 D（绝对路径存进该 tab 的 `captureDir`）。**对话平铺，采集的网页进 `refs/` 子目录**：
 
 ```
 D/
-└── <对话标题>/
-    ├── index.md
-    └── refs/
-        ├── 001-<slug>.md
-        └── 002-<slug>.md
+├── <对话标题>.md          ← 每次点「保存」写一篇
+└── refs/
+    ├── <网页标题>.md
+    └── <网页标题>.md
 ```
 
-`captureDir` **按 tabId 存**，不是全局单值——两个浏览器 tab 各自属于不同对话、不同目录，全局值会互相覆盖。
+文件名就是标题（不是 slug）—— 用户明确要求「以标题为文件名」。标题里的 `/` 等文件系统非法字符替换为 `-`，重名加 `-2`。
 
-`index.md`：
+`captureDir` **按 tabId 存**，不是全局单值——每个浏览器 tab 关联不同目录，全局值会互相覆盖。**所有落盘路径都必须从当前 tab 的 `captureDir` 推导**，这是这条功能的硬约束。
+
+`D/<对话标题>.md`：
 
 ```markdown
 ---
 title: <对话标题>
 source: deepseek
-url: https://chat.deepseek.com/...
+url: https://chat.deepseek.com/a/chat/s/<id>
+model: deepseek-<model>
 captured: 2026-10-03T12:34:56+08:00
 ---
 
-<对话正文>
+## Conversation
 
-## 引用来源
+### 🧑💻 User
+<问题>
 
-1. [标题](url)
-2. [标题](url)
+### 🤖 Assistant
+#### 🤔 Thought Process
+<深度思考内容 —— 仅当该轮有 THINK fragment>
+
+#### 💡 Response
+<回答，正文里的 [citation:N] 已换成 [1][2] 这样的引用序号>
+
+## References
+
+- [1] [标题](归一化 URL)
+- [2] [标题](归一化 URL)
 ```
 
-`refs/<slug>.md`：
+`refs/<网页标题>.md`：
 
 ```markdown
 ---
@@ -287,13 +307,25 @@ title: <页面标题>
 url: <原始链接>
 domain: zhihu.com
 captured: 2026-10-03T12:35:10+08:00
-via: selector | readability | ai | selection | stub
+via: selector | readability | selection | stub
 ---
 
 <正文 markdown>
 ```
 
-slug 由链接文字或 URL path 生成，CJK 安全，重名加 `-2` 后缀。
+### 已采集判定（去重）
+
+右侧栏每个链接都要标记「是否已采集」。判定方式：**URL 归一化后精确匹配**。
+
+归一化规则搬 `ai.js` 的 `normalizeRefUrl`：
+
+1. 去 `#hash`
+2. 去跟踪参数：`utm_*`、`spm`、`from`、`source`、`feature`、`ref`、`ref_src`、`fbclid`、`gclid`、`msclkid`、`ved`、`ei`
+3. 去尾部 `/`（但保留 `://`）
+
+扫描范围是**当前目录 D 下所有 md**（不含 `refs/` 之外的层级——即 D 本身加上 `refs/`）的 frontmatter `url` 字段，逐个归一化后比对。
+
+这是确定性的、瞬时的、零成本的判定。不做标题模糊匹配，也不动用向量库——那两种都会引入假阳性，而「这个链接采过没有」是个用户期望确切答案的问题。
 
 ### 采集模式
 
@@ -431,15 +463,41 @@ pub async fn ai_complete_once(provider, model, base_url, system, user) -> Result
 
 ### 对话与引用的提取契约
 
-`a[href^="http"]` 会把导航栏、侧边栏、广告全捞进来。契约：
+**不用 DOM 抓取，改调 DeepSeek 自己的接口。** 参考 `obsidian-omnichat/ai.js`（AfterChat 用户脚本，支持 32 个 LLM 站点，含 DeepSeek）。
 
-- **正文**：会话消息容器（若有已知选择器）的 `innerText`；取不到则退回 `document.body.innerText`。只依赖 `innerText`，不依赖 class 名——DeepSeek 改版不会让它全废。
-- **引用**：仅在**助手消息子树**内取 `a[href]`，且：
-  - 丢弃与 `location.origin` 同源的链接
-  - 按 href 去重
-  - 丢掉 href 等于当前页面 URL 的
-  - 标题取 anchor 的 `innerText.trim()`；为空则用 href 的 host + path 末段兜底
-- **对话标题**：`document.title` 去掉 ` - DeepSeek` 后缀；为空则用第一条用户消息前 30 字；再为空则用时间戳。
+注入脚本跑在 `chat.deepseek.com` 源上，所以读 `localStorage` 和同源 fetch 都不受任何限制：
+
+```js
+const token = JSON.parse(localStorage.getItem('userToken')).value;
+const r = await fetch(`/api/v0/chat/history_messages?chat_session_id=${id}`, {
+  headers: { authorization: 'Bearer ' + token, 'x-client-platform': 'web', 'x-client-version': '2.2.0' },
+});
+```
+
+会话 id 从 `location.pathname` 的 `/a/chat/s/<id>` 取。
+
+拿到的**结构化数据**：
+
+| 字段 | 用途 |
+|---|---|
+| `chat_session.title` | 对话标题（文件名） |
+| `chat_session.model_type` / `inserted_at` | frontmatter 的 model / 时间 |
+| `chat_messages[].role` | `USER` / `ASSISTANT` |
+| `fragments[type=REQUEST].content` | 用户提问 |
+| `fragments[type=RESPONSE].content` | 助手回答 |
+| **`fragments[type=THINK].content`** | **深度思考过程** —— DOM 抓取拿不到 |
+| `fragments[type=SEARCH\|TOOL_SEARCH].results[]` | `{cite_index, url, title}` |
+| `msg.references[]` | 工具的引用，需经 `fragments[id].result.url` 解引用 |
+
+**引用编号**：正文里的 `[citation:N]` 按 `cite_index → url` 映射替换成 `[1][2]` 这样的序号；`[reference:N]` 按 references 数组下标映射。所有 URL 经归一化去重后统一编号，末尾输出 `## References` 列表。连续重复的引用标记（`[1][1]`）合并。
+
+**为什么这比 DOM 抓取好**：引用是带 `url`+`title` 的精确数据，不用从 `a[href]` 里猜哪些是正文引用、哪些是导航；深度思考内容 DOM 里拿不全；而且 DeepSeek 前端改 class 名不会影响接口。
+
+**降级路径**：接口挂了 / token 取不到 / 响应结构变了 → 退回 DOM 抓取（会话容器 `innerText` + 助手子树内的 `a[href]`，丢同源、按 href 去重）。DOM 那套只依赖 `innerText` 不依赖 class，所以它自己也是抗改版的。
+
+**这一步的取舍要明说**：接口是未公开的私有 API，DeepSeek 改了就会断。但 DOM 抓取同样会断，而接口比 CSS class 稳定，且断的时候是**报错**而不是**静默抓到一堆垃圾**——后者用户很难发现。
+
+- **对话标题**：`chat_session.title`；为空则用首条用户消息前 30 字；再为空则用时间戳。
 
 ---
 
