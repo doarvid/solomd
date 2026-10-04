@@ -192,6 +192,7 @@ export const ja: I18n = {
     replaceAll: 'すべて',
   },
   browser: {
+    noTargetDir: 'No target folder — save this note to disk first, or open the browser from a folder',
     capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',

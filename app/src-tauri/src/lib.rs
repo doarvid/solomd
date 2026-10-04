@@ -305,6 +305,13 @@ pub fn run() {
             browser::browser_request_capture,
             browser::browser_request_selection,
             browser::browser_platform_supported,
+            // 采集产物落盘 + 「是否已采集」索引。**移动端也要注册** ——
+            // 抓取走的是 reqwest、落盘走的是文件系统，都不需要子 webview，
+            // 所以「分析笔记里的外链」在手机上同样可用。
+            capture_store::capture_save_conversation,
+            capture_store::capture_fetch_page,
+            capture_store::capture_captured_urls,
+            capture_store::capture_normalize_url,
             quick_capture::quick_capture_open,
             quick_capture::quick_capture_close,
             quick_capture::quick_capture_write,

@@ -1716,9 +1716,9 @@ const showInspectorPane = computed(
 // Toggled via command palette `view.toggleAgentPanel`; persists in settings.
 // App Store builds strip the AI/Agent surface entirely (Apple 3.1.1).
 const showAgentPane = computed(() => !IS_APP_STORE_BUILD && settings.showAgentPanel);
-// 关联连接面板。只在能跑内嵌浏览器的平台上出现 —— 移动端和 Wayland 上
-// 根本开不出浏览器 tab，面板会永远显示"先打开一个标签页"。
-const showRelatedLinksPane = computed(() => browserStore.platformSupported === true && settings.showRelatedLinks);
+// 关联连接面板。**不再要求平台支持内嵌浏览器** —— 面板对普通笔记同样
+// 生效，而那条路径只用到 reqwest 和文件系统，移动端和 Wayland 上一样能跑。
+const showRelatedLinksPane = computed(() => settings.showRelatedLinks);
 // v4.0.2 — search is a session-only pane (PR #50). ⌘⇧F toggles searchOpen;
 // no setting persisted because users don't want search living in their
 // sidebar across launches.
@@ -2240,10 +2240,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
             <span class="sidebar-ctx__check">{{ settings.showAgentPanel ? '✓' : '' }}</span>
             {{ t('rsPane.agent') }}
           </label>
-          <!-- 只在能跑内嵌浏览器的平台上出现：移动端和 Wayland 上开不出
-               浏览器 tab，这个面板会永远显示"先打开一个标签页"。 -->
           <label
-            v-if="browserStore.platformSupported === true"
             class="sidebar-ctx__item"
             @click="ctxToggle(() => { settings.toggleRelatedLinks() })"
           >

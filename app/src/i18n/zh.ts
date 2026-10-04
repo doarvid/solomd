@@ -193,6 +193,7 @@ export const zh: I18n = {
     replaceAll: '全部',
   },
   browser: {
+    noTargetDir: '没有目标目录 —— 先把这个笔记保存到磁盘，或从目录右键打开浏览器',
     capturingProgress: '正在采集… {got}/{total} 片',
     openPanelHint: '已抓到引用链接 —— 点这里打开「关联连接」面板',
     capturing: '正在采集对话…',

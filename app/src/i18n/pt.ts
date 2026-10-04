@@ -194,6 +194,7 @@ export const pt: I18n = {
     replaceAll: 'Tudo',
   },
   browser: {
+    noTargetDir: 'No target folder — save this note to disk first, or open the browser from a folder',
     capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',

@@ -2,12 +2,17 @@
 /**
  * 关联连接 —— 右侧栏面板。
  *
- * 显示当前浏览器 tab 采集到的引用链接，每条标注**是否已在目标目录里采过**，
- * 并可以逐条采集。
+ * 数据源有**两个**，面板对它们一视同仁：
  *
- * 「是否已采集」是 URL 归一化后的精确匹配（见 capture_store.rs 的
- * normalize_url）。归一化在 Rust 侧做，前端调 capture_normalize_url 取，
- * 这样两边不会各写一份然后慢慢漂移。
+ * - **浏览器 tab**：链接来自采集回传，目标目录是该 tab 的 `captureDir`
+ * - **普通笔记**：链接从正文里现抽（见 lib/external-links.ts），目标目录是
+ *   笔记自己所在的目录
+ *
+ * 后一种是后加的：用户写笔记时同样会贴一堆外链，"这一页引用的东西采过
+ * 没有"是个通用问题，不该只在开着浏览器时能问。
+ *
+ * 「是否已采集」是 URL 归一化后的精确匹配。归一化在 Rust 侧做、经 IPC 取，
+ * 这样前端不会和 Rust 各写一份规则然后慢慢漂移。
  */
 import { computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
@@ -15,58 +20,87 @@ import { useI18n } from '../i18n';
 import { useBrowserStore } from '../stores/browser';
 import { useTabsStore } from '../stores/tabs';
 import { isBrowserTab } from '../lib/tab-kind';
+import { extractExternalLinks, dirOf, type ExternalLink } from '../lib/external-links';
 import DsButton from '../ui/DsButton.vue';
 
 const { t } = useI18n();
 const browser = useBrowserStore();
 const tabs = useTabsStore();
 
-/** 当前浏览器 tab —— 面板只服务它。 */
-const activeBrowserTab = computed(() => {
-  const t = tabs.activeTab;
-  return t && isBrowserTab(t) ? t : tabs.tabs.find((x) => isBrowserTab(x));
+interface Source {
+  kind: 'browser' | 'note';
+  tabId: string;
+  /** 采集产物的落盘目录（绝对路径）。空表示这条来源没有目录，不能采集。 */
+  dir: string;
+  links: ExternalLink[];
+  /** 浏览器来源的对话标题，用于保存按钮的提示。 */
+  title: string;
+}
+
+const source = computed<Source | null>(() => {
+  const tab = tabs.activeTab;
+  if (!tab) return null;
+
+  if (isBrowserTab(tab)) {
+    const payload = browser.pending[tab.id];
+    return {
+      kind: 'browser',
+      tabId: tab.id,
+      dir: tab.captureDir ?? '',
+      links: (payload?.links ?? []).map((l) => ({ href: l.href, text: l.text })),
+      title: payload?.title ?? tab.fileName,
+    };
+  }
+
+  // 普通笔记：正文里的外链。没有 filePath（未保存）就没有目标目录 ——
+  // 与其写到别处，不如明确告诉用户先保存。
+  try {
+    const links = extractExternalLinks(tab.content ?? '');
+    if (links.length === 0) return null;
+    return {
+      kind: 'note',
+      tabId: tab.id,
+      dir: tab.filePath ? dirOf(tab.filePath) : '',
+      links,
+      title: tab.fileName,
+    };
+  } catch {
+    // 正文可能是任意内容（大文件、畸形 markdown），抽链接失败不该让面板崩掉。
+    return null;
+  }
 });
 
-const payload = computed(() =>
-  activeBrowserTab.value ? browser.pending[activeBrowserTab.value.id] : undefined,
-);
-
-const dir = computed(() => activeBrowserTab.value?.captureDir ?? '');
-
-/** 归一化后的链接 + 是否已采集。归一化结果缓存在这里，避免每条每帧都
- *  走一次 IPC。 */
-interface Row {
-  raw: string;
+/** 归一化后的行。归一化要走 IPC，所以结果缓存在这里而不是模板里现算。 */
+interface Row extends ExternalLink {
   norm: string;
-  title: string;
 }
 const rows = ref<Row[]>([]);
 
 async function rebuildRows() {
-  const links = payload.value?.links ?? [];
-  const out: Row[] = [];
+  const links = source.value?.links ?? [];
   const seen = new Set<string>();
+  const out: Row[] = [];
   for (const l of links) {
     const norm = await invoke<string>('capture_normalize_url', { url: l.href }).catch(() => l.href);
     if (!norm || seen.has(norm)) continue;
     seen.add(norm);
-    out.push({ raw: l.href, norm, title: l.text || norm });
+    out.push({ href: l.href, text: l.text, norm });
   }
   rows.value = out;
 }
 
-// 换了 tab、换了一轮采集结果、或者目录变了，都要重算。
-watch(() => [activeBrowserTab.value?.id, payload.value, dir.value] as const, () => {
-  void rebuildRows();
-}, { immediate: true });
+const dir = computed(() => source.value?.dir ?? '');
 
-// 面板挂载时先扫一次目录，否则一进来所有链接都显示"未采集"。
-watch(dir, (d) => { if (d) void browser.refreshCaptured(d); }, { immediate: true });
-
-const capturedCount = computed(
-  () => rows.value.filter((r) => browser.isCaptured(r.norm)).length,
+watch(
+  () => [source.value?.tabId, source.value?.links, dir.value] as const,
+  () => void rebuildRows(),
+  { immediate: true },
 );
 
+// 换目录就重扫一次，否则一进来所有链接都显示"未采集"。
+watch(dir, (d) => { if (d) void browser.refreshCaptured(d); }, { immediate: true });
+
+const capturedCount = computed(() => rows.value.filter((r) => browser.isCaptured(r.norm)).length);
 const uncaptured = computed(() => rows.value.filter((r) => !browser.isCaptured(r.norm)));
 
 function statusOf(row: Row): 'running' | 'done' | 'failed' | 'captured' | 'idle' {
@@ -79,14 +113,14 @@ function statusOf(row: Row): 'running' | 'done' | 'failed' | 'captured' | 'idle'
 
 async function captureOne(row: Row) {
   if (!dir.value) return;
-  await browser.captureLink(dir.value, row.raw, row.title);
+  await browser.captureLink(dir.value, row.href, row.text);
 }
 
 async function captureAll() {
   if (!dir.value) return;
   // 串行：并发抓取会同时打一批站点，既容易触发反爬，也让逐条状态无法阅读。
   for (const row of [...uncaptured.value]) {
-    await browser.captureLink(dir.value, row.raw, row.title);
+    await browser.captureLink(dir.value, row.href, row.text);
   }
 }
 
@@ -103,8 +137,8 @@ function label(s: ReturnType<typeof statusOf>): string {
 
 <template>
   <div class="rlinks">
-    <div v-if="!activeBrowserTab" class="rlinks__empty">
-      {{ t('browser.noTab') }}
+    <div v-if="!source" class="rlinks__empty">
+      {{ t('browser.noLinks') }}
     </div>
 
     <template v-else>
@@ -112,30 +146,26 @@ function label(s: ReturnType<typeof statusOf>): string {
         <span class="rlinks__count">
           {{ t('browser.capturedOf', { done: String(capturedCount), total: String(rows.length) }) }}
         </span>
-        <DsButton
-          size="sm"
-          :disabled="uncaptured.length === 0"
-          @click="captureAll"
-        >
+        <DsButton size="sm" :disabled="uncaptured.length === 0" @click="captureAll">
           {{ t('browser.captureAll') }}
         </DsButton>
       </div>
 
+      <!-- 没有目标目录就没法采集。说清楚原因，而不是让按钮点了没反应。 -->
+      <p v-if="!dir" class="rlinks__hint">{{ t('browser.noTargetDir') }}</p>
+
       <p v-if="browser.notice" class="rlinks__notice">{{ browser.notice }}</p>
 
-      <div v-if="rows.length === 0" class="rlinks__empty">
-        {{ t('browser.noLinks') }}
-      </div>
-
-      <ul v-else class="rlinks__list">
+      <ul class="rlinks__list">
         <li v-for="row in rows" :key="row.norm" class="rlinks__item">
-          <div class="rlinks__title" :title="row.norm">{{ row.title }}</div>
+          <!-- 标题和操作分两行：挤在一行时标题只剩几个字，按钮也点不准。 -->
+          <div class="rlinks__title" :title="row.norm">{{ row.text }}</div>
           <div class="rlinks__meta">
             <span class="rlinks__status" :class="`rlinks__status--${statusOf(row)}`">
               {{ label(statusOf(row)) }}
             </span>
             <DsButton
-              v-if="!browser.isCaptured(row.norm) && statusOf(row) !== 'running'"
+              v-if="dir && !browser.isCaptured(row.norm) && statusOf(row) !== 'running'"
               size="sm"
               variant="ghost"
               @click="captureOne(row)"
@@ -168,6 +198,7 @@ function label(s: ReturnType<typeof statusOf>): string {
 .rlinks__count {
   color: var(--text-faint);
 }
+.rlinks__hint,
 .rlinks__notice {
   margin: 0;
   color: var(--text-faint);
@@ -183,7 +214,7 @@ function label(s: ReturnType<typeof statusOf>): string {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
 }
 .rlinks__item {
   display: flex;
@@ -191,13 +222,17 @@ function label(s: ReturnType<typeof statusOf>): string {
   gap: 2px;
 }
 .rlinks__title {
+  /* 允许折两行：链接标题常常是整句话，单行省略等于没显示。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
 }
 .rlinks__meta {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--sp-2);
 }
 .rlinks__status {

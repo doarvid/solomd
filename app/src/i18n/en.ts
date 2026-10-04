@@ -195,6 +195,7 @@ export const en = {
   // the other locales fall back to English via t()'s lookup chain until
   // someone translates them.
   browser: {
+    noTargetDir: 'No target folder — save this note to disk first, or open the browser from a folder',
     capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',
