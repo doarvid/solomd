@@ -179,6 +179,16 @@ pub fn run() {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.show();
                     let _ = win.set_focus();
+                    // Debug builds: open devtools on launch.
+                    //
+                    // This app builds its own macOS menu (runner.rs), which
+                    // replaces Tauri's default one — and that default menu is
+                    // where the "Toggle Developer Tools" item (⌥⌘I) normally
+                    // lives. Without this there is no discoverable way to reach
+                    // a console, which made the P0 browser probes unrunnable.
+                    // Released builds are unaffected (`debug_assertions` off).
+                    #[cfg(debug_assertions)]
+                    win.open_devtools();
                 }
             }
             #[cfg(any(target_os = "android", target_os = "ios"))]
