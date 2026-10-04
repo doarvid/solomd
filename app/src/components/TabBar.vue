@@ -4,6 +4,7 @@ import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { useTabsStore } from '../stores/tabs';
 import { useFiles } from '../composables/useFiles';
 import { useI18n } from '../i18n';
+import { useOverlayPresenceOf } from '../lib/overlay-presence';
 
 const tabs = useTabsStore();
 const files = useFiles();
@@ -18,6 +19,9 @@ function isDirty(id: string) {
 // --- Right-click context menu ---------------------------------------------
 interface MenuState { tabId: string; x: number; y: number }
 const menu = ref<MenuState | null>(null);
+// Registers with App.vue's open-layer count so a native browser webview in
+// the pane below stops painting over this menu.
+useOverlayPresenceOf(menu);
 
 function openMenu(e: MouseEvent, tabId: string) {
   e.preventDefault();

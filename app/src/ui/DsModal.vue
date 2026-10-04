@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onBeforeUnmount } from 'vue';
+import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue';
+import { useOverlayPresence } from '../lib/overlay-presence';
 
 const props = withDefaults(
   defineProps<{
@@ -20,6 +21,11 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{ 'update:modelValue': [boolean] }>();
+
+// While a modal is open, App.vue hides any native browser webview — a child
+// webview is an OS surface above the HTML and would otherwise paint over the
+// dialog. Registered here so every modal in the app is covered at once.
+useOverlayPresence(computed(() => props.modelValue));
 
 const panelRef = ref<HTMLElement | null>(null);
 let lastFocused: HTMLElement | null = null;

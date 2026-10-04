@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, onBeforeUnmount, watch } from 'vue';
 
+import { useOverlayPresence } from '../lib/overlay-presence';
 export interface DsDropdownItem {
   value: string;
   label: string;
@@ -18,6 +19,11 @@ const props = withDefaults(
 const emit = defineEmits<{ select: [string] }>();
 
 const open = ref(false);
+
+// A floating layer: while it is open, App.vue hides any native browser
+// webview so this is not painted over. Registered here rather than in each
+// consumer so every popover in the app is covered at once.
+useOverlayPresence(open);
 const triggerRef = ref<HTMLElement | null>(null);
 const menuRef = ref<HTMLElement | null>(null);
 const activeIndex = ref(-1);

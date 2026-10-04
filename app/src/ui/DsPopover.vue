@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, watch, onBeforeUnmount } from 'vue';
 
+import { useOverlayPresence } from '../lib/overlay-presence';
 const props = withDefaults(
   defineProps<{
     align?: 'start' | 'end';
@@ -9,6 +10,11 @@ const props = withDefaults(
 );
 
 const open = ref(false);
+
+// A floating layer: while it is open, App.vue hides any native browser
+// webview so this is not painted over. Registered here rather than in each
+// consumer so every popover in the app is covered at once.
+useOverlayPresence(open);
 const triggerRef = ref<HTMLElement | null>(null);
 const popRef = ref<HTMLElement | null>(null);
 const pos = ref<{ top: number; left: number }>({ top: 0, left: 0 });

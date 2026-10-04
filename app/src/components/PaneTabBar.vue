@@ -11,6 +11,7 @@ import { requestRevealInTree } from '../composables/useFileTreeReveal';
 import { shortcutLabel } from '../lib/keybindings';
 import { isMacOS } from '../lib/platform';
 import { useI18n } from '../i18n';
+import { useOverlayPresenceOf } from '../lib/overlay-presence';
 import type { SplitDirection } from '../types';
 
 const props = defineProps<{
@@ -54,6 +55,10 @@ watch(
 
 // ---- Context menu ----
 const ctxMenu = ref<{ x: number; y: number; tabId: string } | null>(null);
+// Registers the menu with App.vue's open-layer count so a native browser
+// webview in the pane below stops painting over it. Declared after ctxMenu
+// because the registration watches with { immediate: true }.
+useOverlayPresenceOf(ctxMenu);
 
 function onContextMenu(e: MouseEvent, tabId: string) {
   e.preventDefault();
