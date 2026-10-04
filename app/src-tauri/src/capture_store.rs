@@ -76,6 +76,15 @@ pub fn safe_filename(title: &str) -> String {
 /// 不复用 `capture_endpoint.rs` 的时间戳前缀方案：那里的产物是 inbox 里
 /// 的速记，重名无所谓；这里的文件名是用户要认的标题，加时间戳会毁掉
 /// 可读性。
+/// 预留一个不冲突的落盘路径。
+///
+/// 对采集而言这一步必须**先于**下载图片：资源目录跟着最终文件名走，而重名
+/// 时会加 `-2` 后缀 —— 先下图片再定文件名的话，目录名和正文里的相对路径
+/// 就对不上了。
+pub fn reserve_path(dir: &Path, stem: &str) -> PathBuf {
+    unique_path(dir, stem)
+}
+
 fn unique_path(dir: &Path, stem: &str) -> PathBuf {
     let first = dir.join(format!("{stem}.md"));
     if !first.exists() {
@@ -375,8 +384,7 @@ pub async fn capture_fetch_page(
         ),
     };
 
-    let body = render_reference(&title, &final_url, &captured, &via, &markdown);
-    let path = write_note(&dir, Some("refs"), &title, &body)?;
+    let path = write_reference_with_assets(&dir, &title, &final_url, &captured, &via, &markdown).await?;
 
     Ok(FetchOutcome {
         url: final_url,
@@ -385,6 +393,36 @@ pub async fn capture_fetch_page(
         via: via.to_string(),
         error,
     })
+}
+
+/// 写一篇引用页，并把正文里的图片落到 `<文档名>.assets/`。
+///
+/// 顺序很关键：**先定文件名，再下图片，最后写正文**。资源目录名跟着最终
+/// 文件名走（重名会加 `-2` 后缀），反过来的话目录名与正文里的相对路径会错开。
+///
+/// 图片下载失败**不算整体失败** —— 正文本身有价值，缺一张图不该让整篇丢掉。
+async fn write_reference_with_assets(
+    dir: &Path,
+    title: &str,
+    url: &str,
+    captured: &str,
+    via: &str,
+    markdown: &str,
+) -> Result<PathBuf, String> {
+    let refs = dir.join("refs");
+    std::fs::create_dir_all(&refs).map_err(|e| format!("创建目录失败 {}: {e}", refs.display()))?;
+
+    let path = reserve_path(&refs, &safe_filename(title));
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| safe_filename(title));
+
+    let (localised, _report) = super::page_assets::localise_images(&refs, &stem, markdown).await;
+
+    let body = render_reference(title, url, captured, via, &localised);
+    std::fs::write(&path, body).map_err(|e| format!("写入失败 {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// 扫描目标目录，返回**已采集的归一化 URL**。前端用它给每个链接打标。

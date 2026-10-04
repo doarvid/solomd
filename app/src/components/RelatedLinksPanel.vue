@@ -27,6 +27,10 @@ const { t } = useI18n();
 const browser = useBrowserStore();
 const tabs = useTabsStore();
 
+// 侧栏每个面板都自己渲染标题栏和关闭按钮（见 BacklinksPanel 等），
+// 这里也照做 —— 少了它这一栏在侧栏里没有任何标识。
+const emit = defineEmits<{ (e: 'close'): void }>();
+
 interface Source {
   kind: 'browser' | 'note';
   tabId: string;
@@ -137,15 +141,23 @@ function label(s: ReturnType<typeof statusOf>): string {
 
 <template>
   <div class="rlinks">
+    <header class="rlinks__head">
+      <span class="rlinks__title">{{ t('rsPane.relatedLinks') }}</span>
+      <span v-if="rows.length" class="rlinks__count">{{ capturedCount }}/{{ rows.length }}</span>
+      <button
+        class="rs-pane-close"
+        type="button"
+        :title="t('rightSidebar.hidePane')"
+        @click="emit('close')"
+      >×</button>
+    </header>
+
     <div v-if="!source" class="rlinks__empty">
       {{ t('browser.noLinks') }}
     </div>
 
     <template v-else>
-      <div class="rlinks__head">
-        <span class="rlinks__count">
-          {{ t('browser.capturedOf', { done: String(capturedCount), total: String(rows.length) }) }}
-        </span>
+      <div class="rlinks__actions">
         <DsButton size="sm" :disabled="uncaptured.length === 0" @click="captureAll">
           {{ t('browser.captureAll') }}
         </DsButton>
@@ -192,11 +204,19 @@ function label(s: ReturnType<typeof statusOf>): string {
 .rlinks__head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+.rlinks__title {
+  font-weight: 600;
 }
 .rlinks__count {
   color: var(--text-faint);
+  margin-right: auto;
+}
+.rlinks__actions {
+  display: flex;
+  justify-content: flex-end;
 }
 .rlinks__hint,
 .rlinks__notice {

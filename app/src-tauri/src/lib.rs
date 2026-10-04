@@ -114,6 +114,8 @@ pub mod extract_rules;
 pub mod webdoc;
 // 采集产物的落盘与「是否已采集」索引。
 pub mod capture_store;
+// 采集网页时把正文图片落到 <文档名>.assets/。
+pub mod page_assets;
 #[cfg(desktop)]
 mod browser;
 #[cfg(mobile)]

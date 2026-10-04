@@ -130,6 +130,8 @@ mod extract_rules;
 mod webdoc;
 #[path = "capture_store.rs"]
 mod capture_store;
+#[path = "page_assets.rs"]
+mod page_assets;
 #[cfg(desktop)]
 #[path = "browser.rs"]
 mod browser;
