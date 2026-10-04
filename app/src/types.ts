@@ -34,6 +34,21 @@ export interface Tab {
   // without edits because content drifts from savedContent).
   lineEnding?: 'lf' | 'crlf';
   showOutline?: boolean;
+
+  // Embedded browser tab (知识检索入口). Absent (undefined) means an ordinary
+  // file tab — every persisted tab from an older build therefore migrates
+  // correctly with no data change. See lib/tab-kind.ts for why the check is
+  // centralised rather than inlined at the four call sites that need it.
+  //
+  // A browser tab is never dirty (both content fields stay empty), never has
+  // a filePath, and is never written to disk. The editor path is bypassed for
+  // it in PaneContent.vue, and the save / close / workspace-switch paths in
+  // lib/browser-tab-guards.ts.
+  kind?: 'file' | 'browser';
+  /** Browser tabs only: the address currently loaded. */
+  url?: string;
+  /** Browser tabs only: absolute directory the capture writes into. */
+  captureDir?: string;
 }
 
 export interface FileReadResult {

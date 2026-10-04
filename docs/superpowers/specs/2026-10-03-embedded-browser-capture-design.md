@@ -489,7 +489,28 @@ file:///etc/hosts   blocked
 
 结论：远程来源的 origin 级 ACL 在 2.12.1 上生效。`__TAURI_INTERNALS__` 存在（如预期，Tauri 无条件注入），但**没有任何命令可调**。方案成立。
 
-（`Plugin not found` 是 ACL 拒绝的既有措辞 —— app 命令挂在 `APP_ACL_KEY` 下。已用主窗口的 `read_file` 成功作为反向对照，排除「命令不存在」的假通过。）
+**反向对照（已实测，且这条是结论成立的关键）** —— 同一个命令、同一个二进制，只在**主窗口**（本地来源）调用：
+
+```js
+await window.__TAURI_INTERNALS__.invoke('read_file', { path: '/…/README.md' })
+// => { content: "# SoloMD\n\n> The editor where agents live.…",
+//      encoding: "UTF-8", had_bom: false, language: "markdown" }
+```
+
+**成功返回文件内容。** 对照结果：
+
+| 来源 | 同一命令的结果 |
+|---|---|
+| 主窗口（本地） | 成功，返回文件内容 |
+| 子 webview 的探针页（远程） | `read_file not allowed. Plugin not found` |
+
+这排除了「命令根本没编进去所以必然 denied」的假通过 —— 差别只能来自来源。origin 级 ACL 在 2.12.1 上确实生效。
+
+另外，两种拒绝的**错误形状**不同，也可用于日后排查：
+- ACL 拒绝 → `not allowed. Plugin not found`（命令未执行）
+- 命令执行了但业务失败 → `read failed: No such file or directory`（如路径不对）
+
+`__TAURI__` 全局在本应用**不存在**（未开 `withGlobalTauri`）；探针要用 `window.__TAURI_INTERNALS__.invoke`。
 
 **P0 必须包含的安全验证**（不是形式，任何一条不过就停）：
 

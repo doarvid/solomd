@@ -195,6 +195,33 @@ export const useTabsStore = defineStore('tabs', {
       this.activeId = tab.id;
       return tab;
     },
+    /**
+     * Open an embedded browser tab (知识检索入口).
+     *
+     * Unlike newTab: never dirty, no filePath, empty content. The native child
+     * webview is created by stores/browser.ts, which watches this list for
+     * diffs — this action deliberately does not touch the webview itself, so
+     * that every path that adds, removes or restores a browser tab (including
+     * session restore, which never goes through this action) is covered by
+     * the same diff.
+     */
+    newBrowserTab(opts: { url: string; captureDir: string; title?: string }) {
+      const tab: Tab = {
+        id: newId(),
+        kind: 'browser',
+        url: opts.url,
+        captureDir: opts.captureDir,
+        fileName: opts.title ?? 'DeepSeek',
+        content: '',
+        savedContent: '',
+        encoding: 'UTF-8',
+        language: 'plaintext',
+        hadBom: false,
+      };
+      this.tabs.push(tab);
+      this.activeId = tab.id;
+      return tab;
+    },
     openFromDisk(payload: {
       filePath: string;
       content: string;
