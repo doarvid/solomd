@@ -409,22 +409,40 @@ function onBrowserWindowResize() {
   boundsLastKey = '';
 }
 
-// Hide the outgoing webview BEFORE the DOM swaps to the next tab's content.
+// Move the webview at the tab switch itself, BEFORE the DOM swaps.
 //
-// The rAF tick alone is too late: it runs after Vue has rendered the incoming
-// editor, and hide() is an async IPC round trip on top of that, so the native
-// webview stays composited over the new tab for several frames — which reads
-// as a hard flash when leaving a browser tab.
+// The rAF tick alone is too late in both directions, because it runs after
+// Vue has rendered the incoming tab and every webview call is an async IPC
+// round trip on top of that:
 //
-// Default flush ('pre') runs before this component re-renders, so the hide is
-// dispatched as early as it can be.
+//   leaving  → the native surface stays composited over the incoming editor
+//              for several frames (the reported flash)
+//   entering → the pane shows an empty anchor until the tick measures it and
+//              setBounds + show land (the other half of the flash)
+//
+// Default flush ('pre') runs before this component re-renders, so both calls
+// go out as early as they can.
 watch(
   () => props.tab?.id,
-  (_id, prevId) => {
+  (id, prevId) => {
+    if (!id || id === prevId) return;
+
     if (prevId && paneVisibleTabId === prevId) {
       paneVisibleTabId = null;
       boundsLastKey = '';
       void browserStore.hide(prevId);
+      return;
+    }
+
+    // Entering a browser tab. Only pre-show when this webview has been
+    // measured before (boundsLastKey non-empty): its geometry is then almost
+    // always still right, and showing it a frame early beats showing an empty
+    // pane. Without a prior measurement, wait for the tick — guessing here
+    // would trade this flash for one at the wrong size.
+    const tab = props.tab;
+    if (tab && isBrowserTab(tab) && isFocused.value && boundsLastKey) {
+      paneVisibleTabId = tab.id;
+      void browserStore.show(tab.id);
     }
   },
 );
@@ -640,9 +658,11 @@ function onPreviewSearchEvent(e: Event) {
 .pane__browser-anchor {
   flex: 1 1 auto;
   min-height: 0;
-  /* Visible background so the region is obviously "the browser goes here"
-     while the native webview is hidden (overlay open, tab inactive). */
-  background: var(--bg-secondary, #fafafa);
+  /* Matches the app surface, so the frame or two before the native webview
+     appears is not a visible shade change. (There is no --bg-secondary token
+     here; using one with a light fallback painted a white block in dark
+     mode.) */
+  background: var(--bg);
 }
 </style>
 
