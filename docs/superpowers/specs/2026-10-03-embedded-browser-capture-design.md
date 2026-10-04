@@ -472,6 +472,25 @@ pub async fn ai_complete_once(provider, model, base_url, system, user) -> Result
 7. **平台边界**：不做移动端。
 8. 子 webview 加载页面的 CSP 由远端站点提供，与主窗口 `"csp": null` 无关。
 
+**P0 安全验证实测结果（2026-10-04，macOS 14 / tauri 2.12.1）**
+
+在子 webview 里加载 `http://evil.local.test:8099/`（探针页，`/etc/hosts` 指向 127.0.0.1）后的实测输出：
+
+```
+__TAURI_INTERNALS__ present : true
+read_file     => denied   "read_file not allowed. Plugin not found"
+write_file    => denied   "write_file not allowed. Plugin not found"
+list_dir      => denied   "list_dir not allowed. Plugin not found"
+fs_list_dirs  => denied   "fs_list_dirs not allowed. Plugin not found"
+tauri://localhost/  blocked
+asset://localhost/  blocked
+file:///etc/hosts   blocked
+```
+
+结论：远程来源的 origin 级 ACL 在 2.12.1 上生效。`__TAURI_INTERNALS__` 存在（如预期，Tauri 无条件注入），但**没有任何命令可调**。方案成立。
+
+（`Plugin not found` 是 ACL 拒绝的既有措辞 —— app 命令挂在 `APP_ACL_KEY` 下。已用主窗口的 `read_file` 成功作为反向对照，排除「命令不存在」的假通过。）
+
 **P0 必须包含的安全验证**（不是形式，任何一条不过就停）：
 
 - [ ] `cargo tree -p tauri` 确认版本 ≥2.12.1；在 `src-tauri/src/webview/mod.rs` 对应的 crate 源码里确认门条件含 `!is_local`
@@ -497,6 +516,25 @@ pub async fn ai_complete_once(provider, model, base_url, system, user) -> Result
 - **手动矩阵**：macOS + Windows + Linux(X11) 各跑完整流程；至少覆盖知乎、微信公众号、一个长尾个人博客
 
 ---
+
+## P0 实测结果（2026-10-04，macOS 14）
+
+**功能性：全部通过。**
+
+- 子 webview 能创建并渲染在指定坐标上
+- `https://chat.deepseek.com/` 正常加载
+- **扫码登录通过** —— 该站提供扫码入口，绕开了最担心的滑块验证码路径。这是风险评估里最大的未知，现已排除。
+- 对话收发正常
+- 注入脚本运行正常
+
+**安全：通过**（见「安全」一节的实测输出）。
+
+**仍未验证：**
+
+- Windows / Linux(X11) —— 本机只有 macOS。`on_web_resource_request` 与 `on_navigation` 在两平台的实现路径不同，**发布前必须各跑一遍上面的探针**。
+- Linux/Wayland 的「无子 webview」降级路径（`browser_platform_supported` 返回 false 时前端是否真的隐藏入口）。
+- Android/iOS 编译（本机无 NDK）。移动端 stub 只用「临时对调 cfg 让桌面编译 stub」验证过它能与 `generate_handler!` 对齐。
+- 单次导航 URL 的 payload 上限（分片已实现，但未实测截断点）。
 
 ## 分期
 
