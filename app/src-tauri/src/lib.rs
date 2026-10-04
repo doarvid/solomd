@@ -110,6 +110,10 @@ pub mod portable;
 pub mod browser_types;
 // 站点抽取规则库（三级流水线的第 1 级）。
 pub mod extract_rules;
+// 网页正文抽取：站点规则 + Readability。
+pub mod webdoc;
+// 采集产物的落盘与「是否已采集」索引。
+pub mod capture_store;
 #[cfg(desktop)]
 mod browser;
 #[cfg(mobile)]

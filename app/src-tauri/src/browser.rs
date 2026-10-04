@@ -76,66 +76,13 @@ fn label_for(tab_id: &str) -> String {
 
 /// 注入页面里的采集入口。
 ///
+/// 逻辑住在 `capture_script.js` 里而不是内联成字符串：它有两百多行，内联
+/// 会把这个文件淹没，也没法单独测。`include_str!` 在编译期嵌进来，运行时
+/// 不读文件。
+///
 /// **刻意不碰任何 Tauri API** —— 不读 `__TAURI_INTERNALS__`，不调命令。
-/// 只做两件事：拼 payload，赋值 `location.href` 指向哨兵域名。
-const CAPTURE_SCRIPT: &str = r#"
-(function () {
-  if (window.__solomd) return;
-
-  var SENTINEL = 'https://solomd.invalid/capture';
-  var CHUNK = 200000;
-
-  // base64 而不是 encodeURIComponent：base64 的字符集是 A-Za-z0-9+/=
-  // 不含 %，URL 解析器不可能对它做二次百分号编码，round-trip 无损。
-  function toB64(str) {
-    var bytes = new TextEncoder().encode(str);
-    var bin = '';
-    for (var i = 0; i < bytes.length; i += 8192) {
-      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
-    }
-    return btoa(bin);
-  }
-
-  function send(kind, payload) {
-    var enc = toB64(JSON.stringify(payload));
-    var total = Math.max(1, Math.ceil(enc.length / CHUNK));
-    for (var n = 0; n < total; n++) {
-      location.href = SENTINEL + '/' + kind + '/' + n + '/' + total +
-        '#' + enc.slice(n * CHUNK, (n + 1) * CHUNK);
-    }
-  }
-
-  window.__solomd = {
-    capture: function () {
-      var links = [];
-      var seen = {};
-      var scope = document.querySelector('[class*="ds-markdown"]') || document.body;
-      var as = scope.querySelectorAll('a[href]');
-      for (var i = 0; i < as.length; i++) {
-        var href = as[i].href;
-        if (!href || !/^https?:/i.test(href)) continue;
-        try { if (new URL(href).origin === location.origin) continue; } catch (e) { continue; }
-        if (href === location.href || seen[href]) continue;
-        seen[href] = 1;
-        links.push({ href: href, text: (as[i].innerText || '').trim() });
-      }
-      send('capture', {
-        url: location.href,
-        title: document.title,
-        text: scope.innerText || '',
-        links: links
-      });
-    },
-    selection: function () {
-      send('selection', {
-        url: location.href,
-        title: document.title,
-        text: String(window.getSelection() || '')
-      });
-    }
-  };
-})();
-"#;
+/// 数据通过赋值 `location.href` 指向哨兵域名送出，由 on_navigation 截获。
+const CAPTURE_SCRIPT: &str = include_str!("capture_script.js");
 
 /// 拆解哨兵 URL：`/capture/<kind>/<n>/<total>#<b64片>`。
 ///

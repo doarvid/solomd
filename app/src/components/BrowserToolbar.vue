@@ -61,6 +61,14 @@ async function capture() {
     busy.value = false;
   }
 }
+
+/**
+ * 保存对话。内容来自上一次「采集对话」的回传 —— 所以顺序是：
+ * 先采集，再保存。没采过就提示，而不是写一个空文件。
+ */
+async function save() {
+  await browser.saveConversation(props.tab.id);
+}
 </script>
 
 <template>
@@ -78,6 +86,15 @@ async function capture() {
     />
     <DsButton class="browser-toolbar__btn" size="sm" :loading="busy" @click="capture">
       {{ t('browser.capture') }}
+    </DsButton>
+    <DsButton
+      class="browser-toolbar__btn"
+      size="sm"
+      variant="primary"
+      :loading="browser.saving"
+      @click="save"
+    >
+      {{ t('browser.save') }}
     </DsButton>
   </div>
 </template>

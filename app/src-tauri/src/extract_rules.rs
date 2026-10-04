@@ -164,6 +164,7 @@ fn learned_keys() -> Vec<String> {
 /// 找，因为它的用途是"这个站点有没有现成规则"。而写规则是反过来的：
 /// 正因为还没有规则才要写。早期版本让 `upsert` 也走 `domain_for`，结果
 /// 长尾站点（AI 学到规则的主要对象）永远存不进去。
+#[allow(dead_code)] // used by upsert (P5) and the tests
 fn host_key(host: &str) -> String {
     canonical(host)
 }
@@ -288,6 +289,9 @@ fn mutate_rule(host: &str, f: impl FnOnce(&mut Rule)) {
 ///
 /// 键由 host 直接推出，**不经过 `domain_for`** —— 否则长尾站点（还没有
 /// 规则、正要学）永远写不进去。用户规则不会被 AI 覆盖。
+// P5 的入口：AI 抽取出选择器后写回规则库。现在没有调用方，但它是
+// 学习闭环的另一半，和 lookup / record_* 配套。
+#[allow(dead_code)]
 pub fn upsert(host: &str, rule: Rule) {
     let domain = host_key(host);
     if domain.is_empty() {

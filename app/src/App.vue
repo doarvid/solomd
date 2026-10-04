@@ -29,6 +29,7 @@ import TypesPanel from './components/TypesPanel.vue';
 import HistoryPanel from './components/HistoryPanel.vue';
 import PropertiesInspector from './components/PropertiesInspector.vue';
 import AgentPanel from './components/AgentPanel.vue';
+import RelatedLinksPanel from './components/RelatedLinksPanel.vue';
 import RsSplitter from './components/RsSplitter.vue';
 import { useAutoCommit } from './composables/useAutoCommit';
 import { useGithubSync } from './composables/useGithubSync';
@@ -299,6 +300,7 @@ function rsPaneSnapshot() {
     showTypesPanel: settings.showTypesPanel,
     showHistoryPanel: settings.showHistoryPanel,
     showAgentPanel: settings.showAgentPanel,
+    showRelatedLinks: settings.showRelatedLinks,
   };
 }
 /** Run a pane toggle and reconcile sidebar visibility: hide it if the
@@ -316,7 +318,8 @@ function ctxToggle(toggleFn: () => void) {
     !showNeighborhoodPane.value &&
     !settings.showTypesPanel &&
     !settings.showHistoryPanel &&
-    (IS_APP_STORE_BUILD || !settings.showAgentPanel);
+    (IS_APP_STORE_BUILD || !settings.showAgentPanel) &&
+    !showRelatedLinksPane.value;
   if (noPanesVisible) {
     settings.hideRightSidebarFromPane(before);
   } else if (settings.rightSidebarHidden) {
@@ -1713,6 +1716,9 @@ const showInspectorPane = computed(
 // Toggled via command palette `view.toggleAgentPanel`; persists in settings.
 // App Store builds strip the AI/Agent surface entirely (Apple 3.1.1).
 const showAgentPane = computed(() => !IS_APP_STORE_BUILD && settings.showAgentPanel);
+// 关联连接面板。只在能跑内嵌浏览器的平台上出现 —— 移动端和 Wayland 上
+// 根本开不出浏览器 tab，面板会永远显示"先打开一个标签页"。
+const showRelatedLinksPane = computed(() => browserStore.platformSupported === true && settings.showRelatedLinks);
 // v4.0.2 — search is a session-only pane (PR #50). ⌘⇧F toggles searchOpen;
 // no setting persisted because users don't want search living in their
 // sidebar across launches.
@@ -1743,7 +1749,8 @@ const rightSidebarHasRenderablePane = computed(
     showTypesPane.value ||
     showHistoryPane.value ||
     showInspectorPane.value ||
-    showAgentPane.value,
+    showAgentPane.value ||
+    showRelatedLinksPane.value,
 );
 
 const showRightSidebar = computed(() => {
@@ -1801,7 +1808,7 @@ const visibleRsPanes = computed(() => {
   // v4.3.0 issue #57b — order driven by settings.rsPaneOrder so users can
   // drag-reorder. Unknown ids (newly-shipped future panes) get appended at
   // the end so a SoloMD update doesn't blow away an existing user layout.
-  const all: Record<'search' | 'outline' | 'backlinks' | 'relationships' | 'tags' | 'tasks' | 'neighborhood' | 'types' | 'history' | 'inspector' | 'agent', boolean> = {
+  const all: Record<'search' | 'outline' | 'backlinks' | 'relationships' | 'tags' | 'tasks' | 'neighborhood' | 'types' | 'history' | 'inspector' | 'agent' | 'relatedLinks', boolean> = {
     search: showSearchPane.value,
     outline: showOutlinePane.value,
     backlinks: showBacklinksPane.value,
@@ -1813,8 +1820,9 @@ const visibleRsPanes = computed(() => {
     history: showHistoryPane.value,
     inspector: showInspectorPane.value,
     agent: showAgentPane.value,
+    relatedLinks: showRelatedLinksPane.value,
   };
-  const known = ['search', 'outline', 'backlinks', 'relationships', 'tags', 'tasks', 'neighborhood', 'types', 'history', 'inspector', 'agent'] as const;
+  const known = ['search', 'outline', 'backlinks', 'relationships', 'tags', 'tasks', 'neighborhood', 'types', 'history', 'inspector', 'agent', 'relatedLinks'] as const;
   const ordered: string[] = [];
   for (const id of settings.rsPaneOrder || []) {
     if (id in all && !ordered.includes(id)) ordered.push(id);
@@ -1824,7 +1832,7 @@ const visibleRsPanes = computed(() => {
   }
   return ordered
     .filter((id) => all[id as keyof typeof all])
-    .map((id) => ({ id: id as 'search' | 'outline' | 'backlinks' | 'relationships' | 'tags' | 'tasks' | 'neighborhood' | 'types' | 'history' | 'inspector' | 'agent' }));
+    .map((id) => ({ id: id as 'search' | 'outline' | 'backlinks' | 'relationships' | 'tags' | 'tasks' | 'neighborhood' | 'types' | 'history' | 'inspector' | 'agent' | 'relatedLinks' }));
 });
 
 // #131 — sidebar pane reordering via the ⋮⋮ grip.
@@ -2082,6 +2090,10 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
               />
               <HistoryPanel v-if="p.id === 'history'" @close="ctxToggle(() => settings.toggleHistoryPanel())" />
               <PropertiesInspector v-if="p.id === 'inspector'" @close="ctxToggle(() => settings.toggleInspector())" />
+              <RelatedLinksPanel
+                v-if="p.id === 'relatedLinks'"
+                @close="ctxToggle(() => settings.toggleRelatedLinks())"
+              />
               <AgentPanel
                 v-if="p.id === 'agent'"
                 @open-settings="(section?: string) => openSettingsAt(section ?? 'integrations')"
@@ -2148,6 +2160,10 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
               />
               <HistoryPanel v-if="p.id === 'history'" @close="ctxToggle(() => settings.toggleHistoryPanel())" />
               <PropertiesInspector v-if="p.id === 'inspector'" @close="ctxToggle(() => settings.toggleInspector())" />
+              <RelatedLinksPanel
+                v-if="p.id === 'relatedLinks'"
+                @close="ctxToggle(() => settings.toggleRelatedLinks())"
+              />
               <AgentPanel
                 v-if="p.id === 'agent'"
                 @open-settings="(section?: string) => openSettingsAt(section ?? 'integrations')"
@@ -2223,6 +2239,16 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
           <label v-if="!IS_APP_STORE_BUILD" class="sidebar-ctx__item" @click="ctxToggle(() => { settings.toggleAgentPanel() })">
             <span class="sidebar-ctx__check">{{ settings.showAgentPanel ? '✓' : '' }}</span>
             {{ t('rsPane.agent') }}
+          </label>
+          <!-- 只在能跑内嵌浏览器的平台上出现：移动端和 Wayland 上开不出
+               浏览器 tab，这个面板会永远显示"先打开一个标签页"。 -->
+          <label
+            v-if="browserStore.platformSupported === true"
+            class="sidebar-ctx__item"
+            @click="ctxToggle(() => { settings.toggleRelatedLinks() })"
+          >
+            <span class="sidebar-ctx__check">{{ settings.showRelatedLinks ? '✓' : '' }}</span>
+            {{ t('rsPane.relatedLinks') }}
           </label>
         </div>
         <div v-if="sidebarCtx" class="sidebar-ctx__backdrop" @click="closeSidebarCtx" />

@@ -179,6 +179,8 @@ interface Settings {
   showTypesPanel: boolean;
   // v4.0 pillar 1: Inline Agent Panel — chat-with-vault sidebar.
   showAgentPanel: boolean;
+  /** 关联连接面板（内嵌浏览器的采集结果）。 */
+  showRelatedLinks: boolean;
   // v4.0 release migration marker: set on first launch after upgrading
   // to v4.0. If absent or false, `load()` force-enables `showAgentPanel`
   // once so users coming from v3.6.x or any v4-beta build (where the
@@ -457,6 +459,7 @@ interface Settings {
     showTypesPanel: boolean;
     showHistoryPanel: boolean;
     showAgentPanel: boolean;
+    showRelatedLinks: boolean;
   } | null;
 }
 
@@ -631,6 +634,7 @@ function defaults(): Settings {
     showNeighborhood: false,
     showTypesPanel: false,
     showAgentPanel: true,
+    showRelatedLinks: false,
     // True for fresh installs (defaults are already v4.0). Existing
     // localStorage blobs from v3.6.x / v4-beta won't have this key, so
     // `load()`'s migration kicks in and force-enables the Agent Panel
@@ -1020,6 +1024,7 @@ export const useSettingsStore = defineStore('settings', {
           showTypesPanel: this.showTypesPanel,
           showHistoryPanel: this.showHistoryPanel,
           showAgentPanel: this.showAgentPanel,
+          showRelatedLinks: this.showRelatedLinks,
         };
         this.rightSidebarHidden = true;
       } else {
@@ -1033,9 +1038,10 @@ export const useSettingsStore = defineStore('settings', {
           this.showTypesPanel = saved.showTypesPanel;
           this.showHistoryPanel = saved.showHistoryPanel;
           this.showAgentPanel = saved.showAgentPanel;
+          this.showRelatedLinks = saved.showRelatedLinks;
           this._rsPanesBeforeHide = null;
         }
-        if (!this.showBacklinks && !this.showRelationships && !this.showTagsPanel && !this.showTypesPanel && !this.showNeighborhood && !this.showHistoryPanel && !this.showAgentPanel) {
+        if (!this.showBacklinks && !this.showRelationships && !this.showTagsPanel && !this.showTypesPanel && !this.showNeighborhood && !this.showHistoryPanel && !this.showAgentPanel && !this.showRelatedLinks) {
           this.showBacklinks = true;
           this.showTagsPanel = true;
         }
@@ -1066,6 +1072,7 @@ export const useSettingsStore = defineStore('settings', {
       showTypesPanel: boolean;
       showHistoryPanel: boolean;
       showAgentPanel: boolean;
+      showRelatedLinks: boolean;
     }) {
       this._rsPanesBeforeHide = paneBeforeToggle;
       this.rightSidebarHidden = true;
@@ -1204,6 +1211,11 @@ export const useSettingsStore = defineStore('settings', {
     toggleAgentPanel() {
       this.showAgentPanel = !this.showAgentPanel;
       if (this.showAgentPanel) this.ensureRightSidebarVisible();
+      this.persist();
+    },
+    toggleRelatedLinks() {
+      this.showRelatedLinks = !this.showRelatedLinks;
+      if (this.showRelatedLinks) this.ensureRightSidebarVisible();
       this.persist();
     },
     toggleAgentAllowWrite() {

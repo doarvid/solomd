@@ -26,6 +26,23 @@ export interface CapturePayload {
   title: string;
   text: string;
   links: CaptureLink[];
+  /** 结构化提取的完整 markdown（含引用编号 + References）。走 DeepSeek
+   *  接口时才有；DOM 兜底时为空，此时用 `text`。 */
+  markdown?: string;
+  model?: string;
+  /** 提取过程中的降级说明。有值不代表失败，但要让用户看见。 */
+  error?: string;
+}
+
+/** 一个引用链接在采集流程里的状态。 */
+export type LinkStatus = 'idle' | 'running' | 'done' | 'failed';
+
+export interface FetchOutcome {
+  url: string;
+  title: string;
+  path: string | null;
+  via: string;
+  error: string | null;
 }
 
 interface BrowserState {
@@ -43,6 +60,19 @@ interface BrowserState {
    * 不去重就会既不显示也不重设尺寸。
    */
   boundsVersion: number;
+  /**
+   * 当前目标目录里**已采集**的归一化 URL 集合。
+   *
+   * 用数组而不是 Set：Pinia 的 state 要可序列化，Set 在 devtools 里也难读。
+   * 规模是几十到几百条，includes 的开销可以忽略。
+   */
+  capturedUrls: string[];
+  /** 每个链接的采集状态，key 是归一化 URL。 */
+  linkStatus: Record<string, LinkStatus>;
+  /** 保存对话的进行状态：null 表示没在保存。 */
+  saving: boolean;
+  /** 上一次操作的提示，供面板显示。 */
+  notice: string;
 }
 
 let unlisten: UnlistenFn[] = [];
@@ -68,6 +98,10 @@ export const useBrowserStore = defineStore('browser', {
     selection: {},
     platformSupported: null,
     boundsVersion: 0,
+    capturedUrls: [],
+    linkStatus: {},
+    saving: false,
+    notice: '',
   }),
 
   actions: {
@@ -179,6 +213,91 @@ export const useBrowserStore = defineStore('browser', {
 
     clearPending(tabId: string) {
       this.pending = { ...this.pending, [tabId]: null };
+    },
+
+    // ---------------------------------------------------------------- 采集
+
+    /**
+     * 重新扫描目标目录，刷新"已采集"索引。
+     *
+     * 每次保存/采集后都要调 —— 索引过期的话，刚采完的链接在面板里仍然
+     * 显示"未采集"，用户会重复采一遍。
+     */
+    async refreshCaptured(dir: string) {
+      this.capturedUrls = await invoke<string[]>('capture_captured_urls', { dir }).catch(() => []);
+    },
+
+    /**
+     * 保存当前 tab 抓到的对话。
+     *
+     * 优先用 `markdown`（接口路径产出的结构化全文），退回 `text`（DOM
+     * 兜底）。两者都空就什么都不做 —— 与其写一个空文件，不如让用户
+     * 知道没抓到。
+     */
+    async saveConversation(tabId: string) {
+      const tab = useTabsStore().tabs.find((t) => t.id === tabId);
+      const payload = this.pending[tabId];
+      if (!tab?.captureDir) {
+        this.notice = '这个标签页没有关联目录';
+        return;
+      }
+      if (!payload) {
+        this.notice = '还没有可保存的内容 —— 先点「采集对话」';
+        return;
+      }
+
+      const body = (payload.markdown || payload.text || '').trim();
+      if (!body) {
+        this.notice = '采集到的内容是空的，没有保存';
+        return;
+      }
+
+      this.saving = true;
+      try {
+        const path = await invoke<string>('capture_save_conversation', {
+          dir: tab.captureDir,
+          title: payload.title || tab.fileName,
+          url: payload.url,
+          model: payload.model ?? '',
+          markdown: body,
+        });
+        this.notice = `已保存到 ${path.split('/').pop()}`;
+        // 对话也有 url，会进索引 —— 刷新一次让状态一致。
+        await this.refreshCaptured(tab.captureDir);
+      } catch (e) {
+        this.notice = `保存失败：${String(e)}`;
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    /** 采集单个引用链接：抓取 → 抽取 → 落盘 → 刷新索引。 */
+    async captureLink(dir: string, url: string, title: string): Promise<FetchOutcome | null> {
+      const key = await invoke<string>('capture_normalize_url', { url }).catch(() => url);
+      this.linkStatus = { ...this.linkStatus, [key]: 'running' };
+      try {
+        const outcome = await invoke<FetchOutcome>('capture_fetch_page', {
+          dir,
+          url,
+          fallbackTitle: title,
+        });
+        this.linkStatus = {
+          ...this.linkStatus,
+          [key]: outcome.error && outcome.via === 'stub' ? 'failed' : 'done',
+        };
+        // 抓完立刻重扫，否则这条仍显示"未采集"。
+        await this.refreshCaptured(dir);
+        return outcome;
+      } catch (e) {
+        this.linkStatus = { ...this.linkStatus, [key]: 'failed' };
+        this.notice = `采集失败：${String(e)}`;
+        return null;
+      }
+    },
+
+    /** 判断一条链接是否已在当前目录采过。 */
+    isCaptured(normalizedUrl: string): boolean {
+      return this.capturedUrls.includes(normalizedUrl);
     },
   },
 });

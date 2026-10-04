@@ -195,6 +195,17 @@ export const en = {
   // the other locales fall back to English via t()'s lookup chain until
   // someone translates them.
   browser: {
+    save: 'Save chat',
+    noTab: 'Open a knowledge-search tab first',
+    noLinks: 'No links yet — press Capture chat first',
+    captureAll: 'Capture all',
+    captureOne: 'Capture',
+    linkIdle: 'Not captured',
+    linkRunning: 'Capturing…',
+    linkDone: 'Captured',
+    linkFailed: 'Failed',
+    linkCaptured: 'Captured',
+    capturedOf: '{done} / {total} captured',
     capture: 'Capture chat',
     addressPlaceholder: 'Enter a web address',
     notSupported: 'The embedded browser is desktop-only, and needs X11 on Linux.',
@@ -1096,6 +1107,7 @@ export const en = {
     selectionTooltip: 'Word and character count for the current selection',
   },
   rsPane: {
+    relatedLinks: 'Related links',
     types: 'Types',
     relationships: 'Relationships',
     dragToReorder: 'Drag to reorder this sidebar pane',

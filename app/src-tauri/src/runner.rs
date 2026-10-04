@@ -126,6 +126,10 @@ mod cookbook;
 mod browser_types;
 #[path = "extract_rules.rs"]
 mod extract_rules;
+#[path = "webdoc.rs"]
+mod webdoc;
+#[path = "capture_store.rs"]
+mod capture_store;
 #[cfg(desktop)]
 #[path = "browser.rs"]
 mod browser;
@@ -210,6 +214,15 @@ fn read_saved_language() -> String {
 fn dirs_path() -> std::path::PathBuf {
     let mut p = dirs_home().unwrap_or_else(std::env::temp_dir);
     p.push(".solomd-language");
+    p
+}
+
+/// Where learned extract rules live. Same home-dir convention as
+/// `.solomd-language`: this is app state, not workspace state, because a
+/// rule learned for one domain applies to every workspace.
+fn extract_rules_path() -> std::path::PathBuf {
+    let mut p = dirs_home().unwrap_or_else(std::env::temp_dir);
+    p.push(".solomd-extract-rules.json");
     p
 }
 
@@ -1090,6 +1103,11 @@ pub fn run_with(initial_file: Option<String>) {
             browser::browser_request_capture,
             browser::browser_request_selection,
             browser::browser_platform_supported,
+            // 采集产物落盘 + 「是否已采集」索引。
+            capture_store::capture_save_conversation,
+            capture_store::capture_fetch_page,
+            capture_store::capture_captured_urls,
+            capture_store::capture_normalize_url,
         ])
         .on_menu_event(|app_handle, event| {
             let id = event.id().0.clone();
@@ -1113,6 +1131,12 @@ pub fn run_with(initial_file: Option<String>) {
             let _ = app_handle.emit("solomd://menu", id);
         })
         .setup(|app| {
+            // Load learned extract rules before anything can look one up.
+            // Without this the path stays unset and persist() is a no-op, so
+            // hit/miss counts would never survive a restart and a stale seed
+            // rule could never retire itself.
+            extract_rules::init(extract_rules_path());
+
             // Build initial menu in English — the frontend will call
             // `set_menu_language` on mount to apply the user's saved preference.
             // Windows: no native menu — the frameless window renders its own

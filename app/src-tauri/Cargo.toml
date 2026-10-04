@@ -99,6 +99,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync"
 
 # File-to-Markdown conversion (built-in, no Python needed)
 htmd = "0.5"
+# 网页正文抽取三层流水线的第 1、2 级：站点选择器规则（见 extract_rules.rs）
+# + Readability。dom_smoothie 是 Mozilla Readability 的 Rust 移植，离线、无网络、
+# 无 JS，对文章类页面命中率足够；scraper 提供 CSS 选择器查询，用来执行种子规则。
+dom_smoothie = "0.18"
+scraper = "0.27"
 zip = "2"
 quick-xml = "0.37"
 calamine = "0.26"

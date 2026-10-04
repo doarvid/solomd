@@ -26,7 +26,19 @@ pub struct CapturePayload {
     pub url: String,
     #[serde(default)]
     pub title: String,
+    /// 纯文本正文。DOM 兜底路径用它，接口路径用 `markdown`。
     pub text: String,
     #[serde(default)]
     pub links: Vec<CaptureLink>,
+    /// 结构化提取出来的完整 markdown（含引用编号与 References 列表）。
+    /// 只有走 DeepSeek 接口那条路才有；DOM 兜底时为空。
+    #[serde(default)]
+    pub markdown: String,
+    /// `deepseek-<model>`，写进 frontmatter。
+    #[serde(default)]
+    pub model: String,
+    /// 提取过程中的降级说明（接口不可用、退回 DOM 等）。有值不代表失败，
+    /// 但要让用户看得见。
+    #[serde(default)]
+    pub error: String,
 }
