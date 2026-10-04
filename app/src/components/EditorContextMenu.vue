@@ -15,6 +15,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from '../i18n';
 import { isMacOS } from '../lib/platform';
+import { useOverlayLayer } from '../lib/overlay-presence';
+
+// The host renders this with v-if, so being mounted means the menu is open.
+// Registering here keeps a native browser webview in the other split pane
+// from painting over this menu.
+useOverlayLayer();
 
 export type EditorMenuAction = 'copyImage' | 'cut' | 'copy' | 'paste' | 'selectAll';
 

@@ -409,6 +409,26 @@ function onBrowserWindowResize() {
   boundsLastKey = '';
 }
 
+// Hide the outgoing webview BEFORE the DOM swaps to the next tab's content.
+//
+// The rAF tick alone is too late: it runs after Vue has rendered the incoming
+// editor, and hide() is an async IPC round trip on top of that, so the native
+// webview stays composited over the new tab for several frames — which reads
+// as a hard flash when leaving a browser tab.
+//
+// Default flush ('pre') runs before this component re-renders, so the hide is
+// dispatched as early as it can be.
+watch(
+  () => props.tab?.id,
+  (_id, prevId) => {
+    if (prevId && paneVisibleTabId === prevId) {
+      paneVisibleTabId = null;
+      boundsLastKey = '';
+      void browserStore.hide(prevId);
+    }
+  },
+);
+
 // An overlay opening hides the webview; when it closes the anchor's rect has
 // not changed, so the dedupe above would skip the re-show and the browser
 // would stay invisible. The store bumps this counter to force a re-sync.

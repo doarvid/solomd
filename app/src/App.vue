@@ -87,6 +87,7 @@ import { usePropertiesStore } from './stores/properties';
 import { useRagStore } from './stores/rag';
 import { useBrowserStore } from './stores/browser';
 import { isBrowserTab } from './lib/tab-kind';
+import { overlayDepth } from './lib/overlay-presence';
 import { IS_APP_STORE_BUILD } from './lib/app-build';
 import UiPreview from './components/UiPreview.vue';
 
@@ -261,8 +262,16 @@ function closeSidebarCtx() { sidebarCtx.value = null; }
 // Known gap: component-local menus (the editor's context menu, dropdowns)
 // keep their own state that this cannot see. Those overlay behind the
 // webview for now — see the "已知缺口" note in the design doc.
+// The last clause covers floating layers whose state is local to another
+// component (FileTree's context menu, the editor menu, popovers). Those
+// register themselves via useOverlayPresence because App.vue cannot see
+// their refs — see lib/overlay-presence.ts.
 const anyOverlayOpen = computed(
-  () => paletteOpen.value || settingsOpen.value || sidebarCtx.value !== null,
+  () =>
+    paletteOpen.value ||
+    settingsOpen.value ||
+    sidebarCtx.value !== null ||
+    overlayDepth.value > 0,
 );
 
 watch(anyOverlayOpen, async (open, wasOpen) => {

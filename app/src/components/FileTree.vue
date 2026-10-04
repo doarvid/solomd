@@ -13,6 +13,7 @@ import { useGithubSyncStore } from '../stores/githubSync';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTabsStore } from '../stores/tabs';
 import { useBrowserStore } from '../stores/browser';
+import { useOverlayPresenceOf } from '../lib/overlay-presence';
 import { useI18n } from '../i18n';
 import { isMacOS, isMobile } from '../lib/platform';
 import { usePendingDeletes, isDeletePending, UNDO_WINDOW_MS } from '../composables/usePendingDeletes';
@@ -659,6 +660,13 @@ interface CtxMenu {
   node: Node | null;
 }
 const ctx = ref<CtxMenu | null>(null);
+
+// The context menu floats over the pane area, and a native browser webview
+// paints above it — so without this the menu is partly covered whenever a
+// 知识检索 tab is open. Declared here, not up with the other stores, because
+// useOverlayPresence watches with { immediate: true } and would hit the TDZ
+// on `ctx` if registered before its declaration.
+useOverlayPresenceOf(ctx);
 
 interface InlineEdit {
   /** 'new-file' / 'new-dir' / 'rename' */
