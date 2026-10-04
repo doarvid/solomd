@@ -12,6 +12,7 @@ import { useToastsStore } from '../stores/toasts';
 import { useGithubSyncStore } from '../stores/githubSync';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTabsStore } from '../stores/tabs';
+import { useBrowserStore } from '../stores/browser';
 import { useI18n } from '../i18n';
 import { isMacOS, isMobile } from '../lib/platform';
 import { usePendingDeletes, isDeletePending, UNDO_WINDOW_MS } from '../composables/usePendingDeletes';
@@ -144,8 +145,26 @@ async function copyNodeRelativePath(node: Node) {
 const tabs = useTabsStore();
 const { t } = useI18n();
 const pendingDeletes = usePendingDeletes();
+const browser = useBrowserStore();
 
 const root = ref<Node | null>(null);
+
+/**
+ * 右键目录 → 知识检索：开一个内嵌浏览器 tab，默认进 DeepSeek。
+ *
+ * 该目录成为采集目标。`node.path` 本身就是绝对路径（FileTree 从
+ * workspace.currentFolder 起递归构建，见 segmentsUnderRoot() 直接拿
+ * root.value?.path 做前缀比较），所以不需要再拼一次，也不该去调一个
+ * 不存在的 join 命令。
+ */
+function openKnowledgeBrowser(node: Node) {
+  tabs.newBrowserTab({
+    url: 'https://chat.deepseek.com/',
+    captureDir: node.path,
+    title: 'DeepSeek',
+  });
+  closeCtx();
+}
 
 // ---------------------------------------------------------------------------
 // Selection — the row the user last touched, and the folder a new entry goes
@@ -2025,6 +2044,18 @@ onBeforeUnmount(() => {
           📁 {{ t('explorer.newFolder') || 'New Folder' }}
         </button>
       </template>
+      <!-- 知识检索 — opens the embedded browser against this folder, which
+           becomes the capture target when the user archives a conversation.
+           Hidden unless the backend says the platform can host a child
+           webview (no mobile, no Wayland), and hidden while that answer is
+           still unknown so a dead menu item never flashes. -->
+      <button
+        v-if="ctx.node?.is_dir && browser.platformSupported === true"
+        class="ftree__ctx-item"
+        @click="openKnowledgeBrowser(ctx.node)"
+      >
+        🔎 {{ t('explorer.knowledgeSearch') || '知识检索' }}
+      </button>
       <!-- Only between the "new file / folder" section (folders) and the rest:
            on a file the menu would otherwise open with an empty divider. -->
       <div v-if="ctx.node && ctx.node.is_dir" class="ftree__ctx-sep"></div>

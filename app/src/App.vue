@@ -86,6 +86,7 @@ import { useSavedViewsStore } from './stores/savedViews';
 import { usePropertiesStore } from './stores/properties';
 import { useRagStore } from './stores/rag';
 import { useBrowserStore } from './stores/browser';
+import { isBrowserTab } from './lib/tab-kind';
 import { IS_APP_STORE_BUILD } from './lib/app-build';
 import UiPreview from './components/UiPreview.vue';
 
@@ -162,6 +163,36 @@ sessionRestore.start();
 const browserStore = useBrowserStore();
 void browserStore.start();
 void browserStore.loadPlatformSupport();
+
+// A native child webview is a separate OS surface stacked ABOVE the app's
+// HTML — it is not part of the page. So while one is visible, the command
+// palette, settings, and the sidebar context menu would render *behind* it
+// and be invisible. Hide on open, restore on close.
+//
+// Only the active tab is re-shown: blanket-showing every browser tab would
+// put a background tab's webview on top of the note the user is editing.
+//
+// Known gap: component-local menus (the editor's context menu, dropdowns)
+// keep their own state that this cannot see. Those overlay before the
+// webview for now — see the "已知缺口" note in the design doc.
+const anyOverlayOpen = computed(
+  () => paletteOpen.value || settingsOpen.value || sidebarCtx.value !== null,
+);
+
+watch(anyOverlayOpen, async (open, wasOpen) => {
+  if (open === wasOpen) return;
+  if (open) {
+    for (const t of tabs.tabs.filter(isBrowserTab)) {
+      await browserStore.hide(t.id);
+    }
+    return;
+  }
+  const active = tabs.activeTab;
+  if (active && isBrowserTab(active)) await browserStore.show(active.id);
+  // The anchor's rect did not change while the overlay was up, so the bounds
+  // tick's dedupe would skip the re-sync and leave it mis-sized (or hidden).
+  browserStore.bumpBoundsVersion();
+});
 // v2.5 F4: pick up an in-progress focus session from before the reload.
 // Fire-and-forget — the store handles the (rare) "session already past
 // its end" case by short-circuiting into the completion path.
@@ -1131,64 +1162,6 @@ onMounted(async () => {
   scheduleStarPrompt();
   void reconcileIosFolder();
 
-  // TEMP — P0 debug entry for the embedded browser. Deleted in P1 when the
-  // browser tab type and the file-tree context-menu item land (Task 9).
-  // There is no other way to create a browser tab until then, and the P0
-  // security probes in Task 5 need one.
-  if (import.meta.env.DEV) {
-    // `pnpm dev` alone serves the same JS to a normal browser, where there is
-    // no Tauri shell and no __TAURI_INTERNALS__ — every invoke() then dies with
-    // "Cannot read properties of undefined (reading 'invoke')", which reads
-    // like a bug in this code rather than the wrong launch command.
-    const assertTauriShell = () => {
-      if (!(window as any).__TAURI_INTERNALS__) {
-        throw new Error(
-          '[p0] Not running inside the Tauri shell — no __TAURI_INTERNALS__.\n' +
-            'Launch with `pnpm tauri dev` (not `pnpm dev`), and use the devtools ' +
-            'of the native window, not a browser tab on localhost:1420.',
-        );
-      }
-    };
-    (window as any).__p0OpenBrowser = async (url = 'https://chat.deepseek.com/') => {
-      assertTauriShell();
-      await invoke('browser_create', { tabId: 'p0', url, x: 300, y: 120, w: 800, h: 600 });
-      console.log('[p0] browser created at 300,120 800x600');
-    };
-    (window as any).__p0Nav = async (url: string) => {
-      await invoke('browser_navigate', { tabId: 'p0', url });
-    };
-    (window as any).__p0Bounds = async (x: number, y: number, w: number, h: number) => {
-      await invoke('browser_set_bounds', { tabId: 'p0', x, y, w, h });
-    };
-    (window as any).__p0Capture = async () => {
-      await invoke('browser_request_capture', { tabId: 'p0' });
-    };
-    (window as any).__p0Destroy = async () => {
-      await invoke('browser_destroy', { tabId: 'p0' });
-    };
-    // TEMP — closes the loop on the capture channel. Without this there is no
-    // way to tell "the injected script ran" apart from "the payload actually
-    // survived the sentinel-URL round trip": the Rust side reassembles
-    // silently and nothing else is listening yet. Removed in P2 when the
-    // capture panel consumes these events for real.
-    void listen<{ tabId: string; payload: { url: string; title: string; text: string; links: { href: string; text: string }[] } }>(
-      'browser://capture',
-      (e) => {
-        const p = e.payload.payload;
-        console.log(
-          `[p0] CAPTURE RECEIVED  tab=${e.payload.tabId}  title=${JSON.stringify(p.title)}\n` +
-            `  text: ${p.text.length} chars\n` +
-            `  links: ${p.links.length}\n` +
-            (p.links[0] ? `  first: ${p.links[0].href}\n` : ''),
-        );
-      },
-    );
-    void listen<{ tabId: string; payload: { text: string } }>('browser://selection', (e) => {
-      console.log(`[p0] SELECTION RECEIVED  ${e.payload.payload.text.length} chars`);
-    });
-    console.log('[p0] __p0OpenBrowser / __p0Nav / __p0Bounds / __p0Capture / __p0Destroy ready');
-    console.log('[p0] listening on browser://capture and browser://selection');
-  }
   // #153 (mobile) — Android's WebView reports env(safe-area-inset-top) as 0
   // under forced edge-to-edge, so the toolbar rendered under the status bar
   // and was untappable. Read the real bar heights natively and inject them as

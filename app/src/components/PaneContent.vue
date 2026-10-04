@@ -2,10 +2,14 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import Editor from './Editor.vue';
 import Preview from './Preview.vue';
+import BrowserToolbar from './BrowserToolbar.vue';
 import { useSettingsStore } from '../stores/settings';
 import { useTilesStore } from '../stores/tiles';
+import { useBrowserStore } from '../stores/browser';
 import type { Tab } from '../types';
 import { isWindowsEditorRuntime, shouldUsePlainWindowsEditor } from '../lib/platform';
+import { isBrowserTab } from '../lib/tab-kind';
+import { toLogicalBounds } from '../lib/browser-rect';
 
 const props = defineProps<{
   paneId: string;
@@ -19,17 +23,28 @@ const emit = defineEmits<{
 
 const settings = useSettingsStore();
 const tiles = useTilesStore();
+const browserStore = useBrowserStore();
 
 const editorRef = ref<InstanceType<typeof Editor> | null>(null);
 const previewRef = ref<InstanceType<typeof Preview> | null>(null);
+/** 原生子 webview 的锚点。它的 rect 就是 webview 的位置来源。 */
+const browserAnchor = ref<HTMLElement | null>(null);
 
+const isBrowser = computed(() => !!props.tab && isBrowserTab(props.tab));
+
+// Browser tabs must be excluded from BOTH arms below, not just handled first:
+// they are 'plaintext' with no path, so showEditor would be true and an empty
+// CodeMirror would try to render underneath the native webview.
 const showEditor = computed(
-  () => props.tab?.language !== 'markdown' || settings.viewMode !== 'preview'
+  () =>
+    !isBrowser.value &&
+    (props.tab?.language !== 'markdown' || settings.viewMode !== 'preview')
 );
 // `liveEdit` mode is editor-only: the inline-rendered markdown IS the
 // preview, so we don't show the separate Preview pane next to it.
 const showPreview = computed(
   () =>
+    !isBrowser.value &&
     props.tab?.language === 'markdown' &&
     settings.viewMode !== 'edit' &&
     settings.viewMode !== 'liveEdit'
@@ -327,8 +342,80 @@ watch(() => props.tab?.id, async () => {
   bindScrollSync();
 });
 
+// ---- Browser bounds sync ----
+//
+// The native child webview is not laid out by CSS — it is a separate OS
+// surface positioned over the anchor element — so its rect has to be pushed
+// to Rust whenever anything moves it. A rAF poll beats enumerating events:
+// the triggers are window resize/maximise/fullscreen, either sidebar
+// toggling, tile splitter drags, tab switches and panel collapse, and that
+// list keeps growing as the UI evolves.
+let boundsRaf = 0;
+let boundsLastKey = '';
+let boundsRo: ResizeObserver | null = null;
+
+function browserBoundsTick() {
+  boundsRaf = requestAnimationFrame(browserBoundsTick);
+  const el = browserAnchor.value;
+  const tab = props.tab;
+  if (!el || !isBrowser.value || !tab) return;
+
+  // Only the focused pane's webview may be visible; a background pane's would
+  // paint over whatever the user is actually looking at.
+  if (!isFocused.value) {
+    if (boundsLastKey !== 'hidden') {
+      boundsLastKey = 'hidden';
+      void browserStore.hide(tab.id);
+    }
+    return;
+  }
+
+  const r = el.getBoundingClientRect();
+  const key = `${r.left}|${r.top}|${r.width}|${r.height}`;
+  if (key === boundsLastKey) return;
+  boundsLastKey = key;
+
+  const b = toLogicalBounds(r, window.devicePixelRatio);
+  if (!b) {
+    void browserStore.hide(tab.id);
+    return;
+  }
+  void browserStore.setBounds(tab.id, b.x, b.y, b.w, b.h).then(() => {
+    void browserStore.show(tab.id);
+  });
+}
+
+// Window-level resize / maximise / fullscreen. Clears the dedupe so the next
+// tick re-pushes the rect.
+function onBrowserWindowResize() {
+  boundsLastKey = '';
+}
+
+// An overlay opening hides the webview; when it closes the anchor's rect has
+// not changed, so the dedupe above would skip the re-show and the browser
+// would stay invisible. The store bumps this counter to force a re-sync.
+watch(() => browserStore.boundsVersion, () => {
+  boundsLastKey = '';
+});
+
+// The single most common trigger: the pane itself resizing (splitter drag,
+  // sidebar toggle, panel collapse).
+watch(
+  () => [isBrowser.value, browserAnchor.value] as const,
+  ([isB, el]) => {
+    boundsLastKey = '';
+    boundsRo?.disconnect();
+    if (isB && el) boundsRo?.observe(el);
+  },
+);
+
 onMounted(() => {
   setTimeout(bindScrollSync, 300);
+  boundsRo = new ResizeObserver(() => {
+    boundsLastKey = '';
+  });
+  window.addEventListener('resize', onBrowserWindowResize);
+  boundsRaf = requestAnimationFrame(browserBoundsTick);
   window.addEventListener('solomd:outline-goto', onOutlineGotoEvent);
   window.addEventListener('solomd:insert-markdown', onInsertMarkdownEvent);
   window.addEventListener('solomd:insert-image-path', onInsertImagePathEvent);
@@ -344,6 +431,13 @@ onMounted(() => {
 onBeforeUnmount(() => {
   syncEditorScroll?.();
   syncPreviewScroll?.();
+  cancelAnimationFrame(boundsRaf);
+  boundsRo?.disconnect();
+  window.removeEventListener('resize', onBrowserWindowResize);
+  // The webview outlives this component (the store owns it and destroys it on
+  // tab close), so hide it on unmount — otherwise it keeps painting over
+  // whatever replaced this pane.
+  if (isBrowser.value && props.tab) void browserStore.hide(props.tab.id);
   window.removeEventListener('solomd:outline-goto', onOutlineGotoEvent);
   window.removeEventListener('solomd:insert-markdown', onInsertMarkdownEvent);
   window.removeEventListener('solomd:insert-image-path', onInsertImagePathEvent);
@@ -457,29 +551,59 @@ function onPreviewSearchEvent(e: Event) {
       'pane-content--distinct': settings.distinctSplitPanes && showEditor && showPreview,
     }"
   >
-    <div class="pane pane--editor" v-if="showEditor && tab">
-      <Editor
-        :key="editorImplementationKey"
-        ref="editorRef"
-        :tab="tab"
-        :focus-mode="settings.focusMode"
-        :typewriter-mode="settings.typewriterMode"
-        :spell-check="settings.spellCheck"
-        @cursor="onCursor"
-        @selection="onSelection"
-      />
+    <!-- Embedded browser tab. Must come FIRST: showEditor/showPreview are
+         both true for a browser tab (it is 'plaintext' with no path), so
+         without this branch it would fall into the editor arm and render an
+         empty CodeMirror over the native webview. -->
+    <div class="pane pane--browser" v-if="isBrowser && tab">
+      <BrowserToolbar :tab="tab" />
+      <!-- The native child webview is positioned over this element, which is
+           why it must always be present and measurable — it is the anchor
+           useBrowserBounds reads its rect from. Never v-if it away. -->
+      <div ref="browserAnchor" class="pane__browser-anchor"></div>
     </div>
-    <div class="pane pane--preview" v-if="showPreview && tab">
-      <Preview
-        ref="previewRef"
-        :source="previewSource"
-        :file-path="tab.filePath"
-        :tab-id="tab.id"
-        @topline="onPreviewTopline"
-      />
-    </div>
+    <template v-else>
+      <div class="pane pane--editor" v-if="showEditor && tab">
+        <Editor
+          :key="editorImplementationKey"
+          ref="editorRef"
+          :tab="tab"
+          :focus-mode="settings.focusMode"
+          :typewriter-mode="settings.typewriterMode"
+          :spell-check="settings.spellCheck"
+          @cursor="onCursor"
+          @selection="onSelection"
+        />
+      </div>
+      <div class="pane pane--preview" v-if="showPreview && tab">
+        <Preview
+          ref="previewRef"
+          :source="previewSource"
+          :file-path="tab.filePath"
+          :tab-id="tab.id"
+          @topline="onPreviewTopline"
+        />
+      </div>
+    </template>
   </div>
 </template>
+
+<style scoped>
+.pane--browser {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.pane__browser-anchor {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* Visible background so the region is obviously "the browser goes here"
+     while the native webview is hidden (overlay open, tab inactive). */
+  background: var(--bg-secondary, #fafafa);
+}
+</style>
 
 <style scoped>
 .pane-content {
