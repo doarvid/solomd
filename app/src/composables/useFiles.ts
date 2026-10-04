@@ -16,6 +16,7 @@ import { openPath as openWithSystemDefault } from '@tauri-apps/plugin-opener';
 import { useI18n } from '../i18n';
 import type { FileReadResult, Tab } from '../types';
 import { isSafPath, fromSafPath, safRead, safWrite, safLaunchPicker } from '../lib/saf-fs';
+import { shouldSaveTab, shouldPromptOnClose } from '../lib/browser-tab-guards';
 import { baseNameOf, fileNameOf, claimImportName, joinInFolder } from '../lib/import-plan';
 import { newFileDirFor, treeSelection } from '../lib/new-file-target';
 
@@ -767,6 +768,11 @@ export function useFiles() {
   }
 
   async function saveTab(tab: Tab, opts: { silent?: boolean } = {}): Promise<boolean> {
+    // 浏览器 tab 没有可保存的内容。必须在这里短路而不是在 saveActive 里：
+    // saveTab 在无 filePath 时会走 saveTabAs，弹一个"另存为"对话框，
+    // 而 saveActive / saveActiveAs / 命令面板的 file.save / file.saveAs
+    // 全都汇到这里。
+    if (!shouldSaveTab(tab)) return true;
     // #222 — the CodeMirror editor syncs doc→tab.content on a 350ms debounce.
     // A save issued inside that window (vim `:w`/`:wq`, a fast Ctrl+S) would
     // read a stale document; for `:wq` the tab then closes and the tail of the
@@ -910,6 +916,9 @@ export function useFiles() {
   async function saveActiveAs() {
     if (tabs.activeTab) await saveTabAs(tabs.activeTab);
   }
+  // 浏览器 tab 的 Ctrl+S / 另存为都会落到 saveTab 上，而 saveTab 在无
+  // filePath 时会走 saveTabAs 弹对话框 —— 所以短路必须发生在 saveTab 里，
+  // 不在 saveActive 里（saveActiveAs 也要挡）。
 
   // #85 — auto-save on window blur. Persist every dirty tab that already has
   // a file path, silently (no per-file toast). Untitled tabs are skipped on
@@ -947,7 +956,7 @@ export function useFiles() {
     // discarded the unsynced tail without the unsaved-changes dialog.
     window.dispatchEvent(new Event('solomd:flush-content-sync'));
     const showUnsavedDialog = getUnsavedDialog();
-    if (tab.content !== tab.savedContent && showUnsavedDialog) {
+    if (shouldPromptOnClose(tab) && showUnsavedDialog) {
       const action = await showUnsavedDialog('tab', tab.fileName, 1);
       if (action === 'save') {
         const ok = await saveTab(tab);

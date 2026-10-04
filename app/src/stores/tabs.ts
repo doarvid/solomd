@@ -5,6 +5,7 @@ import { useTilesStore } from './tiles';
 import { useWritingSessionStore } from './writingSession';
 import { useWindowsStore } from './windows';
 import { stampGoalSetAtIfMissing } from '../composables/useWritingGoals';
+import { shouldCarryAcrossWorkspace } from '../lib/browser-tab-guards';
 
 // Legacy / global key (used when per-workspace tabs is OFF, and as the
 // migration source on first upgrade).
@@ -468,7 +469,10 @@ export const useTabsStore = defineStore('tabs', {
       // any typed text makes them dirty). A blank untitled tab is disposable
       // — not carried — so entering empty workspaces doesn't accumulate
       // empty scratch tabs.
-      const carried = this.tabs.filter((t) => isDirty(t));
+      // 浏览器 tab 也必须跟着走：它永不 dirty，但它的 captureDir 是绝对
+      // 路径、跨工作区仍然有效，而且用户"开着的那几个检索窗口"不该因为
+      // 换了个文件夹就消失（并泄漏原生子 webview）。
+      const carried = this.tabs.filter((t) => shouldCarryAcrossWorkspace(t));
       // The new workspace's remembered tabs (only when session restore is on;
       // otherwise we just scope down to the carried set — a blank-ish slate).
       const restored = settings.restoreSession
