@@ -192,6 +192,7 @@ export const ko: I18n = {
     replaceAll: '모두',
   },
   browser: {
+    capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',
     captureDone: 'Captured {chars} chars, {links} links',

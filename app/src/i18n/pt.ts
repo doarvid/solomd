@@ -194,6 +194,7 @@ export const pt: I18n = {
     replaceAll: 'Tudo',
   },
   browser: {
+    capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',
     captureDone: 'Captured {chars} chars, {links} links',

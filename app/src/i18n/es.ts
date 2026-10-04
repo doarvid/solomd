@@ -192,6 +192,7 @@ export const es: I18n = {
     replaceAll: 'Todo',
   },
   browser: {
+    capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',
     captureDone: 'Captured {chars} chars, {links} links',

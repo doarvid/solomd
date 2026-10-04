@@ -192,6 +192,7 @@ export const uk: I18n = {
     replaceAll: 'Усі',
   },
   browser: {
+    capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',
     captureDone: 'Captured {chars} chars, {links} links',

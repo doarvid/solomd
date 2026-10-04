@@ -14,7 +14,19 @@
   if (window.__solomd) return;
 
   var SENTINEL = 'https://solomd.invalid/capture';
-  var CHUNK = 200000;
+
+  // 每片的大小。
+  //
+  // 曾经是 200000，长对话必超时 —— 那个尺寸的 URL 交给 webview 会被截断，
+  // 截断后的 base64 解不出来，Rust 侧只能静默丢弃，于是分片永远凑不齐。
+  // 32000 留了很大的安全余量，代价只是片数变多（每片之间要让出一帧）。
+  var CHUNK = 32000;
+
+  // 分片之间让出的时间。
+  //
+  // 同一 tick 内连续给 location.href 赋值会被浏览器折叠成一次导航 ——
+  // 那样除了最后一片，其余全部丢失。必须逐片让出。
+  var CHUNK_GAP_MS = 25;
 
   // ---------------------------------------------------------------- 传输
 
@@ -29,13 +41,32 @@
     return btoa(bin);
   }
 
+  function sleep(ms) {
+    return new Promise(function (r) { setTimeout(r, ms); });
+  }
+
+  // 逐片发送，**片与片之间必须让出事件循环**。
   function send(kind, payload) {
-    var enc = toB64(JSON.stringify(payload));
-    var total = Math.max(1, Math.ceil(enc.length / CHUNK));
-    for (var n = 0; n < total; n++) {
-      location.href =
-        SENTINEL + '/' + kind + '/' + n + '/' + total + '#' + enc.slice(n * CHUNK, (n + 1) * CHUNK);
+    var enc;
+    try {
+      enc = toB64(JSON.stringify(payload));
+    } catch (e) {
+      return Promise.resolve();
     }
+    var total = Math.max(1, Math.ceil(enc.length / CHUNK));
+
+    var chain = Promise.resolve();
+    for (var n = 0; n < total; n++) {
+      (function (idx) {
+        chain = chain.then(function () {
+          location.href =
+            SENTINEL + '/' + kind + '/' + idx + '/' + total + '#' +
+            enc.slice(idx * CHUNK, (idx + 1) * CHUNK);
+          return sleep(CHUNK_GAP_MS);
+        });
+      })(n);
+    }
+    return chain;
   }
 
   function fail(message) {
@@ -268,7 +299,7 @@
       if (!convId || !tok) {
         // 没有会话 id 或没登录 —— 只能走 DOM。
         var fb = domFallback();
-        send('capture', {
+        return send('capture', {
           url: location.href,
           title: fb.title,
           text: fb.markdown,
@@ -279,7 +310,7 @@
         return;
       }
 
-      fetch('/api/v0/chat/history_messages?chat_session_id=' + convId, {
+      return fetch('/api/v0/chat/history_messages?chat_session_id=' + convId, {
         headers: {
           authorization: 'Bearer ' + tok,
           'x-client-platform': 'web',
@@ -322,7 +353,7 @@
     _test: { buildMarkdown: buildMarkdown, normalizeUrl: normalizeUrl },
 
     selection: function () {
-      send('selection', {
+      return send('selection', {
         url: location.href,
         title: document.title,
         text: String(window.getSelection() || ''),

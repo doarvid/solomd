@@ -33,11 +33,17 @@ const emptyNode = (text = '') => ({
  */
 function loadScript(overrides = {}) {
   const sandbox = {
-    location: {
-      href: 'https://chat.deepseek.com/a/chat/s/abc',
-      pathname: '/a/chat/s/abc',
-      origin: 'https://chat.deepseek.com',
-    },
+    location: (() => {
+      const hrefs = [];
+      let current = 'https://chat.deepseek.com/a/chat/s/abc';
+      return {
+        get href() { return current; },
+        set href(v) { current = v; hrefs.push(v); },
+        pathname: '/a/chat/s/abc',
+        origin: 'https://chat.deepseek.com',
+        __hrefs: hrefs,
+      };
+    })(),
     document: {
       title: 'DeepSeek',
       querySelector: () => emptyNode('页面文字'),
@@ -47,6 +53,9 @@ function loadScript(overrides = {}) {
     btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
     TextEncoder,
     URL,
+    // send() paces its chunks with setTimeout, so the sandbox needs a clock.
+    setTimeout,
+    clearTimeout,
     fetch: async () => {
       throw new Error('no network in tests');
     },
@@ -235,7 +244,7 @@ function sentPayload(sandbox) {
   return JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
 }
 
-test('capture() with no token falls back to the DOM and still sends', () => {
+test('capture() with no token falls back to the DOM and still sends', async () => {
   const { sandbox, api } = loadScript({
     localStorage: { getItem: () => null },
     document: {
@@ -245,19 +254,75 @@ test('capture() with no token falls back to the DOM and still sends', () => {
       body: {},
     },
   });
-  api.capture();
+  await api.capture();
   const payload = sentPayload(sandbox);
   assert.equal(payload.markdown, '页面文字');
   assert.equal(payload.title, '标题', '标题后缀没有被剥掉');
 });
 
-test('the sentinel URL carries a complete, decodable payload', () => {
+test('the sentinel URL carries a complete, decodable payload', async () => {
   const { sandbox, api } = loadScript();
-  api.capture(); // no token -> DOM path, but the send path is what matters
+  await api.capture(); // no token -> DOM path, but the send path is what matters
   const payload = sentPayload(sandbox);
   // 服务端要求这几个字段始终存在，哪怕为空。
   for (const key of ['url', 'title', 'text', 'links', 'markdown']) {
     assert.ok(key in payload, `payload 缺少字段 ${key}`);
   }
   assert.ok(Array.isArray(payload.links));
+});
+
+// ---------------------------------------------------------------- 分片
+
+test('a large payload is split into ordered chunks, none of them oversized', async () => {
+  // 长对话曾经必超时：片太大，URL 被 webview 截断，截断后的 base64 解不
+  // 出来，Rust 侧只能静默丢弃，分片永远凑不齐。这条盯着片长和序号。
+  const big = '这是一段很长的正文。'.repeat(8000); // ~80k chars -> >1 chunk
+  const { sandbox, api } = loadScript({
+    document: {
+      title: '长对话',
+      querySelector: () => ({ innerText: big, querySelectorAll: () => [] }),
+      body: { innerText: big, querySelectorAll: () => [] },
+    },
+  });
+
+  await api.capture();
+
+  const sent = sandbox.location.__hrefs;
+  assert.ok(sent.length > 1, `长内容应该分片，实际只发了 ${sent.length} 片`);
+
+  const indices = sent.map((h) => Number(h.match(/\/capture\/[a-z]+\/(\d+)\/\d+#/)[1]));
+  const totals = new Set(sent.map((h) => Number(h.match(/\/capture\/[a-z]+\/\d+\/(\d+)#/)[1])));
+  assert.equal(totals.size, 1, '各片声称的 total 不一致');
+  assert.equal([...totals][0], sent.length, 'total 与实际片数不符');
+  assert.deepEqual(
+    indices,
+    Array.from({ length: sent.length }, (_, i) => i),
+    '分片序号不是从 0 起的连续序列 —— 有片丢了或乱序',
+  );
+
+  // 每片的 URL 都要在安全长度内。
+  for (const h of sent) {
+    assert.ok(h.length < 60000, `单片 URL 过长（${h.length}），会被截断`);
+  }
+});
+
+test('chunks reassemble into the original payload byte for byte', async () => {
+  const text = '中文与 emoji 😀 和 %2F + / = 一起出现。'.repeat(3000);
+  const { sandbox, api } = loadScript({
+    document: {
+      title: 't',
+      querySelector: () => ({ innerText: text, querySelectorAll: () => [] }),
+      body: { innerText: text, querySelectorAll: () => [] },
+    },
+  });
+
+  await api.capture();
+
+  const sent = sandbox.location.__hrefs;
+  const parts = sent.map((h) => h.slice(h.indexOf('#') + 1));
+  const joined = parts.join('');
+  const decoded = Buffer.from(joined, 'base64').toString('utf8');
+  const payload = JSON.parse(decoded);
+
+  assert.equal(payload.markdown, text, '分片重组后与原文不一致');
 });

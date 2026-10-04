@@ -193,6 +193,7 @@ export const zh: I18n = {
     replaceAll: '全部',
   },
   browser: {
+    capturingProgress: '正在采集… {got}/{total} 片',
     openPanelHint: '已抓到引用链接 —— 点这里打开「关联连接」面板',
     capturing: '正在采集对话…',
     captureDone: '采集完成：{chars} 字、{links} 条引用',

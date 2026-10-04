@@ -192,6 +192,7 @@ export const pl: I18n = {
     replaceAll: 'Wszystkie',
   },
   browser: {
+    capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',
     captureDone: 'Captured {chars} chars, {links} links',

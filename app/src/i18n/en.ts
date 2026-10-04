@@ -195,6 +195,7 @@ export const en = {
   // the other locales fall back to English via t()'s lookup chain until
   // someone translates them.
   browser: {
+    capturingProgress: 'Capturing… {got}/{total}',
     openPanelHint: 'Links captured — open the Related links panel',
     capturing: 'Capturing chat…',
     captureDone: 'Captured {chars} chars, {links} links',

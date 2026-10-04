@@ -118,7 +118,7 @@ fn accept_chunk(app: &AppHandle, label: &str, url: &tauri::Url) {
     };
     let key = (label.to_string(), kind.clone());
 
-    let joined = {
+    let (joined, received) = {
         let Ok(mut map) = PENDING_CHUNKS.lock() else {
             return;
         };
@@ -131,11 +131,25 @@ fn accept_chunk(app: &AppHandle, label: &str, url: &tauri::Url) {
             slots.resize(total, String::new());
         }
         slots[index] = chunk;
-        if slots.iter().any(|s| s.is_empty()) {
-            return; // 还有空洞，没到齐
+        let got = slots.iter().filter(|s| !s.is_empty()).count();
+        if got < total {
+            (Vec::new(), got)
+        } else {
+            (map.remove(&key).unwrap_or_default(), total)
         }
-        map.remove(&key).unwrap_or_default()
     };
+
+    // 每一片都报进度。长对话有几十片，没有进度的话前端只能靠一个固定
+    // 超时猜"是不是卡住了"，而那个猜测在慢机器上必然误报。
+    let tab_id = label.strip_prefix(LABEL_PREFIX).unwrap_or(label);
+    let _ = app.emit(
+        "browser://capture-progress",
+        serde_json::json!({ "tabId": tab_id, "received": received, "total": total }),
+    );
+
+    if joined.is_empty() {
+        return; // 还有空洞，没到齐
+    }
 
     let flattened: String = joined.concat();
     if flattened.len() > MAX_TOTAL_BYTES {
@@ -154,7 +168,6 @@ fn accept_chunk(app: &AppHandle, label: &str, url: &tauri::Url) {
         "browser://capture"
     };
     // tabId 用裸 id，和前端 stores/browser.ts 的约定一致。
-    let tab_id = label.strip_prefix(LABEL_PREFIX).unwrap_or(label);
     let _ = app.emit(
         event,
         serde_json::json!({ "tabId": tab_id, "payload": payload }),

@@ -106,7 +106,25 @@ let prevSeen: TabLike[] = [];
  * 是还在跑还是卡住了。
  */
 let captureTimer: ReturnType<typeof setTimeout> | null = null;
-const CAPTURE_TIMEOUT_MS = 20_000;
+const CAPTURE_TIMEOUT_MS = 60_000;
+
+/**
+ * 重设采集看门狗。
+ *
+ * 开始采集时调一次，之后**每收到一片都再调一次**。这样超时只会在"整整
+ * 一分钟一片都没来"时触发 —— 真正的卡死。
+ *
+ * 固定超时会误报：长对话有几十片、每片之间还要让出 25ms，几十秒是正常
+ * 的，而"采集超时 —— 页面可能没加载完"这样的提示会把用户引向完全错误的
+ * 方向（他们刚看到页面明明好好的）。
+ */
+function resetCaptureWatchdog(store: { finishCapture: (t: string, p: null, f?: string) => void }) {
+  if (captureTimer) clearTimeout(captureTimer);
+  captureTimer = setTimeout(() => {
+    captureTimer = null;
+    store.finishCapture('', null, tr('browser.captureTimeout'));
+  }, CAPTURE_TIMEOUT_MS);
+}
 
 /**
  * t() 的惰性取用。
@@ -151,6 +169,18 @@ export const useBrowserStore = defineStore('browser', {
       });
 
       unlisten.push(
+        await listen<{ tabId: string; received: number; total: number }>(
+          'browser://capture-progress',
+          (e) => {
+            // 每一片都重置看门狗 —— 超时只应该意味着"真的没动静了"。
+            if (!this.capturing) return;
+            resetCaptureWatchdog(this);
+            this.notice = tr('browser.capturingProgress', {
+              got: String(e.payload.received),
+              total: String(e.payload.total),
+            });
+          },
+        ),
         await listen<{ tabId: string; payload: CapturePayload }>('browser://capture', (e) => {
           const tabId = stripLabel(e.payload.tabId);
           this.finishCapture(tabId, e.payload.payload);
@@ -238,14 +268,7 @@ export const useBrowserStore = defineStore('browser', {
       this.capturing = true;
       this.notice = tr('browser.capturing');
 
-      if (captureTimer) clearTimeout(captureTimer);
-      captureTimer = setTimeout(() => {
-        captureTimer = null;
-        if (!this.capturing) return;
-        this.capturing = false;
-        this.notice = tr('browser.captureTimeout');
-        useToastsStore().error(tr('browser.captureTimeout'));
-      }, CAPTURE_TIMEOUT_MS);
+      resetCaptureWatchdog(this);
 
       try {
         await invoke('browser_request_capture', { tabId });
