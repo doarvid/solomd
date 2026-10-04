@@ -249,6 +249,7 @@ pub fn render_reference(
     captured: &str,
     via: &str,
     body: &str,
+    source: Option<&str>,
 ) -> String {
     let domain = tauri::Url::parse(url)
         .ok()
@@ -263,17 +264,38 @@ pub fn render_reference(
     }
     s.push_str(&format!("captured: {captured}\n"));
     s.push_str(&format!("via: {via}\n"));
+    // 指向来源笔记。**写成 wikilink**，反向链接是靠 workspace index 扫
+    // 正文/frontmatter 里的 `[[...]]` 建立的 —— 写个普通字符串不会有任何
+    // 关联，用户在来源笔记里看不到"它引用的东西都采过哪些"。
+    if let Some(src) = source.filter(|v| !v.trim().is_empty()) {
+        s.push_str(&format!("source: {}\n", yaml_scalar(&format!("[[{}]]", src.trim()))));
+    }
     s.push_str("---\n\n");
+    if let Some(src) = source.filter(|v| !v.trim().is_empty()) {
+        // 正文里再放一条：frontmatter 里的 wikilink 不一定会被所有渲染器
+        // 显示成可点的链接，正文这条保证它在阅读视图里看得见。
+        s.push_str(&format!("> 采集自 [[{}]]\n\n", src.trim()));
+    }
     s.push_str(body.trim());
     s.push('\n');
     s
 }
 
-/// YAML 标量：含特殊字符时加引号，避免标题里的 `:` 把 frontmatter 弄坏。
+/// YAML 标量：需要时加引号。
+///
+/// 判据是 YAML 的**指示符**集合，不只是"看起来含特殊字符"。踩过的坑：
+/// `[[某次对话]]` 看着挺正常，但以 `[` 开头在 YAML 里是流式序列的语法，
+/// 于是 `source: [[x]]` 会被解析成嵌套数组而不是字符串 —— wikilink 就
+/// 永远找不到了。同理还有 `{`、`*`、`&` 等。
 fn yaml_scalar(s: &str) -> String {
+    // YAML 规范里不能作为普通标量开头的指示符。
+    const INDICATORS: [char; 18] = [
+        '[', ']', '{', '}', ',', '&', '*', '#', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`',
+    ];
     let needs_quotes = s.is_empty()
         || s.chars().any(|c| matches!(c, ':' | '#' | '"' | '\'' | '\n' | '\r'))
-        || s.starts_with([' ', '-', '?', '*', '&', '!', '|', '>', '@', '`'])
+        || s.starts_with(INDICATORS)
+        || s.starts_with(' ')
         || s.ends_with(' ');
     if needs_quotes {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -333,6 +355,7 @@ pub async fn capture_fetch_page(
     dir: String,
     url: String,
     fallback_title: String,
+    source_title: Option<String>,
 ) -> Result<FetchOutcome, String> {
     let dir = PathBuf::from(dir);
 
@@ -340,7 +363,7 @@ pub async fn capture_fetch_page(
     // 首页 DOM 是导航 + 文件列表 + 统计，readability 在上面抽不出像样的
     // 东西。直接读 README 既准又省。
     if let Some((owner, repo)) = super::github_readme::parse_repo_url(&url) {
-        return capture_github_repo(&dir, &url, &owner, &repo).await;
+        return capture_github_repo(&dir, &url, &owner, &repo, source_title.as_deref()).await;
     }
 
     let captured = chrono::Local::now().to_rfc3339();
@@ -356,7 +379,14 @@ pub async fn capture_fetch_page(
             // 抓不到就落一个存根：用户至少能在列表里看到"这条存在但没抓到"，
             // 而不是它凭空消失。
             let ext = webdoc::stub(&url, &fallback_title);
-            let body = render_reference(&ext.title, &url, &captured, ext.via.as_str(), "");
+            let body = render_reference(
+                &ext.title,
+                &url,
+                &captured,
+                ext.via.as_str(),
+                "",
+                source_title.as_deref(),
+            );
             let path = write_note(&dir, Some("refs"), &ext.title, &body)?;
                     return Ok(FetchOutcome {
                 url,
@@ -392,7 +422,16 @@ pub async fn capture_fetch_page(
         ),
     };
 
-    let path = write_reference_with_assets(&dir, &title, &final_url, &captured, &via, &markdown).await?;
+    let path = write_reference_with_assets(
+        &dir,
+        &title,
+        &final_url,
+        &captured,
+        &via,
+        &markdown,
+        source_title.as_deref(),
+    )
+    .await?;
 
     Ok(FetchOutcome {
         url: final_url,
@@ -412,6 +451,7 @@ async fn capture_github_repo(
     url: &str,
     owner: &str,
     repo: &str,
+    source_title: Option<&str>,
 ) -> Result<FetchOutcome, String> {
     let captured = chrono::Local::now().to_rfc3339();
     let title = format!("{owner}__{repo}");
@@ -427,6 +467,7 @@ async fn capture_github_repo(
                 &captured,
                 webdoc::Via::Readme.as_str(),
                 &markdown,
+                source_title,
             )
             .await?;
             Ok(FetchOutcome {
@@ -439,7 +480,14 @@ async fn capture_github_repo(
         }
         Err(e) => {
             // 限流、没 README、网络失败 —— 一律落存根，用户至少看得到是哪条。
-            let body = render_reference(&title, url, &captured, webdoc::Via::Stub.as_str(), "");
+            let body = render_reference(
+                &title,
+                url,
+                &captured,
+                webdoc::Via::Stub.as_str(),
+                "",
+                source_title,
+            );
             let p = write_note(dir, Some("refs"), &title, &body)?;
             Ok(FetchOutcome {
                 url: url.to_string(),
@@ -465,6 +513,7 @@ async fn write_reference_with_assets(
     captured: &str,
     via: &str,
     markdown: &str,
+    source: Option<&str>,
 ) -> Result<PathBuf, String> {
     let refs = dir.join("refs");
     std::fs::create_dir_all(&refs).map_err(|e| format!("创建目录失败 {}: {e}", refs.display()))?;
@@ -477,7 +526,7 @@ async fn write_reference_with_assets(
 
     let (localised, _report) = super::page_assets::localise_images(&refs, &stem, markdown).await;
 
-    let body = render_reference(title, url, captured, via, &localised);
+    let body = render_reference(title, url, captured, via, &localised, source);
     std::fs::write(&path, body).map_err(|e| format!("写入失败 {}: {e}", path.display()))?;
     Ok(path)
 }
@@ -604,6 +653,17 @@ mod tests {
     }
 
     #[test]
+    fn yaml_scalar_quotes_yaml_indicators() {
+        // 以指示符开头的值在 YAML 里是语法，不是文本：`[[x]]` 会被解析成
+        // 嵌套数组。wikilink 正好长这样，所以这条必须引号包起来。
+        assert_eq!(yaml_scalar("[[某次对话]]"), "\"[[某次对话]]\"");
+        assert_eq!(yaml_scalar("{a: b}"), "\"{a: b}\"");
+        assert_eq!(yaml_scalar("*bold*"), "\"*bold*\"");
+        // 指示符出现在中间是无害的。
+        assert_eq!(yaml_scalar("A [[x]] B"), "A [[x]] B");
+    }
+
+    #[test]
     fn render_conversation_has_a_parseable_frontmatter() {
         let md = render_conversation("标题", "https://chat.deepseek.com/a/chat/s/1", "deepseek-chat", "2026-10-04T00:00:00Z", "正文");
         assert!(md.starts_with("---\n"));
@@ -612,6 +672,36 @@ mod tests {
             Some("https://chat.deepseek.com/a/chat/s/1")
         );
         assert!(md.contains("正文"));
+    }
+
+    #[test]
+    fn a_reference_without_a_source_has_no_link() {
+        let md = render_reference("网页", "https://x.example/a", "2026-01-01T00:00:00Z", "readability", "正文", None);
+        assert!(!md.contains("source:"), "无来源时不该写 source 字段");
+        assert!(!md.contains("[["), "无来源时不该出现 wikilink");
+    }
+
+    #[test]
+    fn a_reference_links_back_to_its_source_note() {
+        // 反向链接靠 workspace index 扫 `[[...]]` 建立 —— 写个普通字符串
+        // 不会在来源笔记里产生任何关联。
+        let md = render_reference(
+            "网页",
+            "https://x.example/a",
+            "2026-01-01T00:00:00Z",
+            "readability",
+            "正文",
+            Some("某次对话"),
+        );
+        assert!(md.contains("source: \"[[某次对话]]\""), "frontmatter 里没有 wikilink:\n{md}");
+        assert!(md.contains("> 采集自 [[某次对话]]"), "正文里没有可见的链接:\n{md}");
+    }
+
+    #[test]
+    fn a_blank_source_is_treated_as_no_source() {
+        // 空标题会渲染出 `[[]]`，那是个指向不存在笔记的悬空链接。
+        let md = render_reference("网页", "https://x.example/a", "t", "stub", "", Some("   "));
+        assert!(!md.contains("[["), "空白来源不该产生 wikilink");
     }
 
     #[test]

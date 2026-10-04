@@ -387,8 +387,19 @@ export const useBrowserStore = defineStore('browser', {
       }
     },
 
-    /** 采集单个引用链接：抓取 → 抽取 → 落盘 → 刷新索引。 */
-    async captureLink(dir: string, url: string, title: string): Promise<FetchOutcome | null> {
+    /**
+     * 采集单个引用链接：抓取 → 抽取 → 落盘 → 刷新索引。
+     *
+     * `sourceTitle` 是这条链接**来自哪篇笔记**（对话标题，或当前笔记名）。
+     * 写进引用页的 frontmatter 与正文，作为 `[[wikilink]]` —— 来源笔记的
+     * 反向链接面板会因此自动列出它引用的东西采过哪些。
+     */
+    async captureLink(
+      dir: string,
+      url: string,
+      title: string,
+      sourceTitle?: string,
+    ): Promise<FetchOutcome | null> {
       const key = await invoke<string>('capture_normalize_url', { url }).catch(() => url);
       this.linkStatus = { ...this.linkStatus, [key]: 'running' };
       try {
@@ -396,6 +407,7 @@ export const useBrowserStore = defineStore('browser', {
           dir,
           url,
           fallbackTitle: title,
+          sourceTitle: sourceTitle ?? null,
         });
         const failed = !!outcome.error && outcome.via === 'stub';
         this.linkStatus = { ...this.linkStatus, [key]: failed ? 'failed' : 'done' };

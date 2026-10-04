@@ -115,16 +115,30 @@ function statusOf(row: Row): 'running' | 'done' | 'failed' | 'captured' | 'idle'
   return s === 'done' ? 'done' : 'idle';
 }
 
+/**
+ * 来源笔记的**文件名主干**。
+ *
+ * wikilink 指向的是文件名而不是路径：`[[某次对话]]`，不是
+ * `[[/Users/x/vault/某次对话]]`。浏览器 tab 的标题就是保存时的文件名，
+ * 笔记 tab 的 fileName 带扩展名，要去掉。
+ */
+const sourceStem = computed(() => {
+  const s = source.value;
+  if (!s) return undefined;
+  if (s.kind === 'browser') return s.title;
+  return s.title.replace(/\.(md|markdown|mdown|mkd|txt)$/i, '');
+});
+
 async function captureOne(row: Row) {
   if (!dir.value) return;
-  await browser.captureLink(dir.value, row.href, row.text);
+  await browser.captureLink(dir.value, row.href, row.text, sourceStem.value);
 }
 
 async function captureAll() {
   if (!dir.value) return;
   // 串行：并发抓取会同时打一批站点，既容易触发反爬，也让逐条状态无法阅读。
   for (const row of [...uncaptured.value]) {
-    await browser.captureLink(dir.value, row.href, row.text);
+    await browser.captureLink(dir.value, row.href, row.text, sourceStem.value);
   }
 }
 
