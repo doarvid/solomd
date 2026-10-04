@@ -20,7 +20,6 @@ const emit = defineEmits<{ (e: 'captured'): void }>();
 const browser = useBrowserStore();
 const { t } = useI18n();
 const address = ref(props.tab.url ?? '');
-const busy = ref(false);
 
 // The tab's url is the last address we navigated to; keep the field in sync
 // when it changes from elsewhere.
@@ -52,14 +51,17 @@ async function go() {
   await browser.navigate(props.tab.id, url);
 }
 
+/**
+ * 采集对话。
+ *
+ * 不能在这里用局部 loading 标志：`requestCapture` 只是在页面里 eval 一下
+ * 就返回，真正的数据随后才经事件到达。用局部队列会让按钮瞬间复位，用户
+ * 以为没点上（这正是第一版的问题）。改成由 store 的 `capturing` 驱动，
+ * 它一直亮到回传到达或看门狗超时。
+ */
 async function capture() {
-  busy.value = true;
-  try {
-    await browser.requestCapture(props.tab.id);
-    emit('captured');
-  } finally {
-    busy.value = false;
-  }
+  await browser.requestCapture(props.tab.id);
+  emit('captured');
 }
 
 /**
@@ -84,7 +86,13 @@ async function save() {
       :placeholder="t('browser.addressPlaceholder')"
       @keydown.enter.prevent="go"
     />
-    <DsButton class="browser-toolbar__btn" size="sm" :loading="busy" @click="capture">
+    <DsButton
+      class="browser-toolbar__btn"
+      size="sm"
+      :loading="browser.capturing"
+      :disabled="browser.capturing"
+      @click="capture"
+    >
       {{ t('browser.capture') }}
     </DsButton>
     <DsButton
@@ -96,6 +104,9 @@ async function save() {
     >
       {{ t('browser.save') }}
     </DsButton>
+    <span v-if="browser.notice" class="browser-toolbar__notice" :title="browser.notice">
+      {{ browser.notice }}
+    </span>
   </div>
 </template>
 
@@ -114,5 +125,16 @@ async function save() {
 }
 .browser-toolbar__btn {
   flex: 0 0 auto;
+}
+/* 采集/保存的结果就地显示在工具栏上 —— 侧栏面板可能根本没打开，
+   只把提示放在那里等于没有提示。 */
+.browser-toolbar__notice {
+  flex: 0 0 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-faint);
 }
 </style>

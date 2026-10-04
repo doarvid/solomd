@@ -55,8 +55,11 @@ export const useToastsStore = defineStore('toasts', {
     error(message: string, timeout = 5000) {
       return this.push(message, 'error', timeout);
     },
-    info(message: string, timeout = 2800) {
-      return this.push(message, 'info', timeout);
+    // `onClick` mirrors success(): an info toast is the right shape for
+    // "here is something you may want to look at", and that is only useful
+    // if acting on it is one click away.
+    info(message: string, timeout = 2800, onClick?: () => void) {
+      return this.push(message, 'info', timeout, onClick);
     },
     warning(message: string, timeout = 3500) {
       return this.push(message, 'warning', timeout);

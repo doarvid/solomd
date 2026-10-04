@@ -14,6 +14,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { useTabsStore } from './tabs';
+import { useToastsStore } from './toasts';
+import { useSettingsStore } from './settings';
+import { useI18n } from '../i18n';
 import { diffBrowserTabs, type TabLike } from '../lib/browser-lifecycle.ts';
 
 export interface CaptureLink {
@@ -71,6 +74,15 @@ interface BrowserState {
   linkStatus: Record<string, LinkStatus>;
   /** 保存对话的进行状态：null 表示没在保存。 */
   saving: boolean;
+  /**
+   * 正在等待采集结果。
+   *
+   * 采集是**异步**的：`browser_request_capture` 只是在页面里 eval 一下，
+   * 立刻返回；真正的数据随后经 `browser://capture` 事件到达。所以按钮
+   * 不能靠 invoke 的返回判断完成 —— 早期版本这么做，结果按钮毫无反应，
+   * 用户以为没点上。
+   */
+  capturing: boolean;
   /** 上一次操作的提示，供面板显示。 */
   notice: string;
 }
@@ -85,6 +97,27 @@ let stopWatch: (() => void) | null = null;
  * vue-tsc 下报 excess property。
  */
 let prevSeen: TabLike[] = [];
+
+/**
+ * 采集看门狗。
+ *
+ * 采集靠事件回传，事件可能永远不来（页面里没注入成功、页面被导航走了、
+ * 接口超时后 DOM 兜底也失败）。没有这个的话按钮会一直转，而用户不知道
+ * 是还在跑还是卡住了。
+ */
+let captureTimer: ReturnType<typeof setTimeout> | null = null;
+const CAPTURE_TIMEOUT_MS = 20_000;
+
+/**
+ * t() 的惰性取用。
+ *
+ * 不能在模块顶层调 `useI18n()` —— 它会建 computed 并在调用时读 settings
+ * store，而 store 模块在 pinia 激活之前就被求值了。放在函数体里、每次
+ * 现取，代价只是每处调用建一个 computed，相对于一次用户操作可以忽略。
+ */
+function tr(key: string, params?: Record<string, string | number>): string {
+  return useI18n().t(key, params);
+}
 
 /** Rust 发来的 tabId 已经是裸 id，但历史事件可能带 label 前缀，统一剥掉。 */
 function stripLabel(tabId: string): string {
@@ -101,6 +134,7 @@ export const useBrowserStore = defineStore('browser', {
     capturedUrls: [],
     linkStatus: {},
     saving: false,
+    capturing: false,
     notice: '',
   }),
 
@@ -119,11 +153,12 @@ export const useBrowserStore = defineStore('browser', {
       unlisten.push(
         await listen<{ tabId: string; payload: CapturePayload }>('browser://capture', (e) => {
           const tabId = stripLabel(e.payload.tabId);
-          this.pending = { ...this.pending, [tabId]: e.payload.payload };
+          this.finishCapture(tabId, e.payload.payload);
         }),
         await listen<{ tabId: string; payload: CapturePayload }>('browser://selection', (e) => {
           const tabId = stripLabel(e.payload.tabId);
           this.selection = { ...this.selection, [tabId]: e.payload.payload.text };
+          useToastsStore().success(tr('browser.selectionDone', { n: String(e.payload.payload.text.length) }));
         }),
       );
 
@@ -199,7 +234,60 @@ export const useBrowserStore = defineStore('browser', {
     },
 
     async requestCapture(tabId: string) {
-      await invoke('browser_request_capture', { tabId });
+      if (this.capturing) return;
+      this.capturing = true;
+      this.notice = tr('browser.capturing');
+
+      if (captureTimer) clearTimeout(captureTimer);
+      captureTimer = setTimeout(() => {
+        captureTimer = null;
+        if (!this.capturing) return;
+        this.capturing = false;
+        this.notice = tr('browser.captureTimeout');
+        useToastsStore().error(tr('browser.captureTimeout'));
+      }, CAPTURE_TIMEOUT_MS);
+
+      try {
+        await invoke('browser_request_capture', { tabId });
+      } catch (e) {
+        this.finishCapture(tabId, null, String(e));
+      }
+    },
+
+    /** 采集回传到达（或失败）时收尾：停表、报结果。 */
+    finishCapture(tabId: string, payload: CapturePayload | null, failure?: string) {
+      if (captureTimer) {
+        clearTimeout(captureTimer);
+        captureTimer = null;
+      }
+      this.capturing = false;
+
+      if (failure || !payload) {
+        this.notice = failure ?? tr('browser.captureFailed');
+        useToastsStore().error(this.notice);
+        return;
+      }
+
+      this.pending = { ...this.pending, [tabId]: payload };
+      this.notice = tr('browser.captureDone', {
+        chars: String((payload.markdown || payload.text || '').length),
+        links: String(payload.links.length),
+      });
+      // 接口不可用时脚本会带回 error —— 数据仍然可用（DOM 兜底），
+      // 但用户要知道质量降级了。
+      if (payload.error) useToastsStore().warning(payload.error);
+      else useToastsStore().success(this.notice);
+
+      // 抓到了引用但面板没开 —— 那这些链接在界面上根本看不见，用户会
+      // 以为"采集引用没实现"。给一个可点的提示直接把它打开。
+      if (payload.links.length > 0) {
+        const settings = useSettingsStore();
+        if (!settings.showRelatedLinks) {
+          useToastsStore().info(tr('browser.openPanelHint'), 6000, () => {
+            settings.toggleRelatedLinks();
+          });
+        }
+      }
     },
 
     async requestSelection(tabId: string) {
@@ -238,17 +326,20 @@ export const useBrowserStore = defineStore('browser', {
       const tab = useTabsStore().tabs.find((t) => t.id === tabId);
       const payload = this.pending[tabId];
       if (!tab?.captureDir) {
-        this.notice = '这个标签页没有关联目录';
+        this.notice = tr('browser.errNoDir');
+        useToastsStore().error(this.notice);
         return;
       }
       if (!payload) {
-        this.notice = '还没有可保存的内容 —— 先点「采集对话」';
+        this.notice = tr('browser.errNothingToSave');
+        useToastsStore().warning(this.notice);
         return;
       }
 
       const body = (payload.markdown || payload.text || '').trim();
       if (!body) {
-        this.notice = '采集到的内容是空的，没有保存';
+        this.notice = tr('browser.errEmpty');
+        useToastsStore().error(this.notice);
         return;
       }
 
@@ -261,11 +352,13 @@ export const useBrowserStore = defineStore('browser', {
           model: payload.model ?? '',
           markdown: body,
         });
-        this.notice = `已保存到 ${path.split('/').pop()}`;
+        this.notice = tr('browser.saveDone', { name: path.split('/').pop() ?? '' });
+        useToastsStore().success(this.notice);
         // 对话也有 url，会进索引 —— 刷新一次让状态一致。
         await this.refreshCaptured(tab.captureDir);
       } catch (e) {
-        this.notice = `保存失败：${String(e)}`;
+        this.notice = tr('browser.saveFailed', { error: String(e) });
+        useToastsStore().error(this.notice);
       } finally {
         this.saving = false;
       }
@@ -281,16 +374,20 @@ export const useBrowserStore = defineStore('browser', {
           url,
           fallbackTitle: title,
         });
-        this.linkStatus = {
-          ...this.linkStatus,
-          [key]: outcome.error && outcome.via === 'stub' ? 'failed' : 'done',
-        };
+        const failed = !!outcome.error && outcome.via === 'stub';
+        this.linkStatus = { ...this.linkStatus, [key]: failed ? 'failed' : 'done' };
         // 抓完立刻重扫，否则这条仍显示"未采集"。
         await this.refreshCaptured(dir);
+        if (failed) {
+          useToastsStore().warning(tr('browser.linkFailedToast', { title: outcome.title }));
+        } else {
+          useToastsStore().success(tr('browser.linkDoneToast', { title: outcome.title }));
+        }
         return outcome;
       } catch (e) {
         this.linkStatus = { ...this.linkStatus, [key]: 'failed' };
-        this.notice = `采集失败：${String(e)}`;
+        this.notice = tr('browser.captureLinkFailed', { error: String(e) });
+        useToastsStore().error(this.notice);
         return null;
       }
     },
