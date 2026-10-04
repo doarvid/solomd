@@ -353,36 +353,54 @@ watch(() => props.tab?.id, async () => {
 let boundsRaf = 0;
 let boundsLastKey = '';
 let boundsRo: ResizeObserver | null = null;
+/**
+ * The browser tab this pane believes is on screen, or null.
+ *
+ * Tracked explicitly so the tick can hide whatever it previously showed when
+ * the pane stops displaying a browser tab — the component is re-propped
+ * rather than remounted on a tab switch, so unmount hooks never run.
+ */
+let paneVisibleTabId: string | null = null;
 
 function browserBoundsTick() {
   boundsRaf = requestAnimationFrame(browserBoundsTick);
   const el = browserAnchor.value;
   const tab = props.tab;
-  if (!el || !isBrowser.value || !tab) return;
 
-  // Only the focused pane's webview may be visible; a background pane's would
-  // paint over whatever the user is actually looking at.
-  if (!isFocused.value) {
-    if (boundsLastKey !== 'hidden') {
-      boundsLastKey = 'hidden';
-      void browserStore.hide(tab.id);
+  // Desired visibility. Switching to a file tab makes isBrowser false and
+  // removes the anchor from the DOM — but PaneHost renders PaneContent with
+  // NO :key, so this component is not unmounted, only re-propped. Nothing
+  // else would ever hide the webview and it would keep painting over the
+  // newly-active tab. So visibility is decided here from scratch every frame
+  // rather than being a side effect of measuring.
+  const wantsVisible = !!tab && isBrowser.value && isFocused.value && !!el;
+  const rect = wantsVisible && el ? el.getBoundingClientRect() : null;
+  const bounds = rect ? toLogicalBounds(rect, window.devicePixelRatio) : null;
+  const nextVisible = bounds && tab ? tab.id : null;
+
+  if (paneVisibleTabId !== nextVisible) {
+    if (paneVisibleTabId) void browserStore.hide(paneVisibleTabId);
+    paneVisibleTabId = nextVisible;
+    if (nextVisible && bounds && tab) {
+      // Geometry BEFORE show: the webview is created at 0x0 and would
+      // otherwise flash at a stale position on its first appearance.
+      void browserStore.setBounds(tab.id, bounds.x, bounds.y, bounds.w, bounds.h).then(() => {
+        void browserStore.show(tab.id);
+      });
+      boundsLastKey = `${bounds.x}|${bounds.y}|${bounds.w}|${bounds.h}`;
     }
     return;
   }
 
-  const r = el.getBoundingClientRect();
-  const key = `${r.left}|${r.top}|${r.width}|${r.height}`;
-  if (key === boundsLastKey) return;
-  boundsLastKey = key;
-
-  const b = toLogicalBounds(r, window.devicePixelRatio);
-  if (!b) {
-    void browserStore.hide(tab.id);
+  if (!bounds || !tab) {
+    boundsLastKey = '';
     return;
   }
-  void browserStore.setBounds(tab.id, b.x, b.y, b.w, b.h).then(() => {
-    void browserStore.show(tab.id);
-  });
+
+  const key = `${bounds.x}|${bounds.y}|${bounds.w}|${bounds.h}`;
+  if (key === boundsLastKey) return;
+  boundsLastKey = key;
+  void browserStore.setBounds(tab.id, bounds.x, bounds.y, bounds.w, bounds.h);
 }
 
 // Window-level resize / maximise / fullscreen. Clears the dedupe so the next
@@ -437,7 +455,10 @@ onBeforeUnmount(() => {
   // The webview outlives this component (the store owns it and destroys it on
   // tab close), so hide it on unmount — otherwise it keeps painting over
   // whatever replaced this pane.
-  if (isBrowser.value && props.tab) void browserStore.hide(props.tab.id);
+  if (paneVisibleTabId) {
+    void browserStore.hide(paneVisibleTabId);
+    paneVisibleTabId = null;
+  }
   window.removeEventListener('solomd:outline-goto', onOutlineGotoEvent);
   window.removeEventListener('solomd:insert-markdown', onInsertMarkdownEvent);
   window.removeEventListener('solomd:insert-image-path', onInsertImagePathEvent);
