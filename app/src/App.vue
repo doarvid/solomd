@@ -1157,7 +1157,28 @@ onMounted(async () => {
     (window as any).__p0Destroy = async () => {
       await invoke('browser_destroy', { tabId: 'p0' });
     };
+    // TEMP — closes the loop on the capture channel. Without this there is no
+    // way to tell "the injected script ran" apart from "the payload actually
+    // survived the sentinel-URL round trip": the Rust side reassembles
+    // silently and nothing else is listening yet. Removed in P2 when the
+    // capture panel consumes these events for real.
+    void listen<{ tabId: string; payload: { url: string; title: string; text: string; links: { href: string; text: string }[] } }>(
+      'browser://capture',
+      (e) => {
+        const p = e.payload.payload;
+        console.log(
+          `[p0] CAPTURE RECEIVED  tab=${e.payload.tabId}  title=${JSON.stringify(p.title)}\n` +
+            `  text: ${p.text.length} chars\n` +
+            `  links: ${p.links.length}\n` +
+            (p.links[0] ? `  first: ${p.links[0].href}\n` : ''),
+        );
+      },
+    );
+    void listen<{ tabId: string; payload: { text: string } }>('browser://selection', (e) => {
+      console.log(`[p0] SELECTION RECEIVED  ${e.payload.payload.text.length} chars`);
+    });
     console.log('[p0] __p0OpenBrowser / __p0Nav / __p0Bounds / __p0Capture / __p0Destroy ready');
+    console.log('[p0] listening on browser://capture and browser://selection');
   }
   // #153 (mobile) — Android's WebView reports env(safe-area-inset-top) as 0
   // under forced edge-to-edge, so the toolbar rendered under the status bar
