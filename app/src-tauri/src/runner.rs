@@ -114,6 +114,23 @@ mod recipe_runner;
 #[path = "cookbook.rs"]
 mod cookbook;
 
+// Embedded browser (知识检索入口). Same dual-compilation trick as the modules
+// above: main.rs drives the desktop binary through runner.rs, so the command
+// list in this file needs `browser` in the *bin* compilation root too.
+// Declaring it only in lib.rs made every browser_create call fail with
+// "command not found" — lib.rs's run() is the mobile entry point.
+//
+// browser.rs refers to its types as `super::browser_types` (not
+// `crate::browser_types`) precisely so the path resolves in both roots.
+#[path = "browser_types.rs"]
+mod browser_types;
+#[cfg(desktop)]
+#[path = "browser.rs"]
+mod browser;
+#[cfg(mobile)]
+#[path = "browser_mobile.rs"]
+mod browser;
+
 // v2.4 — integrations panel (CLI status, MCP path, AI-client config
 // discovery) + v4.4.5 MCP auto-install (detect_ai_clients / inject_mcp /
 // remove_mcp). Was historically only declared in lib.rs (the mobile entry
@@ -1057,6 +1074,20 @@ pub fn run_with(initial_file: Option<String>) {
             cookbook::cookbook_list,
             cookbook::cookbook_get,
             cookbook::cookbook_install,
+            // Embedded browser. This list — not the one in lib.rs — is the
+            // desktop binary's: main.rs calls `runner::run_with`, so lib.rs's
+            // `run()` (and its handler list) is the mobile entry point only.
+            // Registering these there and not here is why `browser_create`
+            // came back "command not found" on macOS.
+            browser::browser_create,
+            browser::browser_set_bounds,
+            browser::browser_show,
+            browser::browser_hide,
+            browser::browser_navigate,
+            browser::browser_destroy,
+            browser::browser_request_capture,
+            browser::browser_request_selection,
+            browser::browser_platform_supported,
         ])
         .on_menu_event(|app_handle, event| {
             let id = event.id().0.clone();
@@ -1123,6 +1154,25 @@ pub fn run_with(initial_file: Option<String>) {
             #[cfg(debug_assertions)]
             {
                 dev_bridge::spawn(app.handle().clone());
+            }
+
+            // Debug builds: open devtools shortly after launch.
+            //
+            // Deferred rather than called inline — at setup() the WKWebView is
+            // not initialised yet and the call silently no-ops. This app also
+            // builds its own menu (replacing Tauri's default, which is where
+            // ⌥⌘I normally lives), so View → Toggle Developer Tools is the
+            // manual fallback.
+            //
+            // This lives here and not in lib.rs: on desktop main.rs calls
+            // `runner::run_with`, so lib.rs's setup never runs.
+            #[cfg(all(debug_assertions, not(any(target_os = "android", target_os = "ios"))))]
+            if let Some(win) = app.get_webview_window("main") {
+                let win_dt = win.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                    win_dt.open_devtools();
+                });
             }
 
             // v4.0 Pillar 2 — start the cron-trigger loop. Sleeps until

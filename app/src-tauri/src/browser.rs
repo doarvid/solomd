@@ -38,7 +38,11 @@ use tauri::{
     webview::WebviewBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl,
 };
 
-use crate::browser_types::CapturePayload;
+// `super::`, not `crate::`: this file is compiled into two roots (the lib via
+// lib.rs, the bin via runner.rs's #[path] declaration). `super::browser_types`
+// resolves to the crate root in both; `crate::browser_types` would only work
+// in one.
+use super::browser_types::CapturePayload;
 
 /// 活着的子 webview，按前端 tab id 索引。
 static WEBVIEWS: Lazy<Mutex<HashMap<String, tauri::Webview>>> =
