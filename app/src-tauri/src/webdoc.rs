@@ -24,6 +24,8 @@ pub enum Via {
     Selector,
     /// Readability 抽的。
     Readability,
+    /// GitHub 仓库：直接读的 README，没有做正文抽取。
+    Readme,
     /// 用户在浏览器里手动选中的。
     Selection,
     /// 只存了标题和链接，没有正文。
@@ -35,6 +37,7 @@ impl Via {
         match self {
             Via::Selector => "selector",
             Via::Readability => "readability",
+            Via::Readme => "readme",
             Via::Selection => "selection",
             Via::Stub => "stub",
         }

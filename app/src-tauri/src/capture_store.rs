@@ -335,6 +335,14 @@ pub async fn capture_fetch_page(
     fallback_title: String,
 ) -> Result<FetchOutcome, String> {
     let dir = PathBuf::from(dir);
+
+    // GitHub 仓库页单独走一条路：那个页面真正有价值的就是 README，而
+    // 首页 DOM 是导航 + 文件列表 + 统计，readability 在上面抽不出像样的
+    // 东西。直接读 README 既准又省。
+    if let Some((owner, repo)) = super::github_readme::parse_repo_url(&url) {
+        return capture_github_repo(&dir, &url, &owner, &repo).await;
+    }
+
     let captured = chrono::Local::now().to_rfc3339();
 
     let host = tauri::Url::parse(&url)
@@ -393,6 +401,55 @@ pub async fn capture_fetch_page(
         via: via.to_string(),
         error,
     })
+}
+
+/// 采一个 GitHub 仓库：读 README 落盘，不做正文抽取。
+///
+/// 文件名用 `owner/repo` 连起来（`tauri-apps__tauri.md`）—— 单用 repo 名会
+/// 在 `tauri` 和 `awesome` 这种常见名上撞得很难看。
+async fn capture_github_repo(
+    dir: &Path,
+    url: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<FetchOutcome, String> {
+    let captured = chrono::Local::now().to_rfc3339();
+    let title = format!("{owner}__{repo}");
+
+    match super::github_readme::fetch_readme(owner, repo).await {
+        Ok((_name, markdown)) => {
+            // `via: readme` 让用户一眼看出这篇没有走正文抽取，内容就是
+            // README 原文 —— 以后想重新抽也有据可查。
+            let path = write_reference_with_assets(
+                dir,
+                &title,
+                url,
+                &captured,
+                webdoc::Via::Readme.as_str(),
+                &markdown,
+            )
+            .await?;
+            Ok(FetchOutcome {
+                url: url.to_string(),
+                title,
+                path: Some(path.to_string_lossy().to_string()),
+                via: webdoc::Via::Readme.as_str().to_string(),
+                error: None,
+            })
+        }
+        Err(e) => {
+            // 限流、没 README、网络失败 —— 一律落存根，用户至少看得到是哪条。
+            let body = render_reference(&title, url, &captured, webdoc::Via::Stub.as_str(), "");
+            let p = write_note(dir, Some("refs"), &title, &body)?;
+            Ok(FetchOutcome {
+                url: url.to_string(),
+                title,
+                path: Some(p.to_string_lossy().to_string()),
+                via: webdoc::Via::Stub.as_str().to_string(),
+                error: Some(e),
+            })
+        }
+    }
 }
 
 /// 写一篇引用页，并把正文里的图片落到 `<文档名>.assets/`。

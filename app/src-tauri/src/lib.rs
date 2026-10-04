@@ -116,6 +116,8 @@ pub mod webdoc;
 pub mod capture_store;
 // 采集网页时把正文图片落到 <文档名>.assets/。
 pub mod page_assets;
+// GitHub 仓库页直接读 README，不做正文抽取。
+pub mod github_readme;
 #[cfg(desktop)]
 mod browser;
 #[cfg(mobile)]

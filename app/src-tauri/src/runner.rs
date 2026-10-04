@@ -132,6 +132,8 @@ mod webdoc;
 mod capture_store;
 #[path = "page_assets.rs"]
 mod page_assets;
+#[path = "github_readme.rs"]
+mod github_readme;
 #[cfg(desktop)]
 #[path = "browser.rs"]
 mod browser;
