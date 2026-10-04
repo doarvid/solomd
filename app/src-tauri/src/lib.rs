@@ -179,16 +179,21 @@ pub fn run() {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.show();
                     let _ = win.set_focus();
-                    // Debug builds: open devtools on launch.
+                    // Debug builds: open devtools shortly after launch.
                     //
-                    // This app builds its own macOS menu (runner.rs), which
-                    // replaces Tauri's default one — and that default menu is
-                    // where the "Toggle Developer Tools" item (⌥⌘I) normally
-                    // lives. Without this there is no discoverable way to reach
-                    // a console, which made the P0 browser probes unrunnable.
+                    // Not called inline here: the WKWebView is not fully
+                    // initialised this early and the call silently no-ops.
+                    // The View → Toggle Developer Tools menu item
+                    // (⌥⌘I, debug builds only) is the manual fallback.
                     // Released builds are unaffected (`debug_assertions` off).
                     #[cfg(debug_assertions)]
-                    win.open_devtools();
+                    {
+                        let win_dt = win.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                            win_dt.open_devtools();
+                        });
+                    }
                 }
             }
             #[cfg(any(target_os = "android", target_os = "ios"))]

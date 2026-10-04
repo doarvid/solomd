@@ -532,7 +532,17 @@ fn build_app_menu<R: tauri::Runtime>(
         .item(&preview_zoom_out)
         .item(&preview_zoom_reset)
         .build()?;
-    let view_submenu = SubmenuBuilder::new(app, s.view)
+    // Debug builds only. This app builds its own menu, which replaces Tauri's
+    // default one — and the stock "Toggle Developer Tools" (⌥⌘I) lives in that
+    // default menu. Without an entry point here there is no way to reach a
+    // console at all. Label is deliberately not in the i18n table: it is a
+    // debug affordance, not user-facing copy.
+    #[cfg(debug_assertions)]
+    let toggle_devtools = MenuItemBuilder::with_id("view.devtools", "Toggle Developer Tools")
+        .accelerator("CmdOrCtrl+Alt+I")
+        .build(app)?;
+
+    let view_builder = SubmenuBuilder::new(app, s.view)
         .item(&toggle_theme)
         .separator()
         .item(&toggle_sidebar)
@@ -542,8 +552,10 @@ fn build_app_menu<R: tauri::Runtime>(
         .item(&zoom_submenu)
         .separator()
         .item(&palette)
-        .item(&global_search)
-        .build()?;
+        .item(&global_search);
+    #[cfg(debug_assertions)]
+    let view_builder = view_builder.separator().item(&toggle_devtools);
+    let view_submenu = view_builder.build()?;
 
     let md_help = accel!(MenuItemBuilder::with_id("help.markdown", s.md_help), "help.markdown", "F1")
         .build(app)?;
@@ -1047,10 +1059,24 @@ pub fn run_with(initial_file: Option<String>) {
             cookbook::cookbook_install,
         ])
         .on_menu_event(|app_handle, event| {
-            // Forward every menu click to the frontend as a single event
+            let id = event.id().0.clone();
+            // Handled here rather than in the frontend: devtools are a Rust-side
+            // concern, and App.vue has no way to toggle them.
+            #[cfg(debug_assertions)]
+            if id == "view.devtools" {
+                use tauri::Manager;
+                if let Some(win) = app_handle.get_webview_window("main") {
+                    if win.is_devtools_open() {
+                        win.close_devtools();
+                    } else {
+                        win.open_devtools();
+                    }
+                }
+                return;
+            }
+            // Forward every other menu click to the frontend as a single event
             // with the menu item id as payload. App.vue dispatches actions
             // based on this id.
-            let id = event.id().0.clone();
             let _ = app_handle.emit("solomd://menu", id);
         })
         .setup(|app| {
