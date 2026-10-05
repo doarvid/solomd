@@ -31,17 +31,37 @@ export const overlayDepth = readonly(depth);
  * (which would hide the webview forever).
  */
 export function useOverlayPresence(isOpen: Ref<boolean> | ComputedRef<boolean>) {
+  // `counted` tracks whether THIS registration currently has a +1 in `depth`,
+  // rather than comparing against watch's previous value. The obvious version
+  //
+  //     watch(isOpen, (open, wasOpen) => {
+  //       if (open === wasOpen) return;
+  //       depth.value += open ? 1 : -1;
+  //     }, { immediate: true });
+  //
+  // is wrong: on the immediate call Vue passes `undefined` as the previous
+  // value, so a closed overlay fails the guard, takes the -1 branch, and
+  // decrements. With several overlays registered, depth went negative — and
+  // since the browser webview shows only when depth is exactly 0, it never
+  // showed at all.
+  let counted = false;
   watch(
     isOpen,
-    (open, wasOpen) => {
-      if (open === wasOpen) return;
+    (open) => {
+      if (open === counted) return;
+      counted = open;
       depth.value += open ? 1 : -1;
     },
-    { immediate: true },
+    // `sync`, not the default `pre`: the count gates whether a native webview
+    // is allowed on screen, and the reader is a requestAnimationFrame loop
+    // that must see the current answer. With the default, the update lands a
+    // microtask later, so a frame could read a stale count — and the tests
+    // would be timing-dependent for no good reason.
+    { immediate: true, flush: 'sync' },
   );
 
   onScopeDispose(() => {
-    if (isOpen.value) depth.value -= 1;
+    if (counted) depth.value -= 1;
   });
 }
 
