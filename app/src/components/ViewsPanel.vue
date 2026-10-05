@@ -21,6 +21,7 @@ import { useSavedViews } from '../composables/useSavedViews';
 import { uniqueSlug, type ViewFile } from '../lib/viewFile';
 import { DsButton, DsChip, DsListRow } from '../ui';
 
+import { useOverlayPresenceOf } from '../lib/overlay-presence';
 const { t } = useI18n();
 const workspace = useWorkspaceStore();
 const store = useSavedViewsStore();
@@ -53,6 +54,8 @@ function onRowClick(view: ViewFile) {
 
 interface Ctx { x: number; y: number; slug: string }
 const ctx = ref<Ctx | null>(null);
+// 右键菜单浮在面板区之上，浏览器子 webview 会压住它 —— 登记进全局浮层计数。
+useOverlayPresenceOf(ctx);
 
 function openCtx(e: MouseEvent, view: ViewFile) {
   e.preventDefault();

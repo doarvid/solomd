@@ -9,6 +9,7 @@ import { useBrowserStore } from '../stores/browser';
 import type { Tab } from '../types';
 import { isWindowsEditorRuntime, shouldUsePlainWindowsEditor } from '../lib/platform';
 import { isBrowserTab } from '../lib/tab-kind';
+import { overlayDepth } from '../lib/overlay-presence';
 import { toLogicalBounds } from '../lib/browser-rect';
 
 const props = defineProps<{
@@ -373,7 +374,12 @@ function browserBoundsTick() {
   // else would ever hide the webview and it would keep painting over the
   // newly-active tab. So visibility is decided here from scratch every frame
   // rather than being a side effect of measuring.
-  const wantsVisible = !!tab && isBrowser.value && isFocused.value && !!el;
+  // 浮层打开时必须让位。**这一条不能省** —— App.vue 的 watch 确实会在
+  // 浮层打开时 hide 一次，但这个 tick 每帧都跑，下一帧就会把它重新 show
+  // 出来，等于白 hide。菜单被 webview 压住的根因就在这，而不是菜单没接
+  // 进计数器（那些都接了）。
+  const wantsVisible =
+    !!tab && isBrowser.value && isFocused.value && !!el && overlayDepth.value === 0;
   const rect = wantsVisible && el ? el.getBoundingClientRect() : null;
   const bounds = rect ? toLogicalBounds(rect, window.devicePixelRatio) : null;
   const nextVisible = bounds && tab ? tab.id : null;

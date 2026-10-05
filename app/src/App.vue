@@ -88,7 +88,7 @@ import { usePropertiesStore } from './stores/properties';
 import { useRagStore } from './stores/rag';
 import { useBrowserStore } from './stores/browser';
 import { isBrowserTab } from './lib/tab-kind';
-import { overlayDepth } from './lib/overlay-presence';
+import { overlayDepth, useOverlayPresence, useOverlayPresenceOf } from './lib/overlay-presence';
 import { IS_APP_STORE_BUILD } from './lib/app-build';
 import UiPreview from './components/UiPreview.vue';
 
@@ -267,13 +267,16 @@ function closeSidebarCtx() { sidebarCtx.value = null; }
 // component (FileTree's context menu, the editor menu, popovers). Those
 // register themselves via useOverlayPresence because App.vue cannot see
 // their refs — see lib/overlay-presence.ts.
-const anyOverlayOpen = computed(
-  () =>
-    paletteOpen.value ||
-    settingsOpen.value ||
-    sidebarCtx.value !== null ||
-    overlayDepth.value > 0,
-);
+// These three used to be checked ad hoc here, which meant overlayDepth was
+// NOT a complete answer to "is anything floating?" — and PaneContent's bounds
+// tick needs exactly that question answered, because it re-shows the webview
+// every frame it thinks one should be visible. Registering them here makes
+// overlayDepth the single source of truth.
+useOverlayPresence(paletteOpen);
+useOverlayPresence(settingsOpen);
+useOverlayPresenceOf(sidebarCtx);
+
+const anyOverlayOpen = computed(() => overlayDepth.value > 0);
 
 watch(anyOverlayOpen, async (open, wasOpen) => {
   if (open === wasOpen) return;
