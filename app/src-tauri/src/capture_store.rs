@@ -311,6 +311,12 @@ pub fn render_reference(
     s
 }
 
+/// 落成存根时写进正文的那行。"这条为什么没采到"必须能从笔记里看出来 ——
+/// 提示只出现在 toast 里，关掉就没了。
+fn failure_note(reason: &str) -> String {
+    format!("> 采集失败：{reason}")
+}
+
 /// RFC3339 时间戳 → `YYYY-MM-DD`。认不出来就原样返回。
 fn date_of(timestamp: &str) -> String {
     let head = timestamp.trim();
@@ -422,19 +428,22 @@ pub async fn capture_fetch_page(
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .unwrap_or_default();
 
-    let (final_url, html) = match webdoc::fetch_html(&url).await {
-        Ok(v) => v,
+    let (final_url, body, content_type) = match webdoc::fetch(&url).await {
+        Ok(page) => (page.url, page.body, page.content_type),
         Err(e) => {
             // 抓不到就落一个存根：用户至少能在列表里看到"这条存在但没抓到"，
             // 而不是它凭空消失。
             let ext = webdoc::stub(&url, &fallback_title);
+            // 失败原因写进正文。存根本来就空着，"这条为什么没采到"只能靠
+            // 事后回忆 —— 而原因（限流 / 404 / 页面要登录）恰恰是用户最想
+            // 知道的，也是他决定下一步做什么的唯一依据。
             let body = render_reference(
                 &ext.title,
                 &url,
                 &captured,
                 ext.via.as_str(),
                 &ext.meta,
-                "",
+                &failure_note(&e),
                 source_title.as_deref(),
             );
             let path = write_note(&dir, &ext.title, &body)?;
@@ -448,7 +457,10 @@ pub async fn capture_fetch_page(
         }
     };
 
-    let extracted = webdoc::extract(&html, &final_url, &host);
+    // 先问一句"拿回来的到底是不是网页"：`.md` 之类纯文本源（GitHub raw、
+    // 各类 pastebin）走 HTML 流水线会被整篇毁掉，而且不会报错。
+    let extracted = webdoc::extract_plain_text(&body, &final_url, content_type.as_deref())
+        .or_else(|| webdoc::extract(&body, &final_url, &host));
     let (title, markdown, via, error, meta) = match extracted {
         Some(e) => (
             if e.title.trim().is_empty() {
@@ -467,12 +479,14 @@ pub async fn capture_fetch_page(
             } else {
                 fallback_title.clone()
             },
-            String::new(),
+            // 抽不到正文时，正文位置放原因 —— 空笔记除了"没采到"什么也
+            // 说明不了。
+            failure_note("没能抽到正文（页面可能需要登录或由 JS 渲染）"),
             "stub".to_string(),
             Some("没能抽到正文（页面可能需要登录或由 JS 渲染）".to_string()),
             // 正文抽不到不代表页面没声明作者和日期 —— 这种页面恰恰最需要
             // frontmatter 里的信息来辨认，所以单独再读一次 meta。
-            webdoc::extract_meta(&html),
+            webdoc::extract_meta(&body),
         ),
     };
 
@@ -538,13 +552,15 @@ async fn capture_github_repo(
         }
         Err(e) => {
             // 限流、没 README、网络失败 —— 一律落存根，用户至少看得到是哪条。
+            // 原因一并写进正文：限流和"仓库根本没有 README"要采取的行动完全
+            // 不同，光看 `via: stub` 分不出来。
             let body = render_reference(
                 &title,
                 url,
                 &captured,
                 webdoc::Via::Stub.as_str(),
                 &webdoc::PageMeta::default(),
-                "",
+                &failure_note(&e),
                 source_title,
             );
             let p = write_note(dir, &title, &body)?;

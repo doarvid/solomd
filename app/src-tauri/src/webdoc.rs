@@ -26,6 +26,8 @@ pub enum Via {
     Selector,
     /// 从页面的 SSR 数据块里读的（正文根本不在这份 HTML 的 DOM 里）。
     Json,
+    /// 拿回来的本来就不是网页，是一份纯文本 / markdown 原文，原样存的。
+    Markdown,
     /// Readability 抽的。
     Readability,
     /// GitHub 仓库：直接读的 README，没有做正文抽取。
@@ -41,6 +43,7 @@ impl Via {
         match self {
             Via::Selector => "selector",
             Via::Json => "json",
+            Via::Markdown => "markdown",
             Via::Readability => "readability",
             Via::Readme => "readme",
             Via::Selection => "selection",
@@ -223,11 +226,24 @@ const UA: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/124.0 Safari/537.36 SoloMD/1.0";
 
-/// 拉页面。返回 (最终 URL, HTML)。
+/// 一次抓取的产物。
+pub struct Fetched {
+    /// 跟随重定向后的最终 URL。
+    pub url: String,
+    /// 响应正文（已解码成 UTF-8）。
+    pub body: String,
+    /// 响应的 Content-Type，原样带回。
+    ///
+    /// 判断"拿回来的到底是不是一份网页"靠它 —— 靠正文里有没有 `<div>` 猜，
+    /// 会被正文里贴的 HTML 示例（讲前端、讲爬虫的文章里到处都是）骗到。
+    pub content_type: Option<String>,
+}
+
+/// 拉取一个 URL。
 ///
 /// 用 reqwest 直取，**不带 cookie、不执行 JS** —— 所以需要登录或前端渲染的
 /// 站点（知乎、部分公众号文章）拿不到正文，那条路径由「选中片段」兜底。
-pub async fn fetch_html(url: &str) -> Result<(String, String), String> {
+pub async fn fetch(url: &str) -> Result<Fetched, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .user_agent(UA)
@@ -246,6 +262,11 @@ pub async fn fetch_html(url: &str) -> Result<(String, String), String> {
     }
 
     let final_url = resp.url().to_string();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let bytes = resp
         .bytes()
@@ -255,8 +276,71 @@ pub async fn fetch_html(url: &str) -> Result<(String, String), String> {
         return Err(format!("页面过大（{} 字节）", bytes.len()));
     }
 
-    let html = decode_html(&bytes);
-    Ok((final_url, html))
+    Ok(Fetched {
+        url: final_url,
+        body: decode_html(&bytes),
+        content_type,
+    })
+}
+
+/// 这份响应**不是网页**时，正文原样就是正文。
+///
+/// `raw.githubusercontent.com` 上的 `.md` 就是这种：Content-Type 是
+/// `text/plain`，正文是一整篇 markdown。把它塞进 HTML 流水线不会报错，
+/// 只会把整篇毁掉 —— 换行折成一行、`#` 转义成 `\#`、`**加粗**` 变成
+/// `\*\*加粗\*\*`、`![图](url)` 变成 `!\[图\](url)`。**字符一个不少，
+/// 所以没有任何一处会失败**，用户只能自己发现整篇不能看了。
+///
+/// 返回 `None` 表示"这是网页，走正常流水线"。
+pub fn extract_plain_text(
+    body: &str,
+    url: &str,
+    content_type: Option<&str>,
+) -> Option<Extracted> {
+    if is_web_page(content_type, url) {
+        return None;
+    }
+    let text = body.trim();
+    if text.chars().count() < MIN_CONTENT_CHARS {
+        return None;
+    }
+    Some(Extracted {
+        // 一级标题就是这篇的标题；没有就留空，由调用方退回链接文字。
+        title: first_heading(text).unwrap_or_default(),
+        markdown: text.to_string(),
+        via: Via::Markdown,
+        url: url.to_string(),
+        meta: PageMeta::default(),
+    })
+}
+
+/// 这份响应是不是网页。
+///
+/// **拿不准就算"是"**：把网页当纯文本存下来，是一整份 HTML 源码糊在笔记里
+/// （标签、脚本、样式全在），比反过来糟得多。
+fn is_web_page(content_type: Option<&str>, url: &str) -> bool {
+    let ct = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if !ct.is_empty() {
+        return !matches!(ct.as_str(), "text/plain" | "text/markdown" | "text/x-markdown");
+    }
+    // 服务器没给 Content-Type 时才看扩展名。
+    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    !(path.ends_with(".md") || path.ends_with(".markdown") || path.ends_with(".txt"))
+}
+
+/// 正文里第一个一级标题的文本（`# xxx`）。
+fn first_heading(text: &str) -> Option<String> {
+    text.lines()
+        .map(|l| l.trim_start())
+        .find_map(|l| l.strip_prefix("# "))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 /// 网页编码不一定是 UTF-8 —— 中文站点大量使用 GBK。照搬 `convert.rs` 和
@@ -454,16 +538,29 @@ fn longest_article_string(value: &serde_json::Value, best: &mut Option<String>) 
 /// **这是启发式，宁可漏也不要错**：漏了只是退回 readability（不会更差），
 /// 抓错一坨 JSON 当正文，用户看到的是满屏乱码。
 ///
-/// 判据是"块级结构 + 分段"：正文由标题/段落堆出来，而 base64、压缩过的
-/// JS、整个 JSON 的字符串化都是**一坨没有分段的长字符串**。
+/// 主判据是**段落**：正文是空行分开的一段一段话，而 base64、压缩过的 JS、
+/// 整个 JSON 的字符串化都是**一坨没有分段的长字符串**。
+///
+/// 曾经要求"至少 3 个 `#` 标题或 `<p>`/`<div>`"，结果漏了一篇纯散文 ——
+/// 腾讯云那篇通篇只有 `**加粗**`，一个 `#` 都没有（3489 字、40 处分段），
+/// 被判成"不像正文"退回 readability，正好落在空壳 DOM 上。所以标题和
+/// HTML 标签降级成"加分项"，有段落就够了。
 fn looks_like_article(s: &str) -> bool {
     if s.trim().chars().count() < MIN_ISLAND_CHARS {
         return false;
     }
+    // 长度 ≥ 30 字才算"一段话"：配置、代码、日志里的空行分段通常是一两行。
+    let paragraphs = s
+        .split("\n\n")
+        .filter(|p| p.trim().chars().count() >= 30)
+        .count();
+    if paragraphs >= 3 {
+        return true;
+    }
+    // 没有分段（HTML 内容常被压成一行）时，退而看块级标签数量。
     let md_headings = s.lines().filter(|l| l.trim_start().starts_with('#')).count();
     let html_blocks = s.matches("<p").count() + s.matches("<div").count() + s.matches("<h").count();
-    let blank_lines = s.matches("\n\n").count();
-    (md_headings + html_blocks) >= 3 && (blank_lines >= 3 || html_blocks >= 10)
+    (md_headings + html_blocks) >= 3
 }
 
 /// 页面里第一个 `<h1>` 的文本。
@@ -814,6 +911,30 @@ mod tests {
     }
 
     #[test]
+    fn a_prose_only_island_body_is_still_the_body() {
+        // 腾讯云那篇《拆解五类主流 Agent 平台》通篇只有 `**加粗**`：一个
+        // `#` 标题都没有、没有 HTML 标签，只有空行分出来的段落。曾经因为
+        // 判据要求"≥3 个标题或块级标签"而漏掉它，退回 readability —— 正好
+        // 落在空壳 DOM 上。
+        let para = "跟几个做数字化的朋友聊智能体选型，聊出一个挺一致的结论：Demo 阶段没人会输，输的都是上线三个月以后。"
+            .repeat(4);
+        let prose = format!("{para}\n\n**先自测：你是哪类买家？**\n\n{para}\n\n{para}");
+        let payload = format!(
+            r#"{{"props":{{"pageProps":{{"articleInfo":{{"content":{}}}}}}}}}"#,
+            serde_json::to_string(&prose).unwrap()
+        );
+        let html = format!(
+            r#"<html><head><title>标题-站点后缀</title></head><body><h1>标题</h1>
+               <div class="shell">面包屑 作者 发布时间</div>
+               <script id="__NEXT_DATA__" type="application/json">{payload}</script></body></html>"#
+        );
+        let e = extract(&html, "https://cloud.tencent.cn/developer/article/1", "cloud.tencent.cn")
+            .expect("纯散文也必须认出来");
+        assert_eq!(e.via, Via::Json);
+        assert!(e.markdown.contains("先自测"), "拿到的是别的字段:\n{}", &e.markdown[..80.min(e.markdown.len())]);
+    }
+
+    #[test]
     fn a_data_island_without_article_like_text_falls_through_to_readability() {
         // 5000 个 `A` 是"一坨没有分段的长字符串"—— base64、压缩过的 JS、
         // 整个 JSON 的字符串化都长这样。抓错它会得到满屏乱码。
@@ -860,6 +981,91 @@ mod tests {
         assert_eq!(e.via, Via::Readability);
     }
 
+    /// 一份 markdown 原文 —— 每个会 HTML 转换吃掉的写法都在里面。
+    fn markdown_source() -> String {
+        let mut s = String::from(
+            "# 2026 年 AI Agent 学习路线图\n\n\
+             > 给零基础到初学者的 Agent 学习路径。\n\n\
+             ![路线图全景](2026-agent-learning-roadmap.png)\n\n\
+             | 阶段 | 主题 | 周期 |\n| ---- | ---- | ---- |\n| 0 | 前置基础 | 1–2 周 |\n\n",
+        );
+        for i in 0..20 {
+            s.push_str(&format!(
+                "## 阶段 {i}\n\n核心模型：**Agent = LLM + 工具 + 循环**。\n\n- 参考：[x](https://example.com/a_b_c.md)\n\n"
+            ));
+        }
+        s
+    }
+
+    #[test]
+    fn a_plain_text_response_is_stored_verbatim() {
+        let src = markdown_source();
+        let e = extract_plain_text(&src, "https://raw.example/a.md", Some("text/plain; charset=utf-8"))
+            .expect("纯文本必须原样收下");
+        assert_eq!(e.via, Via::Markdown);
+        // 逐字相同（只去掉首尾空白）：HTML 流水线会把换行折平、把
+        // `#`/`**`/`![]` 转义掉。
+        assert_eq!(e.markdown, src.trim(), "markdown 被转换过了");
+        assert!(!e.markdown.contains("\\#"), "`#` 被转义了");
+        assert!(!e.markdown.contains("\\*\\*"), "加粗被转义了");
+        assert!(!e.markdown.contains("\\["), "图片语法被转义了");
+        // 一级标题当标题，而不是 URL 里的文件名。
+        assert_eq!(e.title, "2026 年 AI Agent 学习路线图");
+    }
+
+    #[test]
+    fn a_markdown_response_is_recognised_by_extension_when_there_is_no_content_type() {
+        let src = markdown_source();
+        let e = extract_plain_text(&src, "https://x.example/notes/a.md?raw=1", None).expect("按扩展名认出来");
+        assert_eq!(e.via, Via::Markdown);
+        // 参数串不该影响扩展名判断。
+        assert!(extract_plain_text(&src, "https://x.example/a.md?raw=1", None).is_some());
+    }
+
+    #[test]
+    fn an_html_response_never_takes_the_plain_text_path() {
+        let html = format!(
+            "<html><body><article><h1>标题</h1><p>{}</p></article></body></html>",
+            "这是一段足够长的正文内容，用来通过最少字数门槛。".repeat(30)
+        );
+        assert!(
+            extract_plain_text(&html, "https://x.example/a", Some("text/html; charset=utf-8")).is_none(),
+            "网页被当成纯文本存下来了"
+        );
+        // 没有 Content-Type 时，普通网址也按网页处理。
+        assert!(extract_plain_text(&html, "https://x.example/article/1", None).is_none());
+    }
+
+    #[test]
+    fn a_short_plain_text_response_is_not_worth_a_note() {
+        assert!(extract_plain_text("太短了\n", "https://x.example/a.md", Some("text/plain")).is_none());
+    }
+
+    #[test]
+    fn is_web_page_defaults_to_yes_when_in_doubt() {
+        // 拿不准按"是网页"处理：把网页当纯文本存下来是一整份 HTML 源码
+        // 糊在笔记里，比反过来糟得多。
+        assert!(is_web_page(None, "https://x.example/a/b"));
+        assert!(is_web_page(Some(""), "https://x.example/a/b"));
+        assert!(is_web_page(Some("application/octet-stream"), "https://x.example/a"));
+        // Content-Type 说话算数，扩展名只是它缺席时的兜底：同一个 .md，
+        // `github.com/.../blob/...` 给的是 text/html（正文确实是渲染后的
+        // HTML），`raw.githubusercontent.com/...` 给的是 text/plain（正文
+        // 就是 markdown 原文）—— 只能按 Content-Type 分。
+        assert!(is_web_page(Some("text/html"), "https://github.com/u/r/blob/main/a.md"));
+        assert!(!is_web_page(Some("text/markdown"), "https://x.example/a"));
+        assert!(!is_web_page(None, "https://x.example/notes/a.markdown"));
+        assert!(!is_web_page(None, "https://x.example/notes/a.txt"));
+    }
+
+    #[test]
+    fn a_plain_text_body_without_a_heading_has_no_title() {
+        // 没有一级标题就留空，由调用方退回链接文字 —— 别拿正文第一行凑。
+        let body = format!("{}\n\n{}", "没有标题的一段正文。".repeat(40), "又一段。".repeat(40));
+        let e = extract_plain_text(&body, "https://x.example/a.md", Some("text/plain")).unwrap();
+        assert_eq!(e.title, "");
+    }
+
     #[test]
     fn extract_attaches_the_meta_to_whatever_path_won() {
         // 元信息由 extract() 统一补上，两条抽取路径都不该漏掉它。
@@ -875,5 +1081,7 @@ mod tests {
         assert_eq!(e.meta.published.as_deref(), Some("2024-01-30"));
     }
 }
+
+
 
 

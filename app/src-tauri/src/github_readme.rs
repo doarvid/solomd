@@ -80,7 +80,54 @@ struct RepoMeta {
 }
 
 /// 读一个仓库的 README。返回 `(标题, markdown 正文)`。
+///
+/// 先走 API，失败（尤其是限流）再走 raw.githubusercontent.com —— 见
+/// `fetch_readme_raw` 的说明。
 pub async fn fetch_readme(owner: &str, repo: &str) -> Result<(String, String), String> {
+    match fetch_readme_via_api(owner, repo).await {
+        Ok(v) => Ok(v),
+        // 报 API 那个错：限流 / 仓库不存在 / 没有 README 都比 raw 的裸 404
+        // 说得清楚。raw 只是"能不能救回来"的第二次机会。
+        Err(api_err) => fetch_readme_raw(owner, repo).await.or(Err(api_err)),
+    }
+}
+
+/// 兜底：直接从 raw.githubusercontent.com 取 README。
+///
+/// 为什么需要它：`api.github.com` 未认证只有 60 次/小时，而每采一个仓库要
+/// 花掉 2 次（元信息 + README）。撞上限流时整条采集会变成空存根 —— 可
+/// **README 本体根本不需要 API**：raw 域名不占配额，`HEAD` 这个 ref 会解析
+/// 成默认分支，剩下的只是文件名不确定，试几个常见写法就够了。
+///
+/// 代价是丢掉 API 给的仓库简介 —— 比整篇丢失好得多。
+async fn fetch_readme_raw(owner: &str, repo: &str) -> Result<(String, String), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    // `HEAD` 是 GitHub 给的"默认分支"别名，终于不用猜 main 还是 master。
+    // 文件名只能试，顺序按常见程度排。
+    for name in ["README.md", "readme.md", "README.markdown", "README.rst"] {
+        let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{name}");
+        let Ok(resp) = client.get(&url).send().await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(body) = resp.text().await else { continue };
+        if body.trim().is_empty() {
+            continue;
+        }
+        return Ok((format!("{owner}/{repo}"), body));
+    }
+
+    Err(format!("{owner}/{repo} 的 README 取不到"))
+}
+
+async fn fetch_readme_via_api(owner: &str, repo: &str) -> Result<(String, String), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .user_agent(USER_AGENT)
@@ -241,3 +288,4 @@ mod tests {
         );
     }
 }
+
