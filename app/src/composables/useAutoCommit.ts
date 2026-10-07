@@ -52,8 +52,15 @@ export function useAutoCommit() {
     }
   }
 
-  /** Run a single auto-commit. Always surfaces a toast (no quiet path). */
-  async function performCommit(): Promise<void> {
+  /**
+   * Run a single auto-commit. Always surfaces a toast (no quiet path).
+   *
+   * `filePath` 是**事件里说变的那个文件**，不是当前标签页 —— 改一个没打开的
+   * 文件（任务勾选、导入）时拿活动标签页去提交，等于给一个没变的文件打
+   * 快照，真正的改动一个都没进 commit。不传路径就是"整个工作区都看一遍"，
+   * 删除/移动/改名走这条（它们本来就不止一个路径）。
+   */
+  async function performCommit(filePath?: string): Promise<void> {
     if (busy) return;
     if (!isEnabled()) return;
     const folder = workspace.currentFolder;
@@ -61,7 +68,6 @@ export function useAutoCommit() {
     busy = true;
     try {
       if (!(await ensureInitialized(folder))) return;
-      const filePath = tabs.activeTab?.filePath ?? undefined;
       try {
         const sha = await gh.commit(folder, filePath);
         if (sha) {
@@ -78,8 +84,8 @@ export function useAutoCommit() {
   }
 
   /** ⌘S handler. Fires immediately, no debounce. */
-  function onSaved(): void {
-    void performCommit();
+  function onSaved(e: CustomEvent<{ filePath?: string }>): void {
+    void performCommit(e.detail?.filePath);
   }
 
   function start(): void {

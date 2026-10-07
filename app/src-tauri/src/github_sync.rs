@@ -1080,7 +1080,15 @@ pub fn github_push_inner(
             .clone()
             .unwrap_or_else(|| "encrypted: workspace state at push".to_string());
         commit_shadow_if_dirty(&repo_dir, &msg)?;
-    } else if let Some(msg) = commit_message {
+    } else {
+        // 无条件提交工作区当前的样子 —— 原来只有**传了消息**才提交，于是
+        // 不传消息的自动推送（`sync.push(folder)`）只推"已经被 AutoGit
+        // 提交过的东西"：删除、移动这类不经过保存的改动永远上不去。加密
+        // 那条分支本来就是无条件提交，两条路对齐。
+        //
+        // 工作区没变时 git_auto_commit_inner 返回 Ok(None)，不会造空提交。
+        let msg = commit_message
+            .unwrap_or_else(|| "sync: workspace state at push".to_string());
         super::git_history::git_auto_commit_inner(folder.clone(), None, Some(msg))?;
     }
     let repo = Repository::open(&repo_dir).map_err(|e| e.to_string())?;

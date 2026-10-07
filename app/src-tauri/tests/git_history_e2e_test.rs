@@ -123,6 +123,46 @@ fn autogit_full_flow_init_commit_history_diff_rollback() {
 }
 
 #[test]
+fn autogit_commits_a_deletion() {
+    // 删掉的笔记必须进 commit。
+    //
+    // 同步推送给 git_auto_commit_inner 传的是 `None`（不带 pathspec），那条
+    // 暂存分支原来只调 add_all —— 而 add_all 只"添加/更新工作区里**存在**
+    // 的文件"，索引里那些文件已经没了、条目还留着的不会被它清掉。于是删除
+    // 永远进不了 commit，也就永远同步不出去。
+    let ws = fresh_workspace("delete");
+    let keep = ws.join("keep.md");
+    let gone = ws.join("gone.md");
+    let folder = ws.to_string_lossy().to_string();
+
+    write(&keep, "# keep\n");
+    write(&gone, "# gone\n");
+    git_init_workspace_inner(folder.clone(), Some("init: ws".into()), Some(false)).unwrap();
+    assert!(
+        !git_workspace_status_inner(folder.clone()).unwrap().dirty,
+        "init 之后工作区应该是干净的"
+    );
+
+    fs::remove_file(&gone).unwrap();
+    let sha = git_auto_commit_inner(folder.clone(), None, Some("delete: gone.md".into()))
+        .expect("auto_commit should succeed");
+    assert!(
+        sha.is_some(),
+        "删除之后应该产生新 commit（树没变才会返回 None，说明删除没被暂存）"
+    );
+
+    let status = git_workspace_status_inner(folder.clone()).unwrap();
+    assert!(
+        !status.dirty,
+        "删除没被提交：工作区仍然脏（HEAD 里 gone.md 还在）"
+    );
+    // 保留的那个文件不该被顺手删掉 —— update_all/add_all 的组合只动真删的。
+    assert!(keep.exists());
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn autogit_no_op_commit_returns_none() {
     let ws = fresh_workspace("noop");
     let note = ws.join("a.md");

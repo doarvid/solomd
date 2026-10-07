@@ -173,6 +173,68 @@ fn github_sync_push_pull_roundtrip() {
     );
 }
 
+/// 删掉的笔记要能同步出去，而且**另一台设备拉下来之后本地那份也没了**。
+///
+/// 这一路原来断在"触发"上而不是 git 上：文件树的删除只调 `fs_delete`，
+/// 不派发任何信号，而 AutoGit 和自动推送都只监听保存 —— 本地删了、远端
+/// 一直留着，直到下次保存别的文件才被顺带带上。前端补了信号；这里钉住
+/// 后半段：删除一旦进了 commit，push/pull 确实把它带到对端。
+#[test]
+fn github_sync_propagates_a_deletion() {
+    let bare_dir = fresh_dir("bare-delete");
+    Repository::init_bare(&bare_dir).unwrap();
+    let bare_url = file_url(&bare_dir);
+
+    // A 建两篇笔记，推上去。
+    let dev_a = init_workspace_with_remote("devA-del", &bare_url);
+    write(&dev_a.join("keep.md"), "keep me\n");
+    write(&dev_a.join("gone.md"), "delete me\n");
+    {
+        let repo_a = Repository::open(&dev_a).unwrap();
+        commit_all(&repo_a, "initial: two notes");
+    }
+    let folder_a = dev_a.to_string_lossy().to_string();
+    github_push_inner(folder_a.clone(), "ignored".into(), None).expect("initial push");
+
+    // B 拉下来，确认两篇都在。
+    let dev_b = init_workspace_with_remote("devB-del", &bare_url);
+    {
+        let repo_b = Repository::open(&dev_b).unwrap();
+        commit_all(&repo_b, "init: device B");
+    }
+    let folder_b = dev_b.to_string_lossy().to_string();
+    github_pull_inner(folder_b.clone(), "ignored".into()).expect("device B pull");
+    assert!(dev_b.join("gone.md").exists(), "B 应该先看到 gone.md");
+
+    // A 删掉一篇再推（同步推送就是这么调的：不带路径，整个工作区一遍）。
+    fs::remove_file(dev_a.join("gone.md")).unwrap();
+    github_push_inner(folder_a, "ignored".into(), None).expect("delete push");
+
+    // 远端那份必须没了 —— 直接看裸仓库里 HEAD 的树。
+    {
+        let bare = Repository::open(&bare_dir).unwrap();
+        let head = bare
+            .find_reference("refs/heads/main")
+            .expect("remote should have main")
+            .peel_to_commit()
+            .unwrap();
+        let tree = head.tree().unwrap();
+        assert!(
+            tree.get_name("gone.md").is_none(),
+            "远端还留着已经删掉的 gone.md"
+        );
+        assert!(tree.get_name("keep.md").is_some(), "只该删掉那一篇");
+    }
+
+    // B 再拉：本地那份也要跟着消失（否则删除只是"远端看不见"，本机还留着）。
+    github_pull_inner(folder_b, "ignored".into()).expect("device B pull after delete");
+    assert!(
+        !dev_b.join("gone.md").exists(),
+        "删除没有传到设备 B：本地文件还在"
+    );
+    assert!(dev_b.join("keep.md").exists(), "保留的那篇不该被一起删掉");
+}
+
 #[test]
 fn github_sync_surfaces_conflicts_on_concurrent_edit() {
     let bare_dir = fresh_dir("bare-conflict");

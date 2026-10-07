@@ -193,13 +193,32 @@ watch(
  *  selected file's folder, else the vault root. Only rows that are actually in
  *  the tree count — a selected document can live outside the open workspace,
  *  and an entry created there would have no row to appear in (#321). */
-function newEntryParent(): string {
+/**
+ * 新建条目落在哪 —— **跟着当前选中**：选中的是文件夹就放它里面，选中的是
+ * 文件就放到它旁边，什么都没选才是根目录。
+ *
+ * 这是"在选中文件夹里新建"（#338 快捷键、标题栏那个 ＋）要的语义。
+ * 右键空白区不是这个语义，见 `rootEntryParent`。
+ */
+function selectedEntryParent(): string {
   const sel = selected.value;
   const node = sel ? findNode(sel.path) : null;
   if (node) {
     const dir = node.is_dir ? node.path : parentDirOf(node.path);
     if (dir) return dir;
   }
+  return root.value?.path ?? '';
+}
+
+/**
+ * 右键**空白区**新建时的落点：工作区根目录。
+ *
+ * 桌面上的约定是"右键空白 = 对当前这一层操作"（VS Code、Finder 都这样）。
+ * 这里原来复用的是 `selectedEntryParent()` —— 于是你先点过某个子文件夹里的
+ * 文件，再到树下方空白区"新建文件夹"，文件夹会跑进那个子目录里，表现得
+ * 就像"根目录下建不出来"。
+ */
+function rootEntryParent(): string {
   return root.value?.path ?? '';
 }
 
@@ -938,6 +957,20 @@ function rootLabel(): string {
   return t('explorer.vaultRoot') || 'Vault root';
 }
 
+/**
+ * 告诉同步流水线"工作区变了"。
+ *
+ * AutoGit 和自动推送都只监听 `solomd:saved`（原本只有"保存"会派发），所以
+ * 文件树上的删/移/改名一直是**改了但没人知道**：删掉的笔记要等到下次保存
+ * 别的文件才被带上，孤零零删一篇就永远同步不出去。
+ *
+ * 不带 filePath，表示"整个工作区都看一遍" —— 删除和移动本来就不止一个
+ * 路径（移动 = 旧位置删除 + 新位置新增），给单个路径反而会漏掉一半。
+ */
+function notifyTreeChanged() {
+  window.dispatchEvent(new CustomEvent('solomd:saved', { detail: {} }));
+}
+
 async function moveNode(from: string, destDir: string, isDir: boolean) {
   if (!canDropInto(from, destDir)) return;
   const name = baseName(from);
@@ -958,6 +991,7 @@ async function moveNode(from: string, destDir: string, isDir: boolean) {
     );
     return;
   }
+  notifyTreeChanged();
   repointTabs(from, target, isDir);
   scheduleRefresh();
   toasts.push(
@@ -983,6 +1017,7 @@ async function undoMove(current: string, original: string, isDir: boolean, name:
     );
     return;
   }
+  notifyTreeChanged();
   repointTabs(current, original, isDir);
   scheduleRefresh();
   toasts.info(t('explorer.moveUndone', { name }));
@@ -1185,7 +1220,7 @@ watch(
   () => {
     if (!newFileInTreeRequest.value || !root.value || root.value.loading) return;
     clearNewFileInTreeRequest();
-    void startNewFile(newEntryParent());
+    void startNewFile(selectedEntryParent());
   },
   { immediate: true },
 );
@@ -1496,6 +1531,7 @@ async function commitEdit() {
       }
       await pendingDeletes.flushUnder(target);
       await invoke('fs_rename', { from: e.original, to: target });
+      notifyTreeChanged();
       editing.value = null;
       // #342 — a renamed child keeps its hand-placed position.
       const key = orderKey(e.parent);
@@ -1682,6 +1718,8 @@ async function confirmDelete() {
     commit: async () => {
       try {
         await invoke('fs_delete', { path });
+        // 真删完了才通知 —— 撤销窗口内文件还在盘上，那时提交等于没删。
+        notifyTreeChanged();
       } catch (e) {
         toasts.error(`Delete failed: ${e}`);
       }
@@ -1808,7 +1846,7 @@ onBeforeUnmount(() => {
         <button
           class="ftree__hbtn"
           :title="t('explorer.newFile') || 'New file'"
-          @click="root && startNewFile(newEntryParent())"
+          @click="root && startNewFile(selectedEntryParent())"
           :disabled="!root"
         >＋</button>
         <div class="ftree__filter-wrap">
@@ -2045,10 +2083,10 @@ onBeforeUnmount(() => {
       @click.stop
     >
       <template v-if="!ctx.node || ctx.node.is_dir">
-        <button class="ftree__ctx-item" @click="startNewFile(ctx.node ? ctx.node.path : newEntryParent())">
+        <button class="ftree__ctx-item" @click="startNewFile(ctx.node ? ctx.node.path : rootEntryParent())">
           📄 {{ t('explorer.newFile') || 'New File' }}
         </button>
-        <button class="ftree__ctx-item" @click="startNewFolder(ctx.node ? ctx.node.path : newEntryParent())">
+        <button class="ftree__ctx-item" @click="startNewFolder(ctx.node ? ctx.node.path : rootEntryParent())">
           📁 {{ t('explorer.newFolder') || 'New Folder' }}
         </button>
       </template>
