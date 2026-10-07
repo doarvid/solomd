@@ -1273,9 +1273,18 @@ function destinationAt(x: number, y: number): string | null {
   if (!el) return null;
   const row = el.closest('.ftree__item') as HTMLElement | null;
   if (row) return row.dataset.dir === '1' ? (row.dataset.path ?? null) : null;
-  // The workspace row and the empty space under the tree both mean "the
-  // vault root" — otherwise there is no way to drag something back to the top.
-  if (el.closest('.ftree__root') || el.closest('.ftree__list')) {
+  // 工作区那一行、以及树下面的空白区，都表示"根目录" —— 否则没有任何
+  // 办法把东西拖回顶层。
+  //
+  // 空白区必须认到 `.ftree__body`（整个滚动区），不能只认 `.ftree__list`
+  // 那个 `<ul>`：ul 只有 `min-height: 48px` 那么高，再往下的空白根本不在
+  // 它里面，落点会算成 null，松手什么都不发生 —— 表现就是"二级目录拖不到
+  // 根"，只能碰巧落在那 48px 里。
+  if (
+    el.closest('.ftree__root') ||
+    el.closest('.ftree__list') ||
+    el.closest('.ftree__body')
+  ) {
     return root.value?.path ?? null;
   }
   return null;
@@ -1934,7 +1943,12 @@ onBeforeUnmount(() => {
     <div v-if="!root" class="ftree__empty">
       <button class="ftree__open-btn" @click="files.openFolder">{{ t('explorer.openFolder') }}</button>
     </div>
-    <div v-else ref="treeBody" class="ftree__body">
+    <div
+      v-else
+      ref="treeBody"
+      class="ftree__body"
+      :class="{ 'ftree__body--drop': dropTarget === root.path }"
+    >
       <!-- v4.3.5: root display doubles as the workspace switcher. Click
            opens a dropdown listing recent folders + "Open folder…". -->
       <div class="ftree__root-wrap">
@@ -2049,7 +2063,7 @@ onBeforeUnmount(() => {
         <span class="ftree__spinner" aria-hidden="true"></span>
         <span>{{ t('explorer.loading') }}</span>
       </div>
-      <ul v-else class="ftree__list" :class="{ 'ftree__list--drop': dropTarget === root.path }">
+      <ul v-else class="ftree__list">
         <FileTreeNode
           v-for="child in root.children"
           :key="child.path"
@@ -2846,8 +2860,8 @@ export const FileTreeNode = defineComponent({
   list-style: none;
   margin: 0;
   padding: 0;
-  /* Gives the empty area under a short tree enough body to be a drop target
-     for "move to the vault root". */
+  /* 短树的空白区留点高度，看起来"能点、能放东西"。落点判断不靠它 ——
+     见 `destinationAt`：整个 `.ftree__body` 都算根目录。 */
   min-height: 48px;
 }
 :deep(.ftree__item) {
@@ -2928,7 +2942,10 @@ export const FileTreeNode = defineComponent({
 .ftree__root--drop {
   box-shadow: inset 0 0 0 1px var(--accent);
 }
-.ftree__list--drop {
+/* 拖到"根目录"时的提示。挂在 `.ftree__body` 而不是那个 `<ul>` 上：整个
+   滚动区都是有效落点（见 destinationAt），高亮只覆盖 ul 那 48px 会让人
+   以为只有那一条能放。 */
+.ftree__body--drop {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 :deep(.ftree__icon) {
