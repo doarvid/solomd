@@ -1,5 +1,5 @@
 /**
- * 从笔记正文里抽出**外部链接** —— 关联连接面板在普通笔记页上的数据源。
+ * 从笔记正文里抽出**外部链接** —— 关联链接面板在普通笔记页上的数据源。
  *
  * 面板原本只服务浏览器 tab（链接来自采集回传）。但用户在日常写笔记时同样
  * 会贴一堆外链，"这一页引用的东西采过没有"是个通用问题，不该只在浏览器
@@ -9,6 +9,9 @@
  * （图片链接、相对路径、代码块里的示例、被括号包住的 URL），值得有用例
  * 盯着。
  */
+
+// 带扩展名：这个模块要能在 `node --test` 下直接跑（同 lib/ 的其它模块）。
+import { splitFrontmatter } from './frontmatter.ts';
 
 export interface ExternalLink {
   /** 原始 URL，未归一化 —— 归一化由 Rust 侧统一负责，避免两边规则漂移。 */
@@ -90,4 +93,44 @@ export function dirOf(filePath: string): string {
   const normalized = filePath.replace(/\\/g, '/');
   const cut = normalized.lastIndexOf('/');
   return cut > 0 ? filePath.slice(0, cut) : '';
+}
+
+/**
+ * 引用页目录：`<dir>/refs`。
+ *
+ * 关联链接（反链）场景是"给这篇笔记收一批引用"，那批引用页收在 `refs/`
+ * 子目录里 —— 和笔记本身分开，免得几十篇引用页把笔记目录淹掉。读原文的
+ * 场景不套这一层，直接落文档自己的目录（见 `stores/tabs.ts` 的 `refsDir`）。
+ *
+ * 分隔符跟着入参走：Windows 上 `dirOf` 给的是反斜杠路径，拼个 `/` 上去
+ * 就成了混用分隔符，落盘时虽然能用，但用户看着别扭，日志里也不好比对。
+ */
+export function refsDirOf(dir: string): string {
+  if (!dir) return '';
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
+  return dir.endsWith(sep) ? `${dir}refs` : `${dir}${sep}refs`;
+}
+
+/**
+ * 笔记 frontmatter 里的**原文地址**，没有就是空串。
+ *
+ * 采集页写的是 `source`（Obsidian Web Clipper 的约定，另一条采集路径
+ * capture_endpoint 也用它），更早的采集页和对话笔记写的是 `url`。
+ *
+ * **只认 http(s)**：对话笔记的 `source: deepseek` 是平台标记而不是地址，
+ * 照着它开浏览器只会得到一条非法 URL。
+ *
+ * frontmatter 解析失败（畸形 YAML）不该让调用方崩掉 —— 返回空串，调用方
+ * 表现为"没有这个按钮"。
+ */
+export function sourceUrlOf(content: string): string {
+  // 走真正的 YAML 解析而不是正则：采集端给含 `:` 的 URL 加引号
+  // （`source: "https://…"`），值还可能被折行 —— 正则版要么漏要么把引号
+  // 留在地址里。splitFrontmatter 保证不抛异常。
+  const { data } = splitFrontmatter(content);
+  for (const key of ['source', 'url']) {
+    const v = data[key];
+    if (typeof v === 'string' && /^https?:\/\//i.test(v.trim())) return v.trim();
+  }
+  return '';
 }

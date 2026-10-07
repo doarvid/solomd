@@ -16,7 +16,10 @@ import { useExport } from '../composables/useExport';
 import { useToastsStore } from '../stores/toasts';
 import { cleanAIArtifacts } from '../lib/clean-ai';
 import { useI18n } from '../i18n';
-import { openPath } from '@tauri-apps/plugin-opener';
+import { dirOf, sourceUrlOf } from '../lib/external-links';
+import { isBrowserTab } from '../lib/tab-kind';
+import { useBrowserStore } from '../stores/browser';
+import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -109,6 +112,7 @@ const tiles = useTilesStore();
 const files = useFiles();
 const exporter = useExport();
 const toasts = useToastsStore();
+const browser = useBrowserStore();
 
 const isMarkdown = computed(() => tabs.activeTab?.language === 'markdown');
 
@@ -268,6 +272,44 @@ function onAIRewrite() {
   window.dispatchEvent(
     new CustomEvent('solomd:ai-rewrite-open', { detail: picked }),
   );
+}
+
+/**
+ * 当前笔记 frontmatter 里的原文地址（`source` / `url`），没有就是空串 ——
+ * 按钮靠它决定出不出场。解析逻辑在 lib/external-links.ts 里有单测。
+ */
+const sourceUrl = computed(() => {
+  const tab = tabs.activeTab;
+  if (!tab || isBrowserTab(tab)) return '';
+  return sourceUrlOf(tab.content ?? '');
+});
+
+/**
+ * 在内嵌浏览器 tab 里打开原文。
+ *
+ * 移动端 / Wayland 没有内嵌浏览器（`browser_platform_supported` 为 false），
+ * 那里退回系统浏览器 —— 按钮的意图是"看原文"，嵌入式只是首选的载体，
+ * 不该因为平台而整个消失。
+ */
+function onOpenInBrowser() {
+  const url = sourceUrl.value;
+  if (!url) return;
+  if (browser.platformSupported !== true) {
+    void openUrl(url).catch(() => toasts.error(t('toast.openInBrowserFailed')));
+    return;
+  }
+  const tab = tabs.activeTab;
+  const noteDir = tab?.filePath ? dirOf(tab.filePath) : '';
+  tabs.newBrowserTab({
+    url,
+    captureDir: noteDir,
+    // 读当前文档原文的场景：采下来的是**这篇文档**的一份，落在文档自己的
+    // 目录（不套 refs）—— 那层子目录是给"关联链接批量收引用"用的。
+    refsDir: noteDir,
+    title: tab?.fileName,
+    // 从这篇笔记开出去的，采回来时还要 `[[wikilink]]` 回这篇。
+    sourceTitle: tab?.fileName?.replace(/\.[^.]+$/, ''),
+  });
 }
 
 async function onOpenExternal() {
@@ -890,6 +932,16 @@ onBeforeUnmount(() => {
       </button>
       <button class="icon-btn" @click="onOpenExternal" :title="tip('toolbar.openExternalTooltip', 'file.openExternal')">
         <Icon name="external" />
+      </button>
+      <!-- 只在笔记 frontmatter 里有原文地址（source/url）时出现 —— 普通
+           笔记点它没有任何去处，摆一个永远点不动的按钮只会是噪音。 -->
+      <button
+        v-if="sourceUrl"
+        class="icon-btn"
+        @click="onOpenInBrowser"
+        :title="t('toolbar.openInBrowserTooltip')"
+      >
+        <Icon name="globe" />
       </button>
       <div class="dropdown">
         <button

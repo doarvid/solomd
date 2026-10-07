@@ -381,7 +381,7 @@ function browserBoundsTick() {
   const wantsVisible =
     !!tab && isBrowser.value && isFocused.value && !!el && overlayDepth.value === 0;
   const rect = wantsVisible && el ? el.getBoundingClientRect() : null;
-  const bounds = rect ? toLogicalBounds(rect, window.devicePixelRatio) : null;
+  const bounds = rect ? toLogicalBounds(rect) : null;
   const nextVisible = bounds && tab ? tab.id : null;
 
   if (paneVisibleTabId !== nextVisible) {

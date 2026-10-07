@@ -49,6 +49,28 @@ export interface Tab {
   url?: string;
   /** Browser tabs only: absolute directory the capture writes into. */
   captureDir?: string;
+  /**
+   * Browser tabs only: where this tab's **引用页** go, decided when the tab is
+   * opened (see `newBrowserTab`).
+   *
+   * `captureDir` 是"这次研究的目录"（对话笔记落这里），引用页落在哪一层
+   * 取决于场景：关联链接（反链）是"给这篇笔记收一批引用"，收在 `D/refs/`
+   * 免得几十篇引用页把笔记目录淹掉；打开浏览器读当前文档原文是"给这篇
+   * 文档留一份"，就该落在文档自己的目录。两者不共用 `captureDir`，因为
+   * 同一个 tab 的对话和引用页本来就该落在不同层。
+   *
+   * 会话恢复出来的老 tab 没有这个字段，读的时候回退到 `<captureDir>/refs`
+   * —— 那正是老版本的行为。
+   */
+  refsDir?: string;
+  /**
+   * Browser tabs only: the note this tab was opened from ("关联链接" panel).
+   * Carried so that capturing the page from the browser toolbar still writes
+   * the `[[wikilink]]` back to that note — the panel's own capture button
+   * passes the same value, and without it the same capture through the
+   * browser would quietly lose the backlink.
+   */
+  sourceTitle?: string;
 }
 
 export interface FileReadResult {

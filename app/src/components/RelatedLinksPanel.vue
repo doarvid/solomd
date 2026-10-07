@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 关联连接 —— 右侧栏面板。
+ * 关联链接 —— 右侧栏面板。
  *
  * 数据源有**两个**，面板对它们一视同仁：
  *
@@ -20,7 +20,7 @@ import { useI18n } from '../i18n';
 import { useBrowserStore } from '../stores/browser';
 import { useTabsStore } from '../stores/tabs';
 import { isBrowserTab } from '../lib/tab-kind';
-import { extractExternalLinks, dirOf, type ExternalLink } from '../lib/external-links';
+import { extractExternalLinks, dirOf, refsDirOf, type ExternalLink } from '../lib/external-links';
 import DsButton from '../ui/DsButton.vue';
 
 const { t } = useI18n();
@@ -34,8 +34,14 @@ const emit = defineEmits<{ (e: 'close'): void }>();
 interface Source {
   kind: 'browser' | 'note';
   tabId: string;
-  /** 采集产物的落盘目录（绝对路径）。空表示这条来源没有目录，不能采集。 */
+  /** 来源自己的目录（绝对路径）。空表示这条来源没有目录，不能采集。 */
   dir: string;
+  /**
+   * 引用页落盘目录。关联链接是"给这篇笔记收一批引用"，收在 `dir/refs`；
+   * 从浏览器 tab 来的要看那个 tab 自己定好的 `refsDir`（读原文场景开出来
+   * 的 tab 就是文档自己的目录，不套 refs）。
+   */
+  refsDir: string;
   links: ExternalLink[];
   /** 浏览器来源的对话标题，用于保存按钮的提示。 */
   title: string;
@@ -47,10 +53,13 @@ const source = computed<Source | null>(() => {
 
   if (isBrowserTab(tab)) {
     const payload = browser.pending[tab.id];
+    const dir = tab.captureDir ?? '';
     return {
       kind: 'browser',
       tabId: tab.id,
-      dir: tab.captureDir ?? '',
+      dir,
+      // 老 tab（会话恢复出来的）没有 refsDir，回退成老版本的行为。
+      refsDir: tab.refsDir ?? refsDirOf(dir),
       links: (payload?.links ?? []).map((l) => ({ href: l.href, text: l.text })),
       title: payload?.title ?? tab.fileName,
     };
@@ -61,10 +70,13 @@ const source = computed<Source | null>(() => {
   try {
     const links = extractExternalLinks(tab.content ?? '');
     if (links.length === 0) return null;
+    const dir = tab.filePath ? dirOf(tab.filePath) : '';
     return {
       kind: 'note',
       tabId: tab.id,
-      dir: tab.filePath ? dirOf(tab.filePath) : '',
+      dir,
+      // 反链场景：这批引用页收在笔记目录下的 refs/。
+      refsDir: refsDirOf(dir),
       links,
       title: tab.fileName,
     };
@@ -94,6 +106,8 @@ async function rebuildRows() {
 }
 
 const dir = computed(() => source.value?.dir ?? '');
+/** 引用页落盘目录 —— 采集一律写这里。`dir` 只用来扫"已采集"索引。 */
+const refsDir = computed(() => source.value?.refsDir ?? '');
 
 watch(
   () => [source.value?.tabId, source.value?.links, dir.value] as const,
@@ -130,15 +144,35 @@ const sourceStem = computed(() => {
 });
 
 async function captureOne(row: Row) {
-  if (!dir.value) return;
-  await browser.captureLink(dir.value, row.href, row.text, sourceStem.value);
+  if (!refsDir.value) return;
+  await browser.captureLink(refsDir.value, row.href, row.text, sourceStem.value);
+}
+
+/** 内嵌浏览器只在支持的平台上有（Wayland / 移动端为 false）。 */
+const canBrowse = computed(() => browser.platformSupported === true);
+
+/**
+ * 在内嵌浏览器里打开这条链接。**目标目录跟着来源走** —— 打开就是为了
+ * 能顺手采下来，换个目录等于白开；`refsDir` 也一并带过去，这样"从面板
+ * 采集"和"从浏览器工具栏采集"落的是同一个地方。
+ */
+function openInBrowser(row: Row) {
+  tabs.newBrowserTab({
+    url: row.href,
+    captureDir: dir.value,
+    refsDir: refsDir.value,
+    title: row.text || row.href,
+    // 采集那一步在浏览器 tab 里做，来源笔记得跟着走 —— 否则采下来的页面
+    // 不会 `[[wikilink]]` 回这篇笔记。
+    sourceTitle: sourceStem.value,
+  });
 }
 
 async function captureAll() {
-  if (!dir.value) return;
+  if (!refsDir.value) return;
   // 串行：并发抓取会同时打一批站点，既容易触发反爬，也让逐条状态无法阅读。
   for (const row of [...uncaptured.value]) {
-    await browser.captureLink(dir.value, row.href, row.text, sourceStem.value);
+    await browser.captureLink(refsDir.value, row.href, row.text, sourceStem.value);
   }
 }
 
@@ -178,7 +212,7 @@ function label(s: ReturnType<typeof statusOf>): string {
       </div>
 
       <!-- 没有目标目录就没法采集。说清楚原因，而不是让按钮点了没反应。 -->
-      <p v-if="!dir" class="rlinks__hint">{{ t('browser.noTargetDir') }}</p>
+      <p v-if="!refsDir" class="rlinks__hint">{{ t('browser.noTargetDir') }}</p>
 
       <p v-if="browser.notice" class="rlinks__notice">{{ browser.notice }}</p>
 
@@ -190,14 +224,19 @@ function label(s: ReturnType<typeof statusOf>): string {
             <span class="rlinks__status" :class="`rlinks__status--${statusOf(row)}`">
               {{ label(statusOf(row)) }}
             </span>
-            <DsButton
-              v-if="dir && !browser.isCaptured(row.norm) && statusOf(row) !== 'running'"
-              size="sm"
-              variant="ghost"
-              @click="captureOne(row)"
-            >
-              {{ t('browser.captureOne') }}
-            </DsButton>
+            <div class="rlinks__ops">
+              <DsButton v-if="canBrowse" size="sm" variant="ghost" @click="openInBrowser(row)">
+                {{ t('browser.openInBrowser') }}
+              </DsButton>
+              <DsButton
+                v-if="refsDir && !browser.isCaptured(row.norm) && statusOf(row) !== 'running'"
+                size="sm"
+                variant="ghost"
+                @click="captureOne(row)"
+              >
+                {{ t('browser.captureOne') }}
+              </DsButton>
+            </div>
           </div>
         </li>
       </ul>
@@ -212,8 +251,10 @@ function label(s: ReturnType<typeof statusOf>): string {
   gap: var(--sp-2);
   padding: var(--sp-2);
   font-size: 12px;
+  height: 100%;
   min-height: 0;
-  overflow: auto;
+  /* 滚动只发生在下面的列表里 —— 标题栏钉在顶部（issue: 标题不该跟着滚）。 */
+  overflow: hidden;
 }
 .rlinks__head {
   display: flex;
@@ -249,6 +290,10 @@ function label(s: ReturnType<typeof statusOf>): string {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  flex: 1;
+  /* min-height:0 —— 否则 flex 项不肯缩到内容高度以下，列表会顶破面板而不是滚动。 */
+  min-height: 0;
+  overflow-y: auto;
 }
 .rlinks__item {
   display: flex;
@@ -271,6 +316,10 @@ function label(s: ReturnType<typeof statusOf>): string {
 }
 .rlinks__status {
   color: var(--text-faint);
+}
+.rlinks__ops {
+  display: flex;
+  gap: var(--sp-2);
 }
 .rlinks__status--captured,
 .rlinks__status--done {

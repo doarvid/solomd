@@ -179,7 +179,7 @@ interface Settings {
   showTypesPanel: boolean;
   // v4.0 pillar 1: Inline Agent Panel — chat-with-vault sidebar.
   showAgentPanel: boolean;
-  /** 关联连接面板（内嵌浏览器的采集结果）。 */
+  /** 关联链接面板（内嵌浏览器的采集结果）。 */
   showRelatedLinks: boolean;
   // v4.0 release migration marker: set on first launch after upgrading
   // to v4.0. If absent or false, `load()` force-enables `showAgentPanel`

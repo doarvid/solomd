@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { extractExternalLinks, dirOf } from './external-links.ts';
+import { extractExternalLinks, dirOf, refsDirOf, sourceUrlOf } from './external-links.ts';
 
 const hrefs = (md: string) => extractExternalLinks(md).map((l) => l.href);
 
@@ -92,4 +92,54 @@ test('dirOf returns empty when there is no parent', () => {
   // 这些情况下没有可用的目标目录，调用方应该拒绝采集而不是写到根上。
   assert.equal(dirOf('note.md'), '');
   assert.equal(dirOf(''), '');
+});
+
+// --- sourceUrlOf：顶部工具栏「在浏览器打开」靠它决定出不出场 ---
+
+test('sourceUrlOf 读 source，采集页就是这个键', () => {
+  const md = '---\ntitle: 网页\nsource: "https://x.example/a"\n---\n\n正文\n';
+  assert.equal(sourceUrlOf(md), 'https://x.example/a');
+});
+
+test('sourceUrlOf 退回读 url —— 更早的采集页和对话笔记只有这个键', () => {
+  const md = '---\ntitle: 对话\nsource: deepseek\nurl: https://chat.deepseek.com/a/chat/s/1\n---\n';
+  // `source: deepseek` 是平台标记不是地址，必须跳过它拿 url。
+  assert.equal(sourceUrlOf(md), 'https://chat.deepseek.com/a/chat/s/1');
+});
+
+test('sourceUrlOf 只认 http(s)', () => {
+  assert.equal(sourceUrlOf('---\nsource: deepseek\n---\n'), '');
+  assert.equal(sourceUrlOf('---\nsource: file:///etc/passwd\n---\n'), '');
+  assert.equal(sourceUrlOf('---\nsource: 42\n---\n'), '');
+});
+
+test('sourceUrlOf 对没有 frontmatter / 畸形 frontmatter 返回空串', () => {
+  assert.equal(sourceUrlOf('# 普通笔记\n'), '');
+  assert.equal(sourceUrlOf(''), '');
+  // 只认开头的块：正文里出现 `source:` 不算。
+  assert.equal(sourceUrlOf('正文\n\nsource: https://x.example/a\n'), '');
+});
+
+test('sourceUrlOf 脱掉 YAML 给 URL 加的引号', () => {
+  assert.equal(sourceUrlOf("---\nsource: 'https://x.example/a'\n---\n"), 'https://x.example/a');
+  assert.equal(sourceUrlOf('---\nsource: https://x.example/a\n---\n'), 'https://x.example/a');
+});
+
+// --- refsDirOf：引用页落在哪一层由开 tab 的场景决定 ---
+
+test('refsDirOf 把 refs 拼在目录后面', () => {
+  assert.equal(refsDirOf('/vault/notes'), '/vault/notes/refs');
+});
+
+test('refsDirOf 跟随原路径的分隔符风格', () => {
+  // Windows 上 dirOf 给的是反斜杠路径，拼 `/` 会变成混用分隔符。
+  assert.equal(refsDirOf('C:\\Users\\x\\vault'), 'C:\\Users\\x\\vault\\refs');
+});
+
+test('refsDirOf 不重复补分隔符', () => {
+  assert.equal(refsDirOf('/vault/notes/'), '/vault/notes/refs');
+});
+
+test('refsDirOf 对空目录返回空串，调用方据此拒绝采集', () => {
+  assert.equal(refsDirOf(''), '');
 });

@@ -6,6 +6,7 @@ import { useWritingSessionStore } from './writingSession';
 import { useWindowsStore } from './windows';
 import { stampGoalSetAtIfMissing } from '../composables/useWritingGoals';
 import { shouldCarryAcrossWorkspace } from '../lib/browser-tab-guards';
+import { refsDirOf } from '../lib/external-links.ts';
 
 // Legacy / global key (used when per-workspace tabs is OFF, and as the
 // migration source on first upgrade).
@@ -206,12 +207,23 @@ export const useTabsStore = defineStore('tabs', {
      * session restore, which never goes through this action) is covered by
      * the same diff.
      */
-    newBrowserTab(opts: { url: string; captureDir: string; title?: string }) {
+    newBrowserTab(opts: {
+      url: string;
+      captureDir: string;
+      title?: string;
+      sourceTitle?: string;
+      /** 引用页落盘目录。不传就按"关联链接"场景处理：`<captureDir>/refs`。 */
+      refsDir?: string;
+    }) {
       const tab: Tab = {
         id: newId(),
         kind: 'browser',
         url: opts.url,
         captureDir: opts.captureDir,
+        // 在开 tab 时就定死，之后的采集一律直接写这个目录 —— 采集本身不该
+        // 再猜"该不该多套一层 refs"。
+        refsDir: opts.refsDir ?? refsDirOf(opts.captureDir),
+        sourceTitle: opts.sourceTitle,
         fileName: opts.title ?? 'DeepSeek',
         content: '',
         savedContent: '',

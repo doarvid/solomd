@@ -89,6 +89,7 @@ import { useRagStore } from './stores/rag';
 import { useBrowserStore } from './stores/browser';
 import { isBrowserTab } from './lib/tab-kind';
 import { overlayDepth, useOverlayPresence, useOverlayPresenceOf } from './lib/overlay-presence';
+import { setBrowserPageZoom } from './lib/browser-rect';
 import { IS_APP_STORE_BUILD } from './lib/app-build';
 import UiPreview from './components/UiPreview.vue';
 
@@ -632,10 +633,20 @@ watchEffect(() => {
 // mouse coordinates stay unscaled, so after ⌘+/⌘- CodeMirror placed the caret
 // at the *unzoomed* position under the pointer (drift grows away from the
 // top-left corner). The native webview zoom (WKWebView pageZoom / WebView2 /
-// webkit2gtk zoom level) keeps one coordinate space end to end; CSS zoom
-// stays as the browser-mode fallback where getCurrentWebview() throws.
+// webkit2gtk zoom level) keeps one coordinate space end to end for *DOM*
+// consumers; CSS zoom stays as the browser-mode fallback where
+// getCurrentWebview() throws.
+//
+// Neither path keeps that space for the **native child webview**: it is an OS
+// surface positioned from a getBoundingClientRect(), which reports layout-space
+// CSS px — unzoomed — while its LogicalPosition is in window pixels. Hence the
+// setBrowserPageZoom() below; see lib/browser-rect.ts.
 watchEffect(() => {
   const z = settings.globalZoom || 1;
+  // 子 webview 的定位跟着这个值走 —— 两条缩放路径都是"渲染时放大 z 倍、
+  // 布局度量不变"，所以 getBoundingClientRect() 的结果要乘回 z 才是窗口的
+  // 逻辑像素。见 lib/browser-rect.ts 的说明。
+  setBrowserPageZoom(z);
   try {
     const webview = getCurrentWebview();
     void webview
@@ -1719,7 +1730,7 @@ const showInspectorPane = computed(
 // Toggled via command palette `view.toggleAgentPanel`; persists in settings.
 // App Store builds strip the AI/Agent surface entirely (Apple 3.1.1).
 const showAgentPane = computed(() => !IS_APP_STORE_BUILD && settings.showAgentPanel);
-// 关联连接面板。**不再要求平台支持内嵌浏览器** —— 面板对普通笔记同样
+// 关联链接面板。**不再要求平台支持内嵌浏览器** —— 面板对普通笔记同样
 // 生效，而那条路径只用到 reqwest 和文件系统，移动端和 Wayland 上一样能跑。
 const showRelatedLinksPane = computed(() => settings.showRelatedLinks);
 // v4.0.2 — search is a session-only pane (PR #50). ⌘⇧F toggles searchOpen;

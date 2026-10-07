@@ -182,6 +182,12 @@ defineProps<{ name: string; size?: number }>();
       <polyline points="15 3 21 3 21 9" />
       <line x1="10" y1="14" x2="21" y2="3" />
     </template>
+    <template v-else-if="name === 'globe'">
+      <!-- Open the original web page: globe with a meridian -->
+      <circle cx="12" cy="12" r="9" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <path d="M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z" />
+    </template>
     <!-- v4.6 F2 — curated type-section icons (types-as-lenses). -->
     <template v-else-if="name === 'type-project'">
       <rect x="3" y="4" width="18" height="16" rx="2" />

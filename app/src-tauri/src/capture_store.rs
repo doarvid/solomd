@@ -1,16 +1,23 @@
 //! 采集产物的落盘与"是否已采集"索引。
 //!
-//! 布局（见 spec）：
+//! 布局：一切都平铺在给定的 D 里。
 //!
 //! ```text
 //! D/
-//! ├── <对话标题>.md      对话平铺
-//! └── refs/
-//!     └── <网页标题>.md  采集到的引用页
+//! ├── <对话标题>.md        对话
+//! ├── <网页标题>.md        采集到的引用页
+//! └── <网页标题>.assets/   引用页的图片（和笔记同名同级）
 //! ```
 //!
-//! D 是每个浏览器 tab 各自关联的目录（`Tab.captureDir`），**所有路径都
-//! 从它推导** —— 不存在全局默认目录，两个 tab 不会互相覆盖。
+//! **D 由调用方定死，这里不再往下拼子目录。** 早期版本无条件往 `refs/`
+//! 里塞引用页，但"引用页该在哪一层"取决于 tab 是怎么打开的，不取决于采集
+//! 本身：关联链接（反链）场景是"给这篇笔记收一批引用"，落 `D/refs/`；
+//! 打开浏览器读当前文档原文的场景是"给这篇文档留一份"，落文档自己的目录。
+//! 那条规则现在住在开 tab 的地方（`stores/tabs.ts` 的 `newBrowserTab`），
+//! 每个 tab 的 `refsDir` 在打开时就定好，这里只管写。
+//!
+//! 已存在的 `D/refs/` 仍会被索引扫到（见 `collect_captured_urls`），不会
+//! 因为这次改动全部变回"未采集"。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -176,8 +183,9 @@ pub fn url_of_note(path: &Path) -> Option<String> {
 
 /// 扫描目标目录里所有已采集笔记的 URL（归一化后）。
 ///
-/// 范围是 D 本身加上 D/refs —— 对话笔记和引用页都可能带 `url:`。对话的
-/// url 是 DeepSeek 会话地址，不会与引用页冲突。
+/// 范围是 D 本身加上 D/refs —— 关联链接场景把引用页收在 D/refs/ 下，面板
+/// 拿到的却是 D，不连子目录一起扫就找不到刚采完的那条。对话笔记和引用页
+/// 都可能带 `url:`；对话的 url 是 DeepSeek 会话地址，不会与引用页冲突。
 ///
 /// **只扫一层**，不递归：这个目录是用户为一次研究建的，不该把整个 vault
 /// 拖进来。只读 frontmatter，不解析正文。
@@ -203,19 +211,9 @@ pub fn collect_captured_urls(dir: &Path) -> HashSet<String> {
     out
 }
 
-/// 落盘一篇笔记，返回实际写入的路径。
-///
-/// `sub` 为 None 写进 D 本身（对话），为 Some("refs") 写进子目录（引用页）。
-pub fn write_note(
-    dir: &Path,
-    sub: Option<&str>,
-    title: &str,
-    body: &str,
-) -> Result<PathBuf, String> {
-    let target = match sub {
-        Some(s) => dir.join(s),
-        None => dir.to_path_buf(),
-    };
+/// 落盘一篇笔记，返回实际写入的路径。写进 D 本身 —— D 就是最终目录。
+pub fn write_note(dir: &Path, title: &str, body: &str) -> Result<PathBuf, String> {
+    let target = dir.to_path_buf();
     std::fs::create_dir_all(&target).map_err(|e| format!("创建目录失败 {}: {e}", target.display()))?;
 
     let stem = safe_filename(title);
@@ -243,13 +241,17 @@ pub fn render_conversation(title: &str, url: &str, model: &str, captured: &str, 
 }
 
 /// 拼引用页的 frontmatter + 正文。
+///
+/// `captured` 是落盘时刻的 RFC3339，`created` 直接取它的日期部分 —— 多传
+/// 一个参数只会多一种把两个日期传反的机会。
 pub fn render_reference(
     title: &str,
     url: &str,
     captured: &str,
     via: &str,
+    meta: &webdoc::PageMeta,
     body: &str,
-    source: Option<&str>,
+    from: Option<&str>,
 ) -> String {
     let domain = tauri::Url::parse(url)
         .ok()
@@ -258,20 +260,48 @@ pub fn render_reference(
 
     let mut s = String::from("---\n");
     s.push_str(&format!("title: {}\n", yaml_scalar(title)));
+    // `source` 是网页地址（Obsidian Web Clipper 的约定）。`url` 留一份同值
+    // 的副本：已采集索引（url_from_frontmatter）和历史笔记都按 `url:` 找，
+    // 去掉它等于让所有旧笔记从索引里消失。
+    s.push_str(&format!("source: {}\n", yaml_scalar(url)));
     s.push_str(&format!("url: {}\n", yaml_scalar(url)));
     if !domain.is_empty() {
         s.push_str(&format!("domain: {domain}\n"));
     }
+    // 作者写成 wikilink，和来源笔记同一个道理：这样"某位作者"在
+    // 反向链接面板里能看到自己名下采过什么。
+    if !meta.authors.is_empty() {
+        s.push_str("author:\n");
+        for a in &meta.authors {
+            s.push_str(&format!("  - {}\n", yaml_scalar(&format!("[[{a}]]"))));
+        }
+    }
+    if let Some(p) = meta.published.as_deref().filter(|v| !v.trim().is_empty()) {
+        s.push_str(&format!("published: {}\n", yaml_scalar(p)));
+    }
+    s.push_str(&format!("created: {}\n", yaml_scalar(&date_of(captured))));
     s.push_str(&format!("captured: {captured}\n"));
+    if let Some(d) = meta.description.as_deref().filter(|v| !v.trim().is_empty()) {
+        s.push_str(&format!("description: {}\n", yaml_scalar(d.trim())));
+    }
+    // 标签全部来自页面自己声明的 meta（keywords / article:tag 之类）。
+    // 页面没写就不写这个键 —— 和 author/published 一个规矩：空字符串比
+    // 缺字段更糟。
+    if !meta.tags.is_empty() {
+        s.push_str("tags:\n");
+        for t in &meta.tags {
+            s.push_str(&format!("  - {}\n", yaml_scalar(t)));
+        }
+    }
     s.push_str(&format!("via: {via}\n"));
     // 指向来源笔记。**写成 wikilink**，反向链接是靠 workspace index 扫
     // 正文/frontmatter 里的 `[[...]]` 建立的 —— 写个普通字符串不会有任何
     // 关联，用户在来源笔记里看不到"它引用的东西都采过哪些"。
-    if let Some(src) = source.filter(|v| !v.trim().is_empty()) {
-        s.push_str(&format!("source: {}\n", yaml_scalar(&format!("[[{}]]", src.trim()))));
+    if let Some(src) = from.filter(|v| !v.trim().is_empty()) {
+        s.push_str(&format!("from: {}\n", yaml_scalar(&format!("[[{}]]", src.trim()))));
     }
     s.push_str("---\n\n");
-    if let Some(src) = source.filter(|v| !v.trim().is_empty()) {
+    if let Some(src) = from.filter(|v| !v.trim().is_empty()) {
         // 正文里再放一条：frontmatter 里的 wikilink 不一定会被所有渲染器
         // 显示成可点的链接，正文这条保证它在阅读视图里看得见。
         s.push_str(&format!("> 采集自 [[{}]]\n\n", src.trim()));
@@ -279,6 +309,23 @@ pub fn render_reference(
     s.push_str(body.trim());
     s.push('\n');
     s
+}
+
+/// RFC3339 时间戳 → `YYYY-MM-DD`。认不出来就原样返回。
+fn date_of(timestamp: &str) -> String {
+    let head = timestamp.trim();
+    let b = head.as_bytes();
+    let iso = b.len() >= 10
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[4] == b'-'
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[7] == b'-'
+        && b[8..10].iter().all(|c| c.is_ascii_digit());
+    if iso {
+        head[..10].to_string()
+    } else {
+        head.to_string()
+    }
 }
 
 /// YAML 标量：需要时加引号。
@@ -342,11 +389,13 @@ pub fn capture_save_conversation(
         title.clone()
     };
 
-    let path = write_note(&dir, None, &stem, &body)?;
+    let path = write_note(&dir, &stem, &body)?;
     Ok(path.to_string_lossy().to_string())
 }
 
-/// 抓一个引用链接：拉页面 → 抽正文 → 写 `<dir>/refs/<标题>.md`。
+/// 抓一个引用链接：拉页面 → 抽正文 → 写 `<dir>/<标题>.md`（图片落
+/// `<dir>/<标题>.assets/`）。`dir` 由调用方定死 —— 关联链接场景传的是
+/// `D/refs`，读原文场景传的是文档自己的目录。
 ///
 /// 抓取失败**不返回 Err** —— 那样调用方就得区分"整体失败"和"这一条失败"。
 /// 改成始终返回 `FetchOutcome`，把失败装进 `error` 字段，逐条状态由前端展示。
@@ -384,10 +433,11 @@ pub async fn capture_fetch_page(
                 &url,
                 &captured,
                 ext.via.as_str(),
+                &ext.meta,
                 "",
                 source_title.as_deref(),
             );
-            let path = write_note(&dir, Some("refs"), &ext.title, &body)?;
+            let path = write_note(&dir, &ext.title, &body)?;
                     return Ok(FetchOutcome {
                 url,
                 title: ext.title,
@@ -399,7 +449,7 @@ pub async fn capture_fetch_page(
     };
 
     let extracted = webdoc::extract(&html, &final_url, &host);
-    let (title, markdown, via, error) = match extracted {
+    let (title, markdown, via, error, meta) = match extracted {
         Some(e) => (
             if e.title.trim().is_empty() {
                 fallback_title.clone()
@@ -409,6 +459,7 @@ pub async fn capture_fetch_page(
             e.markdown,
             e.via.as_str().to_string(),
             None,
+            e.meta,
         ),
         None => (
             if fallback_title.trim().is_empty() {
@@ -419,6 +470,9 @@ pub async fn capture_fetch_page(
             String::new(),
             "stub".to_string(),
             Some("没能抽到正文（页面可能需要登录或由 JS 渲染）".to_string()),
+            // 正文抽不到不代表页面没声明作者和日期 —— 这种页面恰恰最需要
+            // frontmatter 里的信息来辨认，所以单独再读一次 meta。
+            webdoc::extract_meta(&html),
         ),
     };
 
@@ -428,6 +482,7 @@ pub async fn capture_fetch_page(
         &final_url,
         &captured,
         &via,
+        &meta,
         &markdown,
         source_title.as_deref(),
     )
@@ -466,6 +521,9 @@ async fn capture_github_repo(
                 url,
                 &captured,
                 webdoc::Via::Readme.as_str(),
+                // README 是仓库里的文件，不是网页 —— 它没有 og:author 之类的
+                // 页面元信息，作者/日期这些字段本来就不存在。
+                &webdoc::PageMeta::default(),
                 &markdown,
                 source_title,
             )
@@ -485,10 +543,11 @@ async fn capture_github_repo(
                 url,
                 &captured,
                 webdoc::Via::Stub.as_str(),
+                &webdoc::PageMeta::default(),
                 "",
                 source_title,
             );
-            let p = write_note(dir, Some("refs"), &title, &body)?;
+            let p = write_note(dir, &title, &body)?;
             Ok(FetchOutcome {
                 url: url.to_string(),
                 title,
@@ -512,21 +571,21 @@ async fn write_reference_with_assets(
     url: &str,
     captured: &str,
     via: &str,
+    meta: &webdoc::PageMeta,
     markdown: &str,
     source: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let refs = dir.join("refs");
-    std::fs::create_dir_all(&refs).map_err(|e| format!("创建目录失败 {}: {e}", refs.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败 {}: {e}", dir.display()))?;
 
-    let path = reserve_path(&refs, &safe_filename(title));
+    let path = reserve_path(dir, &safe_filename(title));
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| safe_filename(title));
 
-    let (localised, _report) = super::page_assets::localise_images(&refs, &stem, markdown).await;
+    let (localised, _report) = super::page_assets::localise_images(dir, &stem, markdown).await;
 
-    let body = render_reference(title, url, captured, via, &localised, source);
+    let body = render_reference(title, url, captured, via, meta, &localised, source);
     std::fs::write(&path, body).map_err(|e| format!("写入失败 {}: {e}", path.display()))?;
     Ok(path)
 }
@@ -674,10 +733,27 @@ mod tests {
         assert!(md.contains("正文"));
     }
 
+    fn sample_meta() -> webdoc::PageMeta {
+        webdoc::PageMeta {
+            authors: vec!["Bingal".to_string()],
+            published: Some("2024-01-30".to_string()),
+            description: Some("本方案采用 llamafile 的格式".to_string()),
+            tags: vec!["AIAgent框架".to_string(), "本地部署".to_string()],
+        }
+    }
+
     #[test]
     fn a_reference_without_a_source_has_no_link() {
-        let md = render_reference("网页", "https://x.example/a", "2026-01-01T00:00:00Z", "readability", "正文", None);
-        assert!(!md.contains("source:"), "无来源时不该写 source 字段");
+        let md = render_reference(
+            "网页",
+            "https://x.example/a",
+            "2026-01-01T00:00:00Z",
+            "readability",
+            &webdoc::PageMeta::default(),
+            "正文",
+            None,
+        );
+        assert!(!md.contains("from:"), "无来源时不该写 from 字段");
         assert!(!md.contains("[["), "无来源时不该出现 wikilink");
     }
 
@@ -690,28 +766,102 @@ mod tests {
             "https://x.example/a",
             "2026-01-01T00:00:00Z",
             "readability",
+            &webdoc::PageMeta::default(),
             "正文",
             Some("某次对话"),
         );
-        assert!(md.contains("source: \"[[某次对话]]\""), "frontmatter 里没有 wikilink:\n{md}");
+        assert!(md.contains("from: \"[[某次对话]]\""), "frontmatter 里没有 wikilink:\n{md}");
         assert!(md.contains("> 采集自 [[某次对话]]"), "正文里没有可见的链接:\n{md}");
     }
 
     #[test]
     fn a_blank_source_is_treated_as_no_source() {
         // 空标题会渲染出 `[[]]`，那是个指向不存在笔记的悬空链接。
-        let md = render_reference("网页", "https://x.example/a", "t", "stub", "", Some("   "));
+        let md = render_reference(
+            "网页",
+            "https://x.example/a",
+            "t",
+            "stub",
+            &webdoc::PageMeta::default(),
+            "",
+            Some("   "),
+        );
         assert!(!md.contains("[["), "空白来源不该产生 wikilink");
     }
 
     #[test]
-    fn write_note_creates_the_refs_subdir_and_dedupes_names() {
+    fn a_reference_carries_the_page_meta_and_keeps_the_url_key() {
+        // 目标格式：source/author/published/created/description/tags，
+        // 外加 url —— 索引和历史笔记都按 `url:` 找，去掉它等于让所有
+        // 旧笔记从"已采集"里消失。
+        let md = render_reference(
+            "网页",
+            "https://x.example/a",
+            "2026-01-01T10:20:30+08:00",
+            "readability",
+            &sample_meta(),
+            "正文",
+            Some("某次对话"),
+        );
+        // URL 含 `:`，yaml_scalar 会给它加引号 —— 和 Web Clipper 写出来
+        // 的形式一致，也是合法 YAML。
+        assert!(md.contains("source: \"https://x.example/a\""), "缺 source（URL）:\n{md}");
+        assert!(md.contains("url: \"https://x.example/a\""), "缺 url:\n{md}");
+        assert_eq!(
+            url_from_frontmatter(&md).as_deref(),
+            Some("https://x.example/a"),
+            "索引读不到 url 了"
+        );
+        // 作者是列表，每项都是 wikilink（YAML 里 `[[x]]` 必须加引号，
+        // 否则会被解析成嵌套数组）。
+        assert!(md.contains("author:\n  - \"[[Bingal]]\"\n"), "作者格式不对:\n{md}");
+        assert!(md.contains("published: 2024-01-30"), "缺 published:\n{md}");
+        // created 取 captured 的日期部分，精确时刻仍然留在 captured 里。
+        assert!(md.contains("created: 2026-01-01\n"), "缺 created:\n{md}");
+        assert!(md.contains("captured: 2026-01-01T10:20:30+08:00\n"), "缺 captured:\n{md}");
+        assert!(md.contains("description: 本方案采用 llamafile 的格式\n"), "缺 description:\n{md}");
+        // 标签是页面自己声明的（keywords / article:tag），不再写死 clippings。
+        assert!(
+            md.contains("tags:\n  - AIAgent框架\n  - 本地部署\n"),
+            "tags 不是页面 meta 里的那几个:\n{md}"
+        );
+        assert!(!md.contains("clippings"), "还留着写死的 clippings:\n{md}");
+        assert!(md.contains("via: readability\n"), "缺 via:\n{md}");
+    }
+
+    #[test]
+    fn a_reference_omits_the_meta_keys_it_does_not_have() {
+        // 空字符串比缺字段更糟：用户在笔记里看到 `author: ""` 只会以为
+        // 采集坏了。
+        let md = render_reference(
+            "网页",
+            "https://x.example/a",
+            "2026-01-01T10:20:30+08:00",
+            "stub",
+            &webdoc::PageMeta::default(),
+            "",
+            None,
+        );
+        assert!(!md.contains("author:"), "无作者时不该写 author:\n{md}");
+        assert!(!md.contains("published:"), "无日期时不该写 published:\n{md}");
+        assert!(!md.contains("description:"), "无摘要时不该写 description:\n{md}");
+        // 页面没声明标签就不写 tags —— 空列表比缺字段更糟。
+        assert!(!md.contains("tags:"), "无标签时不该写 tags:\n{md}");
+        // 这两个永远在。
+        assert!(md.contains("created: 2026-01-01\n"));
+        assert!(md.contains("captured: 2026-01-01T10:20:30+08:00\n"));
+    }
+
+    #[test]
+    fn write_note_writes_into_the_given_dir_and_dedupes_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
 
-        let a = write_note(root, Some("refs"), "同名", "第一篇").expect("write a");
+        // `refs` 由调用方决定（关联链接场景会传 D/refs），这里只认它给的那个目录。
+        let refs = root.join("refs");
+        let a = write_note(&refs, "同名", "第一篇").expect("write a");
         assert!(a.ends_with("refs/同名.md"), "路径不对: {}", a.display());
-        let b = write_note(root, Some("refs"), "同名", "第二篇").expect("write b");
+        let b = write_note(&refs, "同名", "第二篇").expect("write b");
         assert!(b.ends_with("refs/同名-2.md"), "重名没有加后缀: {}", b.display());
 
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "第一篇");
@@ -719,32 +869,37 @@ mod tests {
     }
 
     #[test]
-    fn collect_captured_urls_scans_both_the_dir_and_refs() {
+    fn write_note_does_not_add_a_subdir_of_its_own() {
+        // 读原文的场景直接落文档自己的目录 —— 多拼一层 refs 就跑到别处去了。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = write_note(dir.path(), "网页", "正文").expect("write");
+        assert_eq!(p.parent(), Some(dir.path()), "被多套了一层目录: {}", p.display());
+    }
+
+    #[test]
+    fn collect_captured_urls_scans_the_dir_and_the_refs_subdir() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
 
-        write_note(
-            root,
-            None,
-            "对话",
-            "---\nurl: https://chat.deepseek.com/a/chat/s/1\n---\n",
-        )
-        .unwrap();
-        write_note(
-            root,
-            Some("refs"),
-            "网页",
-            "---\nurl: https://example.com/a?utm_source=x\n---\n",
-        )
-        .unwrap();
+        write_note(root, "对话", "---\nurl: https://chat.deepseek.com/a/chat/s/1\n---\n").unwrap();
+        write_note(root, "网页", "---\nurl: https://example.com/a?utm_source=x\n---\n").unwrap();
         // 没有 url 的笔记不该影响索引。
-        write_note(root, Some("refs"), "无链接", "# 纯笔记\n").unwrap();
+        write_note(root, "无链接", "# 纯笔记\n").unwrap();
+
+        // 关联链接场景把引用页收在 D/refs/ 下 —— 面板扫 D 时必须连它一起扫，
+        // 否则刚采完的那条仍然显示"未采集"，用户会重复采一遍。
+        let refs = root.join("refs");
+        write_note(&refs, "引用页", "---\nurl: https://refs.example/page\n---\n").unwrap();
         // 非 md 文件要被忽略。
-        std::fs::write(root.join("refs/ignore.txt"), "url: https://nope.example/").unwrap();
+        std::fs::write(refs.join("ignore.txt"), "url: https://nope.example/").unwrap();
 
         let got = collect_captured_urls(root);
-        assert_eq!(got.len(), 2, "扫到的 URL 数量不对: {got:?}");
+        assert_eq!(got.len(), 3, "扫到的 URL 数量不对: {got:?}");
         assert!(got.contains("https://chat.deepseek.com/a/chat/s/1"));
+        assert!(
+            got.iter().any(|u| u.contains("refs.example")),
+            "D/refs/ 里的引用页没被扫到: {got:?}"
+        );
         // 关键：带跟踪参数的那条要以归一化形式入索引，否则下次比对不上。
         assert!(
             got.contains("https://example.com/a"),

@@ -141,8 +141,43 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// 把相对路径编码成 markdown 链接目标认得的形式。
+///
+/// 规则要和前端 `lib/md-image-url.ts` 的 `encodeImageDestination` 对齐 ——
+/// 两边一个 .ts 一个 .rs，没有能共享的地方，只能靠同一批用例钉住
+/// （见本文件与 `app/src/lib/md-image-url.test.ts` 的测试）。
+///
+/// 为什么必须编码：CommonMark 的裸目标不允许空格，`![](./My Note.assets/1-x.png)`
+/// **根本不是图片**，markdown-it 会把整行当普通文本原样渲染（#345）。而这里
+/// 的目录名就是文章标题，`safe_filename` 保留空格 —— 英文标题基本都带空格，
+/// 于是表现就是"图下载了，正文里却是一行字面文本"。`%` 也要转义：渲染出的
+/// `src` 回到路径时只解码一次，留着会把 `100%.png` 解坏。
+///
+/// 只动会破坏目标的字符：字母、CJK 和 `/` 都原样留着。
+fn encode_md_destination(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            ' ' => out.push_str("%20"),
+            '(' => out.push_str("%28"),
+            ')' => out.push_str("%29"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
+            // 其余空白（制表、换行、不间断空格）按 UTF-8 逐字节编码。
+            c if c.is_whitespace() => {
+                for b in c.to_string().as_bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// 下载正文里的图片，写到 `<dir>/<stem>.assets/`，并把 markdown 里的远程
-/// URL 改写成相对路径。
+/// URL 改写成相对路径（编码见 `encode_md_destination`）。
 ///
 /// 返回改写后的 markdown 和一份统计。任何一张图失败都只影响它自己 ——
 /// 保留原 URL，正文照常落盘。
@@ -202,7 +237,7 @@ pub async fn localise_images(dir: &Path, stem: &str, markdown: &str) -> (String,
             continue;
         }
 
-        let rel = format!("./{}/{}", folder_name, name);
+        let rel = encode_md_destination(&format!("./{}/{}", folder_name, name));
         out = out.replace(url.as_str(), &rel);
         report.downloaded += 1;
     }
@@ -349,6 +384,33 @@ mod tests {
         assert!(report.folder.is_none());
         // 不能凭空建一个空目录。
         assert!(!dir.path().join("x.assets").exists());
+    }
+
+    // 下面这批用例和 app/src/lib/md-image-url.test.ts 一一对应：两份实现
+    // 没有共享代码的地方，靠同一批输入钉住它们不会漂移。
+    #[test]
+    fn encode_md_destination_matches_the_frontend() {
+        // 带空格的标题 → 带空格的目录名，这是采集最常见的形态。
+        assert_eq!(
+            encode_md_destination("./How to Build a Widget.assets/1-figure.png"),
+            "./How%20to%20Build%20a%20Widget.assets/1-figure.png"
+        );
+        // 没问题的字符不该被改动 —— 中文标题、下划线目录都保持可读。
+        assert_eq!(encode_md_destination("./图片.assets/1-截图.png"), "./图片.assets/1-截图.png");
+        assert_eq!(encode_md_destination("_assets/image-1.png"), "_assets/image-1.png");
+    }
+
+    #[test]
+    fn encode_md_destination_handles_every_character_that_breaks_a_bare_target() {
+        // 括号：markdown-it 在裸目标里遇到不成对的括号同样解析不出来。
+        assert_eq!(
+            encode_md_destination("./Pictures (old)/x.png"),
+            "./Pictures%20%28old%29/x.png"
+        );
+        // `%` 必须先转义：渲染出的 src 回到路径时只解码一次。
+        assert_eq!(encode_md_destination("./100%.png"), "./100%25.png");
+        assert_eq!(encode_md_destination("./a%20b.png"), "./a%2520b.png");
+        assert_eq!(encode_md_destination("./a<b>c.png"), "./a%3Cb%3Ec.png");
     }
 
     #[tokio::test]

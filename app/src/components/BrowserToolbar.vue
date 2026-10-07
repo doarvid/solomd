@@ -7,9 +7,10 @@
  * 后退/前进也没有：保留历史栈就要处理它与会话恢复、多次导航的交互，而它
  * 对"检索 → 采集 → 归档"这条主路径没有贡献。
  */
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import type { Tab } from '../types';
 import { useBrowserStore } from '../stores/browser';
+import { refsDirOf } from '../lib/external-links';
 import { useI18n } from '../i18n';
 import DsInput from '../ui/DsInput.vue';
 import DsButton from '../ui/DsButton.vue';
@@ -71,6 +72,50 @@ async function capture() {
 async function save() {
   await browser.saveConversation(props.tab.id);
 }
+
+/**
+ * 这是 DeepSeek 对话页吗？
+ *
+ * 两种情况必须分开，不能共用一个按钮：`browser_request_capture` 注入的
+ * 脚本是 DeepSeek 专用的（调 /api/v0/chat/history_messages 拿结构化 JSON），
+ * 在别的站点上什么也提取不到；而通用网页抓取走的是 `capture_fetch_page`
+ * （服务端抓 + 正文抽取，GitHub 仓库读 README），在对话页上只能捞到一坨 UI 文本。
+ *
+ * 地址取地址栏的值而不是 `tab.url`：后者只在建 tab 时写一次，页内跳转
+ * （点页面里的链接）不会更新它。
+ */
+const isChatPage = computed(() => {
+  const u = normalise(address.value);
+  return !!u && new URL(u).hostname === 'chat.deepseek.com';
+});
+
+/**
+ * 采集本页 —— 通用网页抓取，和「关联链接」面板是同一个后端命令
+ * （`capture_fetch_page`），所以采完面板里那条会直接变成「已采集」。
+ *
+ * `sourceTitle` 带上 tab 的来源笔记（从关联链接面板开出来的会带），
+ * 采集页的 frontmatter 与正文才有 `[[wikilink]]` 指回去。
+ */
+const capturingPage = ref(false);
+
+/**
+ * 引用页落盘目录 —— **开 tab 时就定好了**（见 stores/tabs.ts 的 `refsDir`），
+ * 关联链接场景是 `D/refs`，读原文场景就是文档自己的目录。这里只管用，
+ * 不再猜该不该多套一层。会话恢复出来的老 tab 没有这个字段，退回老行为。
+ */
+const refsDir = computed(() => props.tab.refsDir ?? refsDirOf(props.tab.captureDir ?? ''));
+
+async function capturePage() {
+  const url = normalise(address.value) ?? props.tab.url;
+  const dir = refsDir.value;
+  if (!url || !dir || capturingPage.value) return;
+  capturingPage.value = true;
+  try {
+    await browser.captureLink(dir, url, props.tab.fileName, props.tab.sourceTitle);
+  } finally {
+    capturingPage.value = false;
+  }
+}
 </script>
 
 <template>
@@ -86,7 +131,10 @@ async function save() {
       :placeholder="t('browser.addressPlaceholder')"
       @keydown.enter.prevent="go"
     />
+    <!-- 按页面切换：对话页给「采集对话 + 保存」，普通网页给「采集本页」。
+         两边的按钮互不相干，同时摆出来的话另外那个永远是点错的。 -->
     <DsButton
+      v-if="isChatPage"
       class="browser-toolbar__btn"
       size="sm"
       :loading="browser.capturing"
@@ -96,6 +144,18 @@ async function save() {
       {{ t('browser.capture') }}
     </DsButton>
     <DsButton
+      v-else
+      class="browser-toolbar__btn"
+      size="sm"
+      :loading="capturingPage"
+      :disabled="capturingPage || !refsDir"
+      :title="refsDir ? '' : t('browser.noTargetDir')"
+      @click="capturePage"
+    >
+      {{ t('browser.capturePage') }}
+    </DsButton>
+    <DsButton
+      v-if="isChatPage"
       class="browser-toolbar__btn"
       size="sm"
       variant="primary"
