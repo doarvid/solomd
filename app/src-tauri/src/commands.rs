@@ -649,12 +649,28 @@ fn rewrite_assets_refs(file: &Path, old_assets: &Path, new_assets: &Path) -> Res
     };
     // Match the assets folder followed by `/` so we don't accidentally
     // rewrite occurrences inside prose (`foo.assets` mentioned in text).
-    let old_pat = format!("{old_name}/");
-    let new_pat = format!("{new_name}/");
-    if !body.contains(&old_pat) {
+    //
+    // **两种写法都要换**：磁盘上的目录名是原文（`我的 笔记.assets`），而
+    // 正文里那个可能是百分号编码的（`我的%20笔记.assets`）—— 编辑器写图片
+    // 链接（`markdownImage`）和采集落盘都走编码形式。只按原文匹配的话，
+    // 名字里带空格/括号/`%` 的笔记改完名目录跟着走了、正文却还指着旧名字，
+    // 图全断，而且没有任何报错。
+    let mut rewritten = body.to_string();
+    for (from, to) in [
+        (old_name.to_string(), new_name.to_string()),
+        (
+            super::page_assets::encode_md_destination(old_name),
+            super::page_assets::encode_md_destination(new_name),
+        ),
+    ] {
+        let old_pat = format!("{from}/");
+        if rewritten.contains(&old_pat) {
+            rewritten = rewritten.replace(&old_pat, &format!("{to}/"));
+        }
+    }
+    if rewritten == body {
         return Ok(());
     }
-    let rewritten = body.replace(&old_pat, &new_pat);
     fs::write(file, rewritten).map_err(|e| format!("write back: {e}"))
 }
 

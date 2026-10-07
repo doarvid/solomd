@@ -157,7 +157,9 @@ pub(crate) fn percent_decode(s: &str) -> String {
 /// `src` 回到路径时只解码一次，留着会把 `100%.png` 解坏。
 ///
 /// 只动会破坏目标的字符：字母、CJK 和 `/` 都原样留着。
-fn encode_md_destination(path: &str) -> String {
+/// `pub(crate)`：`commands.rs` 改笔记名时也要用它 —— 正文里的 `.assets/`
+/// 引用可能是编码过的，磁盘上的目录名是原文，两边得用同一套规则对齐。
+pub(crate) fn encode_md_destination(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for ch in path.chars() {
         match ch {

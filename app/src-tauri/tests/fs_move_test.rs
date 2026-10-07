@@ -5,7 +5,8 @@
 //! as well as through the real filesystem.
 
 use app_lib::commands::{
-    abs_segments, fs_move_inner, lexical_relative, lexical_resolve, rewrite_links_after_move,
+    abs_segments, fs_move_inner, fs_rename, lexical_relative, lexical_resolve,
+    rewrite_links_after_move,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -327,4 +328,66 @@ fn dirs_with_extensions_reports_every_ancestor_of_a_match() {
     )
     .unwrap();
     assert!(none.is_empty());
+}
+
+// --------------------------------------------------------------------------
+// Rename (#rename) — the sibling of a move where the STEM changes, so the
+// `.assets/` folder is renamed too and the body's links must be rewritten.
+// --------------------------------------------------------------------------
+
+#[test]
+fn renaming_a_note_renames_its_assets_folder_and_the_links() {
+    let root = tmp("rename-assets");
+    fs::create_dir_all(root.join("note.assets")).unwrap();
+    fs::write(root.join("note.assets/a.png"), b"png").unwrap();
+    fs::write(root.join("note.md"), "![](note.assets/a.png)\n").unwrap();
+
+    fs_rename(
+        root.join("note.md").to_string_lossy().to_string(),
+        root.join("renamed.md").to_string_lossy().to_string(),
+    )
+    .unwrap();
+
+    assert!(root.join("renamed.assets/a.png").is_file(), "图片目录没跟着改名");
+    assert!(!root.join("note.assets").exists(), "旧目录还在");
+    assert_eq!(
+        fs::read_to_string(root.join("renamed.md")).unwrap(),
+        "![](renamed.assets/a.png)\n",
+        "正文里的引用没改写"
+    );
+}
+
+#[test]
+fn renaming_rewrites_percent_encoded_asset_links_too() {
+    // 磁盘上的目录名是原文，正文里写的却是编码形式（编辑器写图片链接、
+    // 采集落盘都这样）。只按原文匹配的话这里改写不到，图全断且不报错。
+    let root = tmp("rename-encoded");
+    fs::create_dir_all(root.join("我的 笔记.assets")).unwrap();
+    fs::write(root.join("我的 笔记.assets/a.png"), b"png").unwrap();
+    fs::write(root.join("我的 笔记.md"), "![](我的%20笔记.assets/a.png)\n").unwrap();
+
+    fs_rename(
+        root.join("我的 笔记.md").to_string_lossy().to_string(),
+        root.join("新 名字.md").to_string_lossy().to_string(),
+    )
+    .unwrap();
+
+    assert!(root.join("新 名字.assets/a.png").is_file(), "图片目录没跟着改名");
+    assert_eq!(
+        fs::read_to_string(root.join("新 名字.md")).unwrap(),
+        "![](新%20名字.assets/a.png)\n",
+        "编码形式的引用没改写"
+    );
+}
+
+#[test]
+fn renaming_a_note_without_assets_is_fine() {
+    let root = tmp("rename-plain");
+    fs::write(root.join("note.md"), "正文\n").unwrap();
+    fs_rename(
+        root.join("note.md").to_string_lossy().to_string(),
+        root.join("other.md").to_string_lossy().to_string(),
+    )
+    .unwrap();
+    assert!(root.join("other.md").is_file());
 }
