@@ -45,6 +45,14 @@ interface Settings {
   // Empty = built-in monospace stack.
   codeFontFamily: string;
   showOutline: boolean;
+  /**
+   * 大纲默认值从"关"翻成"开"的一次性标记。
+   *
+   * 迁移本身在 App.vue 的 setup 里（它还要打开已恢复标签页各自的开关，得等
+   * tabs store 就位）；这里只负责把标记持久化，以及让全新安装直接就是
+   * "迁移过了"。
+   */
+  outlineDefaultOnMigrated: boolean;
   outlineSide: 'left' | 'right';
   // v4.6.2 — outline heading marker style. 'jump' = a/b/c… keyboard-jump labels
   // (default; mixes letters + digits past 25 headings); 'number' = clean
@@ -558,7 +566,19 @@ function defaults(): Settings {
     alwaysShowMarkers: false,
     highlightCurrentLine: false,
     codeFontFamily: '',
-    showOutline: false,
+    // 大纲默认开着：它是首屏就能看出这份笔记结构的地方，而"打开笔记先
+    // 手动开一个大纲"这件事没人会做第二遍。只影响**新开**的标签页 ——
+    // 每个 tab 记住自己的开关（见 stores/tabs.ts），老标签页由
+    // outlineDefaultOnMigrated 迁移一次。
+    showOutline: true,
+    // **必须是 false**：迁移在 App.vue 里读的是合并后的设置（`load()` 是
+    // `{...defaults(), ...parsed}`，老用户的 blob 里没有这个键，会从默认值
+    // 拿），写成 true 的话条件永远不成立、迁移一次都不会跑。
+    //
+    // 全新安装也跑一次那个块：对它来说是空操作（showOutline 本来就是新
+    // 默认值），只是把标记落下。旧的 fileTreeDefaultDesktopMigrated 之所以
+    // 能写 true，是因为它查的是 `parsed` 而不是合并结果。
+    outlineDefaultOnMigrated: false,
     outlineSide: 'right',
     outlineMarker: 'jump',
     showFileTree: !isMobile(),
@@ -803,6 +823,9 @@ function load(): Settings {
         if (!isMobile()) merged.showFileTree = true;
         merged.fileTreeDefaultDesktopMigrated = true;
       }
+      // 大纲默认值从"关"翻成"开"（见 `defaults()`）的迁移不在这里 —— 它
+      // 还要顺手打开**已经恢复出来的标签页**里的开关，得等两个 store 都
+      // 就位，所以在 App.vue 的 setup 里做。标记仍走这里持久化。
       // #251 — see `smartQuotesOptInMigrated`. Curly quotes were on for
       // everyone before #216 made them opt-in; the saved `true` outlived the
       // default change. Clear it once. Anyone who genuinely wants typographic

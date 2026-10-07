@@ -100,6 +100,28 @@ const showUiKit = new URLSearchParams(location.search).has('uikit');
 
 const tabs = useTabsStore();
 const settings = useSettingsStore();
+
+// 一次性迁移：大纲默认值从"关"翻成"开"（见 settings 的 defaults()）。
+//
+// 这里做而不是在 settings.load() 里：大纲可见与否是**两层**条件 —— 设置层
+// 管新开的标签页，每个 tab 还各自记着自己的开关。已经恢复出来的标签页存的
+// 是 `false`，光改设置到不了它们身上，用户升级后会发现"改了默认值却没变"。
+// 两个 store 都就位的地方只有这里。
+//
+// 打开的是 per-tab 开关，不碰侧栏本身的显隐 —— 用户自己折叠过侧栏的话，
+// 不该因为这次迁移又被弹开。
+if (!settings.outlineDefaultOnMigrated) {
+  settings.outlineDefaultOnMigrated = true;
+  settings.showOutline = true;
+  for (const t of tabs.tabs) {
+    if (t.language === 'markdown') t.showOutline = true;
+  }
+  // 两个 store 都是**显式**落盘的（没有全局 $subscribe），不写这两行的话
+  // 标记存不下去 —— 下次启动又会当成"没迁移过"，把用户手动关掉的大纲又
+  // 翻开一次。
+  settings.persist();
+  tabs.persist();
+}
 const windowsStore = useWindowsStore();
 const tiles = useTilesStore();
 const files = useFiles();

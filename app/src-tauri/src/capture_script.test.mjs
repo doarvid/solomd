@@ -90,8 +90,14 @@ test('builds a two-turn conversation with roles', () => {
   );
   assert.equal(title, '测试对话');
   assert.equal(model, 'chat');
-  assert.match(markdown, /### 🧑‍💻 User/);
-  assert.match(markdown, /### 🤖 Assistant/);
+  // 用锚点断言层级：不锚的话 `/## 🤖 Assistant/` 会连 `### 🤖 Assistant`
+  // 一起匹配上，层级改了也照样绿。
+  //
+  // 提问就是文档的根：`# Conversation` 那种占着根节点却没有信息的写法去掉了。
+  assert.match(markdown, /^# 你好$/m);
+  assert.doesNotMatch(markdown, /Conversation/, '根节点又回到那个没信息量的词了');
+  // `## 🤖 Assistant` 这一层去掉了：提问是 h1，助手那侧直接是「思考/回答」。
+  assert.doesNotMatch(markdown, /Assistant/, 'Assistant 那一层又回来了');
   assert.match(markdown, /你好，有什么可以帮你？/);
 });
 
@@ -107,9 +113,11 @@ test('renders the THINK fragment, which DOM scraping cannot reach', () => {
     },
     'abc',
   );
-  assert.match(markdown, /#### 🤔 Thought Process/);
+  // 「深度思考」是助手那侧唯一保留的标签；回答不再有 `💡 Response`，
+  // 正文标题直接跟在后面，从 h2 起。
+  assert.match(markdown, /^## 🤔 Thought Process$/m);
   assert.match(markdown, /先想一下……/);
-  assert.match(markdown, /#### 💡 Response/);
+  assert.doesNotMatch(markdown, /💡 Response/, 'Response 标签没移除干净');
 });
 
 test('maps [citation:N] onto numbered references', () => {
@@ -201,13 +209,113 @@ test('tracking params do not split one page into two references', () => {
   assert.equal(links[0].href, 'https://example.com/p');
 });
 
+test('the answer keeps its own h1/h2/h3, demoted so they nest under the turn', () => {
+  // 以前这些 `#` 是被**删掉**的，于是笔记只剩 Conversation / User /
+  // Assistant 三层空壳，大纲视图里看不到答案的任何结构。
+  //
+  // 现在降级保留，而且只降一级：一级→h2、二级→h3、三级→h4。降太多
+  // （h4/h5/h6）渲染出来小得没法看 —— 而 `💡 Response` 那个标签本身不
+  // 含信息，不该占着一级把答案顶下去，所以它改成正文。
+  const { api } = loadScript();
+  const { markdown } = api._test.buildMarkdown(
+    {
+      chat_session: {},
+      chat_messages: [user('q'), assistant('m1', '# 一、总览\n\n## 1.1 细节\n\n### 1.1.1 更细\n\n正文')],
+    },
+    'abc',
+  );
+  assert.match(markdown, /^## 一、总览$/m, '答案的一级标题没有留下来');
+  assert.match(markdown, /^### 1\.1 细节$/m, '答案的二级标题没有留下来');
+  assert.match(markdown, /^#### 1\.1\.1 更细$/m, '答案的三级标题没有留下来');
+  // 关键：绝不能跑到顶层 —— 那正是当初删掉它们的原因。h1 只留给用户提问。
+  assert.doesNotMatch(markdown, /^# (一、总览|1\.1 细节)/m, '答案的标题跑到文档根层级了');
+});
+
+test('content headings are aligned to h2 whichever level the answer used', () => {
+  // 固定平移会让用 `##` 开节的回答整体掉到 h3/h4/h5 —— 用户看到的就是
+  // "正文怎么还是从 h3 开始"。改成按内容自己最浅的一级对齐到 h2。
+  const { api } = loadScript();
+  const deep = api._test.buildMarkdown(
+    { chat_session: {}, chat_messages: [user('q'), assistant('m1', '##### 五级\n\n###### 六级')] },
+    'abc',
+  ).markdown;
+  // 整段只有很深的标题 → 整体上提到 h2/h3。
+  assert.match(deep, /^## 五级$/m);
+  assert.match(deep, /^### 六级$/m);
+
+  const shallow = api._test.buildMarkdown(
+    { chat_session: {}, chat_messages: [user('q'), assistant('m1', '# 一级\n\n## 二级')] },
+    'abc',
+  ).markdown;
+  // 用 `#` 开节的同样落在 h2/h3。
+  assert.match(shallow, /^## 一级$/m);
+  assert.match(shallow, /^### 二级$/m);
+});
+
+test('the h6 ceiling still holds when the answer nests deep', () => {
+  const { api } = loadScript();
+  const { markdown } = api._test.buildMarkdown(
+    { chat_session: {}, chat_messages: [user('q'), assistant('m1', '# 一级\n\n###### 六级')] },
+    'abc',
+  );
+  // 一级对齐到 h2（+1），六级再 +1 就超出 6 —— 封顶在 h6，不能逃出文档。
+  assert.match(markdown, /^## 一级$/m);
+  assert.match(markdown, /^###### 六级$/m);
+});
+
+test('a # inside a fenced code block is left alone', () => {
+  // 代码块里的 `# 注释` 不是标题：降级会把它改成 `#### 注释`，旧版则是
+  // 直接把 `#` 删掉 —— 两种都把代码改坏了。
+  const { api } = loadScript();
+  const { markdown } = api._test.buildMarkdown(
+    { chat_session: {}, chat_messages: [user('q'), assistant('m1', '```python\n# 这是注释\nx = 1\n```')] },
+    'abc',
+  );
+  assert.match(markdown, /^# 这是注释$/m, '代码块里的注释被当成标题处理了');
+});
+
 test('# in the model output cannot break the document outline', () => {
   const { api } = loadScript();
   const { markdown } = api._test.buildMarkdown(
     { chat_session: {}, chat_messages: [user('q'), assistant('m1', '# 一级标题\n正文')] },
     'abc',
   );
-  assert.doesNotMatch(markdown, /^# 一级标题$/m, '模型输出的 # 把标题层级带歪了');
+  // 不再要求删掉，而是要求它别占 h1 —— 文档的 h1 只留给用户的提问。
+  assert.doesNotMatch(markdown, /^# 一级标题$/m, '模型输出的 # 顶到了文档根层级');
+  assert.match(markdown, /^## 一级标题$/m);
+});
+
+test('a separator sits between the reasoning and the answer', () => {
+  const { api } = loadScript();
+  const { markdown } = api._test.buildMarkdown(
+    {
+      chat_session: {},
+      chat_messages: [
+        user('q'),
+        assistant('m1', '## 结论\n\n答案正文', [{ id: 't1', type: 'THINK', content: '先想一下' }]),
+      ],
+    },
+    'abc',
+  );
+  // 深度思考是过程、正文是结论，中间得有界线，否则阅读视图里两段连在一起。
+  const rules = markdown.split('\n').filter((l) => l.trim() === '---');
+  assert.equal(rules.length, 1, `分隔线数量不对:\n${markdown}`);
+  assert.ok(
+    markdown.indexOf('先想一下') < markdown.indexOf('---') &&
+      markdown.indexOf('---') < markdown.indexOf('## 结论'),
+    `分隔线不在思考和正文之间:\n${markdown}`,
+  );
+  // `---` 紧跟一段文字会被当成 setext 标题（把上一行变成 h2）——前面必须有空行。
+  assert.match(markdown, /\n\n---\n/, '分隔线前面缺空行，会被解析成 setext 标题');
+});
+
+test('no separator when there is no reasoning', () => {
+  const { api } = loadScript();
+  const { markdown } = api._test.buildMarkdown(
+    { chat_session: {}, chat_messages: [user('q'), assistant('m1', '## 结论\n\n答案')] },
+    'abc',
+  );
+  assert.doesNotMatch(markdown, /^---$/m, '没有思考过程却出现了分隔线');
 });
 
 test('empty turns are skipped rather than emitting bare headings', () => {
@@ -216,15 +324,46 @@ test('empty turns are skipped rather than emitting bare headings', () => {
     { chat_session: {}, chat_messages: [user('q'), { message_id: 'm1', role: 'ASSISTANT', fragments: [] }] },
     'abc',
   );
-  assert.doesNotMatch(markdown, /### 🤖 Assistant/, '空轮次也输出了标题');
+  // 助手那侧一个标题都不该输出（h1 是用户的提问，本来就该在）。
+  assert.doesNotMatch(markdown, /^## /m, '空轮次也输出了标题');
 });
 
-test('a conversation with no messages still produces valid markdown', () => {
+test('a conversation with no messages produces an empty body', () => {
+  // 没有提问就没有根标题可写（原来这里固定输出 `# Conversation`）。
+  // 空正文不会落盘：前端 saveConversation 见 body 为空就拒绝写。
   const { api } = loadScript();
   const { markdown, links } = api._test.buildMarkdown({ chat_session: {}, chat_messages: [] }, 'abc');
-  assert.match(markdown, /## Conversation/);
+  assert.equal(markdown.trim(), '');
   assert.equal(links.length, 0);
-  assert.doesNotMatch(markdown, /## References/, '没有引用时不该出现 References 段');
+});
+
+test('a multi-paragraph question keeps its first line as the heading', () => {
+  // h1 只能是一行，剩下的仍作正文 —— 不能因为截标题把问题内容吞了。
+  const { api } = loadScript();
+  const { markdown } = api._test.buildMarkdown(
+    { chat_session: {}, chat_messages: [user('先看这个\n\n再看那段'), assistant('m1', '答案')] },
+    'abc',
+  );
+  assert.match(markdown, /^# 先看这个$/m);
+  assert.match(markdown, /再看那段/, '提问的第二段被吞掉了');
+});
+
+test('each turn opens a new h1', () => {
+  const { api } = loadScript();
+  const { markdown } = api._test.buildMarkdown(
+    {
+      chat_session: {},
+      chat_messages: [
+        user('第一问'),
+        assistant('m1', '第一个答案'),
+        { message_id: 'u2', role: 'USER', fragments: [{ id: 'u2-r', type: 'REQUEST', content: '第二问' }] },
+        assistant('m2', '第二个答案'),
+      ],
+    },
+    'abc',
+  );
+  assert.match(markdown, /^# 第一问$/m);
+  assert.match(markdown, /^# 第二问$/m);
 });
 
 test('normalizeUrl matches the Rust implementation', () => {

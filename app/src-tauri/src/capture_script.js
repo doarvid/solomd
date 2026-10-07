@@ -142,9 +142,49 @@
     return m ? m[1] : null;
   }
 
-  function stripHashes(s) {
-    // 深度思考里的 # 会被 markdown 当成标题，破坏文档结构。
-    return String(s || '').replace(/^#{1,6}\s/gm, '');
+  /**
+   * 把正文里的标题**对齐到从 `base` 级起**。
+   *
+   * 这里以前是删掉 `#`（stripHashes），后来改成固定 +1 平移 —— 都不对。
+   * 固定平移的问题：DeepSeek 有的回答用 `#` 开节、有的用 `##`，平移之后
+   * 前者落在 h2、后者落在 h3，同一份笔记里字号不一致，看着就是"正文怎么
+   * 还是从 h3 开始的"。
+   *
+   * 所以先看正文自己最浅的一级，整体对齐到 `base`，深的依次往下排 ——
+   * 无论原文从哪一级起，正文都从 `base` 开始。（原文只有很深的标题时就
+   * 是整体上提，那是想要的：它毕竟是这一节里唯一的层次。）
+   *
+   * 代码块里的 `#` 不是标题，跳过 —— 顺手修掉旧版的另一个毛病：```python
+   * 里的 `# 注释` 会被删成一个光秃秃的行。
+   */
+  function rebaseHeadings(s, base) {
+    var lines = String(s || '').split('\n');
+    var shallowest = 7;
+    var inFence = false;
+    var i;
+    var m;
+    for (i = 0; i < lines.length; i++) {
+      if (/^\s*```/.test(lines[i])) inFence = !inFence;
+      if (inFence) continue;
+      m = /^(#{1,6})(\s)/.exec(lines[i]);
+      if (m && m[1].length < shallowest) shallowest = m[1].length;
+    }
+    // 整段没有标题：原样返回，别做无谓的复制。
+    if (shallowest > 6) return lines.join('\n');
+
+    var by = base - shallowest;
+    if (by === 0) return lines.join('\n');
+
+    inFence = false;
+    for (i = 0; i < lines.length; i++) {
+      if (/^\s*```/.test(lines[i])) inFence = !inFence;
+      if (inFence) continue;
+      m = /^(#{1,6})(\s)/.exec(lines[i]);
+      if (!m) continue;
+      var level = Math.max(1, Math.min(m[1].length + by, 6));
+      lines[i] = new Array(level + 1).join('#') + lines[i].slice(m[1].length);
+    }
+    return lines.join('\n');
   }
 
   function buildMarkdown(data, convId) {
@@ -186,7 +226,9 @@
       citeMaps[msg.message_id] = { refMap: refMap, citeMap: citeMap };
     }
 
-    var lines = ['## Conversation', ''];
+    // 层级：每轮提问是 h1（文档的根就是它），「深度思考」是唯一的 h2 标签，
+    // 正文标题从 h2 起 —— 见 rebaseHeadings。
+    var lines = [];
 
     for (var m2 = 0; m2 < messages.length; m2++) {
       var message = messages[m2];
@@ -194,7 +236,7 @@
       if (message.role === 'USER') {
         var req = fragOf(message, 'REQUEST');
         if (!req || !req.content) continue;
-        lines.push('### 🧑‍💻 User', '', stripHashes(req.content), '');
+        lines = lines.concat(questionAsHeading(req.content));
       } else if (message.role === 'ASSISTANT') {
         var resp = fragOf(message, 'RESPONSE');
         if (!resp || !resp.content) continue;
@@ -217,12 +259,18 @@
         // [1][1] → [1]
         text = text.replace(/(\[\d+\])(?:\s*\1)+/g, '$1');
 
-        lines.push('### 🤖 Assistant', '');
+        // 助手这一侧只留「深度思考」一个标签：`## 🤖 Assistant` 和
+        // `## 💡 Response` 都不含信息，白占一层把正文越推越深、字号越小。
         if (thoughts.length) {
-          lines.push('#### 🤔 Thought Process', '', stripHashes(thoughts.join('\n\n')), '');
-          lines.push('#### 💡 Response', '');
+          lines.push('## 🤔 Thought Process', '', rebaseHeadings(thoughts.join('\n\n'), BODY_HEADING_BASE), '');
+          // 思考和正文之间加一道分隔线：深度思考是过程、正文是结论，中间
+          // 没有界线时阅读视图里两段是连在一起的。
+          //
+          // 上面那个空串不能省 —— `先说结论。` 紧跟一行 `---` 会被 markdown
+          // 当成 setext 标题（把上一行变成 h2），正好是这文件最不想要的效果。
+          lines.push('---', '');
         }
-        lines.push(stripHashes(text), '');
+        lines.push(rebaseHeadings(text, BODY_HEADING_BASE), '');
       }
     }
 
@@ -245,6 +293,28 @@
       }),
     };
   }
+
+  /**
+   * 用户提问 → 这一轮的标题。
+   *
+   * 文档的根就是提问本身。原来这里是 `## 🧑‍💻 User` 加一段正文、顶上还压着
+   * 一个 `# Conversation`，代价是根节点永远是那个什么信息都没有的词，大纲里
+   * 看不出这份对话在谈什么。提问既有信息量，又天然是轮次的分隔。
+   *
+   * h1 只能是一行：提问是多段时取第一段当标题，剩下的仍作正文。
+   */
+  function questionAsHeading(s) {
+    var text = String(s || '').trim();
+    var nl = text.indexOf('\n');
+    var head = (nl < 0 ? text : text.slice(0, nl)).trim();
+    var rest = nl < 0 ? '' : rebaseHeadings(text.slice(nl + 1), BODY_HEADING_BASE).trim();
+    var out = ['# ' + head, ''];
+    if (rest) out.push(rest, '');
+    return out;
+  }
+
+  /** 正文标题统一从这一级起（h1 只留给用户的提问）。 */
+  var BODY_HEADING_BASE = 2;
 
   function findFrag(frags, type) {
     for (var i = 0; i < frags.length; i++) {
