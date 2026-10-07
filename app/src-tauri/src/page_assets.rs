@@ -122,7 +122,10 @@ fn ext_for(content_type: Option<&str>) -> &'static str {
 }
 
 /// 极简百分号解码。图片名里 `%20` 之类很常见，留着会让文件名难看且难匹配。
-fn percent_decode(s: &str) -> String {
+///
+/// `pub(crate)`：webdoc 解 Lake 的 `<card value="data:%7B...">` 也要用它 ——
+/// 同一套规则没必要写两遍。
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;

@@ -26,6 +26,8 @@ pub enum Via {
     Selector,
     /// 从页面的 SSR 数据块里读的（正文根本不在这份 HTML 的 DOM 里）。
     Json,
+    /// 从内联 JS 的字符串字面量里读的（`GLOBAL_CONFIG.body = '…'` 这种）。
+    Inline,
     /// 拿回来的本来就不是网页，是一份纯文本 / markdown 原文，原样存的。
     Markdown,
     /// Readability 抽的。
@@ -43,6 +45,7 @@ impl Via {
         match self {
             Via::Selector => "selector",
             Via::Json => "json",
+            Via::Inline => "inline",
             Via::Markdown => "markdown",
             Via::Readability => "readability",
             Via::Readme => "readme",
@@ -450,6 +453,7 @@ pub fn extract(html: &str, url: &str, host: &str) -> Option<Extracted> {
         // 地抽出这堆页头 —— 而且往往超过 MIN_CONTENT_CHARS，于是正文彻底
         // 丢了还看不出来。数据块里有全文，先拿它。
         extract_from_data_island(html, url)
+            .or_else(|| extract_from_inline_script(html, url))
             .or_else(|| extract_with_readability(html, url))?
     };
     out.meta = meta;
@@ -502,6 +506,221 @@ fn extract_from_data_island(html: &str, url: &str) -> Option<Extracted> {
         url: url.to_string(),
         meta: PageMeta::default(),
     })
+}
+
+/// 第 2 级（b）：正文写在**内联 JS 的字符串字面量**里。
+///
+/// 阿里云开发者社区就是这种（yuque / lark 编辑器）：DOM 里只有一个空壳
+/// `<div id="lark-content"></div>`，正文由 JS 灌进去；但同一份正文也被写进了
+/// 页面里的 `GLOBAL_CONFIG.larkContent = '…'`。不执行 JS 也能拿到全文。
+///
+/// 和 `__NEXT_DATA__` 那类的区别只是载体：那边是 JSON 脚本块，这边是 JS
+/// 源码里的一个字符串。所以判断方式一样 —— 取**最长的那个像正文的字符串**，
+/// 而不是按变量名匹配（`larkContent` / `content` / `body` 每个站点都不同）。
+///
+/// 顺带修好 Lake 的 `<card>`（见 `expand_lake_cards`）：这页的 21 张截图和
+/// 表格都在里面，不还原就只剩文字。
+fn extract_from_inline_script(html: &str, url: &str) -> Option<Extracted> {
+    let doc = scraper::Html::parse_document(html);
+    let sel = scraper::Selector::parse("script").ok()?;
+
+    let mut best: Option<String> = None;
+    for node in doc.select(&sel) {
+        // 外链脚本的正文是 js 文件，不是页面内容。
+        if node.value().attr("src").is_some() {
+            continue;
+        }
+        let code = node.text().collect::<String>();
+        for raw in js_string_literals(&code) {
+            let text = unescape_js_string(&raw);
+            if looks_like_article(&text) && best.as_ref().is_none_or(|b| text.len() > b.len()) {
+                best = Some(text);
+            }
+        }
+    }
+
+    let winner = best?;
+    let title = first_h1(&doc).unwrap_or_else(|| document_title(&doc));
+    let markdown = if winner.contains("<p") || winner.contains("<div") {
+        html_to_markdown(&expand_lake_cards(&winner))
+    } else {
+        winner
+    };
+
+    Some(Extracted {
+        title,
+        markdown,
+        via: Via::Inline,
+        url: url.to_string(),
+        meta: PageMeta::default(),
+    })
+}
+
+/// 从一个 `<script>` 的源码里挑出所有字符串字面量的**内容**（不含引号）。
+///
+/// 逐字符扫描而不是正则：字面量里可以有转义引号（Lake 那串里的 `\"`），
+/// 正则要么在这里截断，要么一路吃到下一个引号，两种都会把正文切碎。
+///
+/// 只认 `'` 和 `"`。反引号模板串里可能嵌 `${}`，当纯文本取出来会带一坨
+/// 表达式，不如交给下一级。
+fn js_string_literals(code: &str) -> Vec<String> {
+    let bytes = code.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let quote = bytes[i];
+        if quote != b'\'' && quote != b'"' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        let mut closed = false;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'\\' => j += 2,
+                b if b == quote => {
+                    closed = true;
+                    break;
+                }
+                // 字符串里不换行（模板串才允许），碰到行尾说明这是两个
+                // 撇号之间的代码，不是字面量。
+                b'\n' => break,
+                _ => j += 1,
+            }
+        }
+        if closed {
+            out.push(code[start..j].to_string());
+            i = j + 1;
+        } else {
+            i = start;
+        }
+    }
+    out
+}
+
+/// JS 字符串的转义还原。只处理字符串里真会出现的那些。
+///
+/// 不认识的转义按 **JS 自己的规则**处理：丢掉反斜杠只留字符（`\q` → `q`）——
+/// JS 就是这么解义的，跟它保持一致，正文才不会和浏览器里看到的差一个字符。
+fn unescape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('u') => {
+                let hex: String = chars.clone().take(4).collect();
+                match u32::from_str_radix(&hex, 16) {
+                    Ok(n) if hex.len() == 4 => {
+                        out.push(char::from_u32(n).unwrap_or('\u{fffd}'));
+                        for _ in 0..4 {
+                            chars.next();
+                        }
+                    }
+                    _ => out.push_str("\\u"),
+                }
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// 把 Lake（语雀 / 阿里云那套）的 `<card>` 还原成普通 HTML。
+///
+/// 它们的图片和表格不是 `<img>` / `<table>`，而是：
+///
+/// ```html
+/// <card type="inline" name="image" value="data:%7B%22src%22%3A%22https%3A…%22%7D">
+/// <card type="block"  name="table" value="data:%7B%22html%22%3A%22%3Ctable…%22%7D">
+/// ```
+///
+/// —— 百分号编码的 JSON 塞在属性里。不还原则整篇只剩文字（这页 21 张截图
+/// 全在 card 里），还给 htmd 之后图片会照常被 `localise_images` 下载。
+///
+/// 认不出来的 card 直接丢掉：它渲染出来本来就是一块空白/挂件，留着只会
+/// 在正文里留下一串百分号。
+fn expand_lake_cards(html: &str) -> String {
+    const MARK: &str = "<card";
+    if !html.contains(MARK) {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find(MARK) {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let Some(end) = find_tag_end(tail) else {
+            break;
+        };
+        out.push_str(&card_to_html(&tail[..=end]).unwrap_or_default());
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 找 `<card …>` 的收尾 `>`，**跳过引号里的内容**。
+///
+/// 直接找第一个 `>` 会截断：value 那串现实里是百分号编码的（所以没有裸
+/// `>`），但只要哪天有个站点直接把解码后的 HTML 放进去，正文就会被切碎，
+/// 而且不报错 —— 多这五行比事后查这个便宜。
+fn find_tag_end(tag: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    for (i, ch) in tag.char_indices() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => quote = Some(ch),
+                '>' => return Some(i),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+/// 单个 `<card …>` → 普通 HTML。认不出来返回 None（调用方丢弃）。
+fn card_to_html(tag: &str) -> Option<String> {
+    let value = attr_value(tag, "value")?;
+    let json = super::page_assets::percent_decode(&value).strip_prefix("data:")?.to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&json).ok()?;
+
+    // 图片：`{"src": "https://…"}`。
+    if let Some(src) = parsed.get("src").and_then(|v| v.as_str()) {
+        let alt = parsed.get("alt").and_then(|v| v.as_str()).unwrap_or("");
+        return Some(format!("<img src=\"{src}\" alt=\"{alt}\" />"));
+    }
+    // 表格：里面装的是一段（百分号编码的）表格 HTML，直接塞回去让 htmd 转。
+    if let Some(html) = parsed.get("html").and_then(|v| v.as_str()) {
+        return Some(html.to_string());
+    }
+    None
+}
+
+/// 取标签里某个属性的值（属性值可能是单引号或双引号）。
+fn attr_value(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=");
+    let at = tag.find(&needle)? + needle.len();
+    let rest = &tag[at..];
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let end = rest[1..].find(quote)? + 1;
+    Some(rest[1..end].to_string())
 }
 
 /// 递归找数据块里**最长的**那个像正文的字符串。
@@ -1066,6 +1285,111 @@ mod tests {
         assert_eq!(e.title, "");
     }
 
+    /// 阿里云开发者社区那页的形状：DOM 里只有一个空壳容器，正文写在
+    /// `GLOBAL_CONFIG.larkContent = '…'` 里；图片/表格是百分号编码的
+    /// `<card>`。
+    fn aliyun_style_page() -> String {
+        // value 是**百分号编码**的（真实页面就是这样）：解码后的 JSON 带引号，
+        // 直接塞进属性会把属性切断，那不是合法的 HTML。
+        let img = "data:%7B%22src%22%3A%22https%3A%2F%2Fimg.example%2Fa.png%22%2C%22alt%22%3A%22%E5%9B%BE%22%7D";
+        let mut body = String::from(
+            "<!doctype lake><meta name=\"doc-version\" content=\"1\" />\
+             <p>ComfyUI 是一款免费、开源的 AI 绘图工具，用节点连线的方式搭建生图的工作流。</p>",
+        );
+        body.push_str(&format!("<p><card type=\"inline\" name=\"image\" value=\"{img}\" /></p>"));
+        for i in 0..20 {
+            body.push_str(&format!(
+                "<p>第 {i} 段：这一段用来把正文撑到足够长，好在启发式判据里算作正文。</p>"
+            ));
+        }
+        // JS 字面量里的引号是转义的 —— 这正是不能拿正则去切的原因。
+        let escaped = body.replace('"', "\\\"");
+        format!(
+            r#"<html><head><title>标题-阿里云开发者社区</title></head><body>
+               <h1 class="article-title">ComfyUI 使用教程</h1>
+               <div class="article-content"><div class="article-inner" id="lark-content"></div></div>
+               <script>var GLOBAL_CONFIG = {{ "articleId": '123' }};
+               GLOBAL_CONFIG.larkContent = '{escaped}';</script>
+               </body></html>"#
+        )
+    }
+
+    #[test]
+    fn a_body_in_an_inline_script_literal_is_read_out() {
+        let e = extract(
+            &aliyun_style_page(),
+            "https://developer.aliyun.com/article/1",
+            "developer.aliyun.com",
+        )
+        .expect("内联 JS 里的正文应该被读出来");
+        assert_eq!(e.via, Via::Inline);
+        assert!(e.markdown.contains("ComfyUI 是一款免费"), "正文没抽到");
+        assert_eq!(e.title, "ComfyUI 使用教程");
+        // alt 来自 card 里的 `alt` 字段，这里只管 URL 有没有还原出来 ——
+        // 有 URL，`localise_images` 才会把它下载到笔记旁边。
+        assert!(e.markdown.contains("](https://img.example/a.png)"), "card 里的图片没还原:\n{}", &e.markdown[..300.min(e.markdown.len())]);
+        // 转义引号被还原，正文里不该留下反斜杠。
+        assert!(!e.markdown.contains("\\\""), "JS 转义没还原:\n{}", &e.markdown[..200.min(e.markdown.len())]);
+    }
+
+    #[test]
+    fn lake_image_and_table_cards_become_real_markup() {
+        // 不还原 card，这页 21 张截图和表格全没了 —— 而图正是它的价值所在。
+        let img = "data:%7B%22src%22%3A%22https%3A%2F%2Fimg.example%2Fshot.png%22%2C%22alt%22%3A%22%E6%88%AA%E5%9B%BE%22%7D";
+        let table =
+            "data:%7B%22html%22%3A%22%3Ctable%3E%3Ctr%3E%3Ctd%3E%E7%94%B2%3C%2Ftd%3E%3C%2Ftr%3E%3C%2Ftable%3E%22%7D";
+        let html = format!(
+            "<p>前文</p><card type=\"inline\" name=\"image\" value=\"{img}\" />\
+             <card type=\"block\" name=\"table\" value=\"{table}\" />\
+             <card type=\"inline\" name=\"file\" value=\"data:%7B%22x%22%3A1%7D\" /><p>后文</p>"
+        );
+        let out = expand_lake_cards(&html);
+        assert!(out.contains(r#"<img src="https://img.example/shot.png" alt="截图""#), "图片没还原:\n{out}");
+        assert!(out.contains("<table><tr><td>甲</td></tr></table>"), "表格没还原:\n{out}");
+        // 认不出来的 card 丢掉，别在正文里留下一串百分号。
+        assert!(!out.contains("card"), "有 card 漏出来了:\n{out}");
+        assert!(!out.contains('%'), "有百分号编码漏进了正文:\n{out}");
+    }
+
+    #[test]
+    fn a_page_without_cards_is_untouched() {
+        let html = "<p>普通正文</p>";
+        assert_eq!(expand_lake_cards(html), html);
+    }
+
+    #[test]
+    fn js_string_literals_handles_escaped_quotes_and_multiline_code() {
+        let code = r#"var a = 'it\'s here'; var b = "he said \"hi\""; var c = 'no
+        end quote';"#;
+        let lits = js_string_literals(code);
+        assert_eq!(lits, vec![r"it\'s here".to_string(), r#"he said \"hi\""#.to_string()]);
+        // 没闭合的引号（上面那个跨行的）不算字面量。
+        assert_eq!(lits.iter().filter(|l| l.contains("no")).count(), 0);
+    }
+
+    #[test]
+    fn unescape_js_string_restores_what_matters_and_keeps_the_rest() {
+        assert_eq!(unescape_js_string(r"a\nb"), "a\nb");
+        assert_eq!(unescape_js_string(r#"say \"hi\""#), r#"say "hi""#);
+        assert_eq!(unescape_js_string(r"中文"), "中文");
+        // 不认识的转义跟 JS 一致：丢掉反斜杠只留字符。
+        assert_eq!(unescape_js_string(r"a\qb"), "aqb");
+        // 路径里的真反斜杠是转义过的，必须留住。
+        assert_eq!(unescape_js_string(r"C:\\Users"), r"C:\Users");
+    }
+
+    #[test]
+    fn a_script_with_no_article_like_string_falls_through() {
+        let long_body = "这是一段足够长的正文内容，用来通过最少字数门槛。".repeat(30);
+        let html = format!(
+            r#"<html><head><title>标题</title></head><body>
+               <article class="post"><h1>标题</h1><p>{long_body}</p></article>
+               <script>var x = 'a';var y = 1;</script></body></html>"#
+        );
+        let e = extract(&html, "https://x.example/a", "x.example").expect("readability 应该兜住");
+        assert_eq!(e.via, Via::Readability, "短字符串被当成正文了");
+    }
+
     #[test]
     fn extract_attaches_the_meta_to_whatever_path_won() {
         // 元信息由 extract() 统一补上，两条抽取路径都不该漏掉它。
@@ -1081,6 +1405,8 @@ mod tests {
         assert_eq!(e.meta.published.as_deref(), Some("2024-01-30"));
     }
 }
+
+
 
 
 
