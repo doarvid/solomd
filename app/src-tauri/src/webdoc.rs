@@ -417,12 +417,16 @@ fn extract_with_readability(html: &str, url: &str) -> Option<Extracted> {
 
     Some(Extracted {
         title: {
-            let t = article.title.trim().to_string();
-            if t.is_empty() {
-                document_title_str(html)
-            } else {
-                t
-            }
+            // `<h1>` 优先，和另外两条路一个规矩：`<title>` 上通常挂着站点
+            // 后缀（"…-腾讯云开发者社区-腾讯云"），而标题要拿去做文件名。
+            first_h1(&scraper::Html::parse_document(html)).unwrap_or_else(|| {
+                let t = article.title.trim().to_string();
+                if t.is_empty() {
+                    document_title_str(html)
+                } else {
+                    t
+                }
+            })
         },
         markdown: html_to_markdown(&body),
         via: Via::Readability,
@@ -452,9 +456,20 @@ pub fn extract(html: &str, url: &str, host: &str) -> Option<Extracted> {
         // HTML 里只有面包屑、作者和发布时间，readability 在上面会一本正经
         // 地抽出这堆页头 —— 而且往往超过 MIN_CONTENT_CHARS，于是正文彻底
         // 丢了还看不出来。数据块里有全文，先拿它。
-        extract_from_data_island(html, url)
-            .or_else(|| extract_from_inline_script(html, url))
-            .or_else(|| extract_with_readability(html, url))?
+        let from_script = extract_from_data_island(html, url)
+            .or_else(|| extract_from_inline_script(html, url));
+        match from_script {
+            // 但脚本里那份正文页面可见文本里已经有了 —— 说明 DOM 并不是壳，
+            // 脚本里躺着的只是它的副本。腾讯云社区就是这样：DOM 里标题是
+            // `<h2>`/`<h3>`、代码是 `<pre>`，同一篇又以**纯文本**（没有标签、
+            // 没有 `#`）塞在 JS 里。拿纯文本那份，标题层级和代码块一起丢。
+            // DOM 那份更好，交给 readability 去取；它取不出来再用副本兜底。
+            Some(e) if page_text_contains(html, &e.markdown) => {
+                extract_with_readability(html, url).unwrap_or(e)
+            }
+            Some(e) => e,
+            None => extract_with_readability(html, url)?,
+        }
     };
     out.meta = meta;
     Some(out)
@@ -707,6 +722,16 @@ fn card_to_html(tag: &str) -> Option<String> {
     if let Some(html) = parsed.get("html").and_then(|v| v.as_str()) {
         return Some(html.to_string());
     }
+    // 代码块：`{"mode": "python", "code": "print(1)"}`。**代码不转义就会丢**：
+    // 里面的 `<`（C++ 模板、泛型、比较）会被后面的 HTML 解析当成标签吃掉，
+    // 而且不报错。认不出来的 card 一律丢掉，代码块不是"认不出来"，它是正文。
+    if let Some(code) = parsed.get("code").and_then(|v| v.as_str()) {
+        if code.trim().is_empty() {
+            return None;
+        }
+        let escaped = code.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        return Some(format!("<pre><code>{escaped}</code></pre>"));
+    }
     None
 }
 
@@ -780,6 +805,40 @@ fn looks_like_article(s: &str) -> bool {
     let md_headings = s.lines().filter(|l| l.trim_start().starts_with('#')).count();
     let html_blocks = s.matches("<p").count() + s.matches("<div").count() + s.matches("<h").count();
     (md_headings + html_blocks) >= 3
+}
+
+/// 页面**可见文本**里是不是已经有这段正文。
+///
+/// 抽样比，不逐字比：脚本里那份和 DOM 里那份就算同源，写法也不一样（代码块、
+/// 表格、列表在两边的样子差得多），逐字比对必然对不上。取正文里均匀分布的
+/// 几小段，命中过半就算 DOM 里有这篇。两边都比**去掉所有空白**后的字符流 ——
+/// 同一句话在 DOM 里被标签隔开、在 JSON 里被转义过，只有去掉空白才谈得上相等。
+fn page_text_contains(html: &str, text: &str) -> bool {
+    const PROBE: usize = 120;
+    const AT: [usize; 5] = [10, 30, 50, 70, 90];
+    fn squash(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    let md: Vec<char> = squash(text).chars().collect();
+    // 短正文（快讯、存根）不值得比：抽中了也说明不了 DOM 里有全文。
+    if md.len() < PROBE * 2 {
+        return false;
+    }
+    // 先剥 script/style：数据块和内联 JS 里的正文本来就住在 script 里，
+    // 不剥的话这些段落一定"在页面上找得到"，判据就恒真了。
+    let doc = scraper::Html::parse_document(&strip_noise(html));
+    let page = squash(&doc.root_element().text().collect::<String>());
+
+    let hits = AT
+        .iter()
+        .filter(|at| {
+            let start = md.len() * *at / 100;
+            let probe: String = md[start..(start + PROBE).min(md.len())].iter().collect();
+            page.contains(&probe)
+        })
+        .count();
+    hits * 2 >= AT.len()
 }
 
 /// 页面里第一个 `<h1>` 的文本。
@@ -927,11 +986,18 @@ mod tests {
     }
 
     #[test]
-    fn readability_takes_the_title_from_the_document() {
-        // 之前这条用例断言的是 "标题"（h1），实际是 "长文"（<title>）——
-        // 期望写错了，不是行为错了。Readability 自己就是从 <title> 取的。
+    fn readability_prefers_the_h1_for_the_title() {
+        // `<title>` 上常常挂着站点后缀（"…-腾讯云开发者社区-腾讯云"），标题
+        // 要拿去做文件名，所以 DOM 里有 `<h1>` 就用它 —— 和脚本那两条路一致。
         let got = extract_with_readability(&long_article(), "https://example.invalid/x")
             .expect("got");
+        assert_eq!(got.title, "标题");
+    }
+
+    #[test]
+    fn readability_falls_back_to_the_title_tag_without_an_h1() {
+        let html = long_article().replace("<h1>标题</h1>", "");
+        let got = extract_with_readability(&html, "https://example.invalid/x").expect("got");
         assert_eq!(got.title, "长文");
     }
 
@@ -1332,6 +1398,47 @@ mod tests {
         assert!(!e.markdown.contains("\\\""), "JS 转义没还原:\n{}", &e.markdown[..200.min(e.markdown.len())]);
     }
 
+    /// 腾讯云社区那类页面：正文在 DOM 里是全的（标题是 `<h2>`、代码是
+    /// `<pre>`），同一篇又以**纯文本**（没有标签、没有 `#`）躺在 JS 里。
+    fn tencent_style_page() -> String {
+        let para = "MiniMax H3 是一款原生支持音视频同步生成的多模态模型，这句话用来把这一段撑到足够长。"
+            .repeat(3);
+        let mut dom = String::new();
+        let mut copy: Vec<String> = Vec::new();
+        for i in 0..5 {
+            dom.push_str(&format!("<h2>第 {i} 节</h2><p>{para}</p>"));
+            // 副本里标题也在，只是变成了普通的一行 —— 真实页面就是这样。
+            copy.push(format!("第 {i} 节"));
+            copy.push(para.clone());
+        }
+        dom.push_str("<pre><code>git clone https://github.com/x/y.git</code></pre>");
+
+        // 段落之间是空行（JS 源码里写成了 `\n\n` 转义），所以它算"有分段的
+        // 正文"，能过 `looks_like_article`。
+        let plain = copy.join("\\n\\n");
+        format!(
+            r#"<html><head><title>部署教程-腾讯云开发者社区</title></head><body>
+               <article class="post">{dom}</article>
+               <script>window.__DATA__ = {{ "content": "{plain}" }};</script>
+               </body></html>"#
+        )
+    }
+
+    #[test]
+    fn a_plain_text_copy_in_js_does_not_displace_the_structured_dom() {
+        // 纯文本那份更好拿（不用解析 DOM），但它没有 `<h2>`、没有 `<pre>`，
+        // 拿它整篇标题层级和代码块一起丢。DOM 里已经有同一段正文时要用 DOM。
+        let e = extract(
+            &tencent_style_page(),
+            "https://cloud.tencent.com/developer/article/1",
+            "cloud.tencent.com",
+        )
+        .expect("应该抽到正文");
+        assert_eq!(e.via, Via::Readability, "拿的还是 JS 里那份纯文本副本");
+        assert!(e.markdown.contains("## 第 0 节"), "标题没标出来:\n{}", &e.markdown[..300.min(e.markdown.len())]);
+        assert!(e.markdown.contains("```"), "代码块没框起来:\n{}", &e.markdown[..300.min(e.markdown.len())]);
+    }
+
     #[test]
     fn lake_image_and_table_cards_become_real_markup() {
         // 不还原 card，这页 21 张截图和表格全没了 —— 而图正是它的价值所在。
@@ -1349,6 +1456,30 @@ mod tests {
         // 认不出来的 card 丢掉，别在正文里留下一串百分号。
         assert!(!out.contains("card"), "有 card 漏出来了:\n{out}");
         assert!(!out.contains('%'), "有百分号编码漏进了正文:\n{out}");
+    }
+
+    #[test]
+    fn a_lake_codeblock_card_becomes_a_fenced_block() {
+        // 语雀的代码块也是 card（`{"mode":"c++","code":"…"}`）。不还原则整段
+        // 代码凭空消失 —— 认不出来的 card 是直接丢掉的。
+        let json = r#"{"mode":"c++","code":"std::vector<int> v;\nif (a < b && c > d) { print(\"hi\"); }"}"#;
+        let enc: String = json
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        let html = format!(
+            r#"<p>前文</p><card type="block" name="codeblock" value="data:{enc}" /><p>后文</p>"#
+        );
+        let md = html_to_markdown(&expand_lake_cards(&html));
+        assert!(md.contains("```"), "代码块没框起来:\n{md}");
+        assert!(md.contains("std::vector<int> v;"), "代码没还原:\n{md}");
+        // `<` `>` `&` 不转义就会被 HTML 解析吃掉，而且不报错。
+        assert!(md.contains("a < b && c > d"), "代码里的尖括号/与号被吃了:\n{md}");
     }
 
     #[test]
