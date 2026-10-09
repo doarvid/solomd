@@ -12,6 +12,10 @@
 //!
 //! `/repos/{owner}/{repo}/readme` 把这些都处理掉了，返回的就是渲染用的那一份。
 //!
+//! **中文优先**：那个接口只会给 GitHub 认定的"默认"那一份（基本是英文），
+//! 想要 `README.zh-CN.md` 只能按文件名单独取。这一步走 raw 域名（不占配额），
+//! 命中就省掉 `/readme` 那次调用；没命中再按上面的流程走。
+//!
 //! **限流**：未认证的 API 每小时 60 次/IP。对"一次研究里采几十个仓库"够用，
 //! 超了会返回 403 —— 那时降级成存根，用户至少看得到是哪条失败。
 
@@ -101,38 +105,61 @@ pub async fn fetch_readme(owner: &str, repo: &str) -> Result<(String, String), S
 ///
 /// 代价是丢掉 API 给的仓库简介 —— 比整篇丢失好得多。
 async fn fetch_readme_raw(owner: &str, repo: &str) -> Result<(String, String), String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
+    let client = client()?;
 
     // `HEAD` 是 GitHub 给的"默认分支"别名，终于不用猜 main 还是 master。
     // 文件名只能试，顺序按常见程度排。
-    for name in ["README.md", "readme.md", "README.markdown", "README.rst"] {
-        let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{name}");
-        let Ok(resp) = client.get(&url).send().await else {
-            continue;
-        };
-        if !resp.status().is_success() {
-            continue;
+    for name in [
+        ZH_README,
+        "README.md",
+        "readme.md",
+        "README.markdown",
+        "README.rst",
+    ] {
+        if let Ok(body) = fetch_named_raw(&client, owner, repo, name).await {
+            return Ok((format!("{owner}/{repo}"), body));
         }
-        let Ok(body) = resp.text().await else { continue };
-        if body.trim().is_empty() {
-            continue;
-        }
-        return Ok((format!("{owner}/{repo}"), body));
     }
 
     Err(format!("{owner}/{repo} 的 README 取不到"))
 }
 
-async fn fetch_readme_via_api(owner: &str, repo: &str) -> Result<(String, String), String> {
-    let client = reqwest::Client::builder()
+/// 按文件名从 raw 域名取内容。不占 API 配额，`HEAD` 会解析成默认分支。
+async fn fetch_named_raw(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    name: &str,
+) -> Result<String, String> {
+    let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{name}");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("{name}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("{name}: HTTP {}", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| format!("{name}: {e}"))?;
+    if body.trim().is_empty() {
+        return Err(format!("{name}: 空文件"));
+    }
+    Ok(body)
+}
+
+/// 中文版 README 的约定文件名。
+const ZH_README: &str = "README.zh-CN.md";
+
+fn client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .user_agent(USER_AGENT)
         .build()
-        .map_err(|e| format!("http client: {e}"))?;
+        .map_err(|e| format!("http client: {e}"))
+}
+
+async fn fetch_readme_via_api(owner: &str, repo: &str) -> Result<(String, String), String> {
+    let client = client()?;
 
     // 先要仓库元信息：description 用来在 README 很长时补一个标题，
     // 也让失败信息更有用（区分"仓库不存在"和"没有 README"）。
@@ -152,6 +179,30 @@ async fn fetch_readme_via_api(owner: &str, repo: &str) -> Result<(String, String
         _ => None,
     };
 
+    // 中文版优先：`/readme` 只会给默认那一份，按文件名单独取。走 raw 域名，
+    // 不占配额 —— 命中连 /readme 那次调用都省了。
+    let body = match fetch_named_raw(&client, owner, repo, ZH_README).await {
+        Ok(b) => b,
+        Err(_) => fetch_default_readme(&client, owner, repo).await?,
+    };
+
+    let title = format!("{owner}/{repo}");
+    // description 放在正文最前面：仓库简介往往比 README 开头更有信息量，
+    // 而 README 的第一行常常只是一张 badge 图片。
+    let markdown = match meta.and_then(|m| m.description).filter(|d| !d.trim().is_empty()) {
+        Some(desc) => format!("> {}\n\n{}", desc.trim(), body.trim_start()),
+        None => body,
+    };
+
+    Ok((title, markdown))
+}
+
+/// GitHub 自己认定的那份 README（默认分支、默认文件名、可能在 `.github/` 里）。
+async fn fetch_default_readme(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+) -> Result<String, String> {
     // Accept: raw 让 API 直接返回 README 的原始内容，而不是带 base64 的 JSON。
     let resp = client
         .get(format!("https://api.github.com/repos/{owner}/{repo}/readme"))
@@ -176,16 +227,7 @@ async fn fetch_readme_via_api(owner: &str, repo: &str) -> Result<(String, String
     if body.trim().is_empty() {
         return Err(format!("{owner}/{repo} 的 README 是空的"));
     }
-
-    let title = format!("{owner}/{repo}");
-    // description 放在正文最前面：仓库简介往往比 README 开头更有信息量，
-    // 而 README 的第一行常常只是一张 badge 图片。
-    let markdown = match meta.and_then(|m| m.description).filter(|d| !d.trim().is_empty()) {
-        Some(desc) => format!("> {}\n\n{}", desc.trim(), body.trim_start()),
-        None => body,
-    };
-
-    Ok((title, markdown))
+    Ok(body)
 }
 
 /// 带 SoloMD 标识，让 GitHub 那边能看出流量来源（也便于将来申请更高配额）。
