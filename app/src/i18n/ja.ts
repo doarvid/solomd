@@ -228,6 +228,7 @@ export const ja: I18n = {
   },
   explorer: {
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     deleteTitle: '削除',
     deleteFileMsg: '「{name}」を削除しますか？',
     deleteFolderMsg: 'フォルダ「{name}」と中身をすべて削除しますか？',

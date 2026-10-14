@@ -228,6 +228,7 @@ export const sv: I18n = {
   },
   explorer: {
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     deleteTitle: 'Radera',
     deleteFileMsg: 'Radera ”{name}”?',
     deleteFolderMsg: 'Radera mappen ”{name}” och allt i den?',

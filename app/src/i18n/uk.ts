@@ -228,6 +228,7 @@ export const uk: I18n = {
   },
   explorer: {
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     deleteTitle: 'Видалити',
     deleteFileMsg: 'Видалити «{name}»?',
     deleteFolderMsg: 'Видалити теку «{name}» разом з усім її вмістом?',

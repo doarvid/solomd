@@ -230,6 +230,7 @@ export const zh: I18n = {
   explorer: {
     heading: '文件树',
     knowledgeSearch: '知识检索',
+    browserSearch: '浏览器搜索',
     revealHidden: '没能在文件树里显示出这个文件 —— 它不在当前工作区里，或者被文件树的过滤条件挡住了。',
     loading: '正在加载…',
     truncated: '+ 还有 10,000+ 项 —— 文件夹太大了',

@@ -232,6 +232,7 @@ export const en = {
   explorer: {
     heading: 'Explorer',
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     revealHidden: 'Could not show this file in the tree — it is outside the open workspace, or hidden by a tree filter.',
     loading: 'Loading…',
     truncated: '+ 10,000+ more —— folder is huge',

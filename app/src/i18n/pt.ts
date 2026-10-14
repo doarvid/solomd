@@ -230,6 +230,7 @@ export const pt: I18n = {
   },
   explorer: {
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     deleteTitle: 'Excluir',
     deleteFileMsg: 'Excluir “{name}”?',
     deleteFolderMsg: 'Excluir a pasta “{name}” e tudo dentro dela?',

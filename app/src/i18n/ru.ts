@@ -228,6 +228,7 @@ export const ru: I18n = {
   },
   explorer: {
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     heading: 'Проводник',
     revealHidden: 'Не удалось показать файл в дереве: он вне открытой рабочей папки или скрыт фильтром.',
     loading: 'Загрузка…',

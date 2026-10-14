@@ -228,6 +228,7 @@ export const ko: I18n = {
   },
   explorer: {
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     deleteTitle: '삭제',
     deleteFileMsg: '“{name}”을(를) 삭제할까요?',
     deleteFolderMsg: '폴더 “{name}”와 그 안의 모든 항목을 삭제할까요?',

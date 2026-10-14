@@ -228,6 +228,7 @@ export const tr: I18n = {
   },
   explorer: {
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     deleteTitle: 'Sil',
     deleteFileMsg: '“{name}” silinsin mi?',
     deleteFolderMsg: '“{name}” klasörü ve içindekiler silinsin mi?',

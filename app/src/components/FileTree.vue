@@ -167,6 +167,26 @@ function openKnowledgeBrowser(node: Node) {
   closeCtx();
 }
 
+/**
+ * 右键目录 → 浏览器搜索：与「知识检索」同一套内嵌浏览器，但起点是搜索引擎，
+ * 用途是"主动去逛"——回到那篇当时忘了采集的页面，或随便浏览找资料。
+ *
+ * 两个刻意的选择：
+ * - 起始页必须是 http(s)。`browser_create` 硬校验 scheme，空白页开不出来。
+ * - `refsDir` 显式等于目录本身（不用默认的 `<dir>/refs`）：这里采的是用户
+ *   当场决定要的页面，落在手边这个目录，而不是再套一层引用子目录。
+ */
+const BROWSER_HOME = 'https://www.bing.com/';
+function openFolderBrowser(node: Node) {
+  tabs.newBrowserTab({
+    url: BROWSER_HOME,
+    captureDir: node.path,
+    refsDir: node.path,
+    title: t('explorer.browserSearch'),
+  });
+  closeCtx();
+}
+
 // ---------------------------------------------------------------------------
 // Selection — the row the user last touched, and the folder a new entry goes
 // into. Clicking a file opens it and clicking a folder toggles it; either way
@@ -2115,6 +2135,15 @@ onBeforeUnmount(() => {
         @click="openKnowledgeBrowser(ctx.node)"
       >
         🔎 {{ t('explorer.knowledgeSearch') }}
+      </button>
+      <!-- 浏览器搜索 — 同一个内嵌浏览器，但起点是搜索引擎，供"主动去访问
+           当时忘了采集的页面"。采集落在该目录本身，不套 refs。 -->
+      <button
+        v-if="ctx.node?.is_dir && browser.platformSupported === true"
+        class="ftree__ctx-item"
+        @click="openFolderBrowser(ctx.node)"
+      >
+        🌐 {{ t('explorer.browserSearch') }}
       </button>
       <!-- Only between the "new file / folder" section (folders) and the rest:
            on a file the menu would otherwise open with an empty divider. -->

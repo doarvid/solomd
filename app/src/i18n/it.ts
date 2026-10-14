@@ -228,6 +228,7 @@ export const it: I18n = {
   },
   explorer: {
     knowledgeSearch: 'Knowledge search',
+    browserSearch: 'Browser search',
     deleteTitle: 'Elimina',
     deleteFileMsg: 'Eliminare «{name}»?',
     deleteFolderMsg: 'Eliminare la cartella «{name}» e tutto il suo contenuto?',
