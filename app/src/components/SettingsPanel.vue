@@ -33,6 +33,7 @@ import CaptureEndpointSettings from './CaptureEndpointSettings.vue';
 import RestApiSettings from './RestApiSettings.vue';
 import CostMeterSettings from './CostMeterSettings.vue';
 import IntegrationsSettings from './IntegrationsSettings.vue';
+import BookmarkSyncSettings from './BookmarkSyncSettings.vue';
 // v4.0 Pillar 2 — Agent Recipes panel. Mounted under the existing
 // "Integrations" category so users find Recipes alongside CLI / MCP /
 // AI rewrite — i.e. the cluster of "things SoloMD talks to" rather
@@ -1427,6 +1428,8 @@ function onSelectPdfFont(v: string) {
             {{ t('settings.quickCaptureFailed', { error: quickCaptureError }) }}
           </p>
         </section>
+
+        <BookmarkSyncSettings v-if="!isPhoneOrTablet" />
 
         <section data-cat="export">
           <label>{{ t('settings.docxPreset') }}</label>

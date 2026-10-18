@@ -87,6 +87,7 @@ import { useSavedViewsStore } from './stores/savedViews';
 import { usePropertiesStore } from './stores/properties';
 import { useRagStore } from './stores/rag';
 import { useBrowserStore } from './stores/browser';
+import { useBookmarkSyncStore } from './stores/bookmarkSync';
 import { isBrowserTab } from './lib/tab-kind';
 import { overlayDepth, useOverlayPresence, useOverlayPresenceOf } from './lib/overlay-presence';
 import { setBrowserPageZoom } from './lib/browser-rect';
@@ -168,6 +169,7 @@ async function requestAndroidStorage() {
   }
 }
 const workspaceIndex = useWorkspaceIndexStore();
+const bookmarkSync = useBookmarkSyncStore();
 const properties = usePropertiesStore();
 const rag = useRagStore();
 const autoCommit = useAutoCommit();
@@ -788,6 +790,14 @@ watchEffect(() => {
   workspaceIndex.setFolder(workspace.currentFolder).catch(() => {});
 });
 
+// Bookmark sync depends on the index being ready for the new folder.
+watch(
+  () => workspace.currentFolder,
+  (folder) => {
+    if (folder) bookmarkSync.kick();
+  },
+);
+
 // v4.6.1 F1: bind the properties store to the workspace so display-mode
 // overrides + pinned list load/save from .solomd/properties.json (the store
 // shipped in 4.6 but setFolder was never called → persistence silently no-op'd).
@@ -1214,6 +1224,7 @@ function scheduleStarPrompt() {
 
 onMounted(async () => {
   scheduleStarPrompt();
+  bookmarkSync.start();
   void reconcileIosFolder();
 
   // #153 (mobile) — Android's WebView reports env(safe-area-inset-top) as 0
@@ -1658,6 +1669,7 @@ window.addEventListener(VIEW_CLOSE_EVENT, onCloseView as EventListener);
 window.addEventListener('solomd:open-settings', onOpenSettingsEvent as EventListener);
 
 onBeforeUnmount(() => {
+  bookmarkSync.stop();
   window.removeEventListener('keydown', onEsc);
   document.removeEventListener('click', onStrayLinkClick);
   document.removeEventListener('auxclick', onStrayLinkClick);

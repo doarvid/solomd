@@ -565,7 +565,13 @@ fn build_desired(entries: &[BookmarkWriteEntry]) -> DesiredFolder {
         ..DesiredFolder::default()
     };
     let mut seen: HashSet<String> = HashSet::new();
-    for entry in entries {
+    // Deterministic first-wins: the same URL bookmarked from two notes must
+    // not hop folders between runs (that would rewrite the file every time).
+    let mut ordered: Vec<&BookmarkWriteEntry> = entries.iter().collect();
+    ordered.sort_by(|a, b| {
+        (a.folder.join("/"), &a.title, &a.url).cmp(&(b.folder.join("/"), &b.title, &b.url))
+    });
+    for entry in ordered {
         if !is_http(&entry.url) {
             continue;
         }

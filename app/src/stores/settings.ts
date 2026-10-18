@@ -455,6 +455,17 @@ interface Settings {
   // (InboxView open or inbox filter active) auto-advances to the next inbox
   // note. Default on. Matches Tolaria's auto_advance_inbox_after_organize.
   autoAdvanceInboxAfterOrganize: boolean;
+  // ── Browser bookmark sync (Chromium) ──────────────────────────────────────
+  // Read direction: capture newly bookmarked pages into notes, mirroring the
+  // selected bookmark folders under the workspace root.
+  // Write direction: mirror every note link into the browser's managed
+  // `SoloMD/` subtree (only while that browser is not running).
+  bookmarkSyncEnabled: boolean;
+  /** Selected bookmark folder paths (`["Bookmarks bar", "Tech"]`). */
+  bookmarkSyncFolders: string[][];
+  bookmarkSyncIntervalMinutes: number;
+  /** Fingerprint of all discovered Bookmarks files at the last read pass. */
+  bookmarkSyncFingerprint: string;
   // v4.3.0 PR #75 (beihai23) — transient (not persisted) snapshot of the
   // right-sidebar pane visibility taken when the sidebar is hidden, so
   // toggling it back on can restore the exact previous layout instead of
@@ -742,6 +753,10 @@ function defaults(): Settings {
     ghImageCdn: 'jsdelivr',
     inboxWorkflowEnabled: true,
     autoAdvanceInboxAfterOrganize: true,
+    bookmarkSyncEnabled: false,
+    bookmarkSyncFolders: [] as string[][],
+    bookmarkSyncIntervalMinutes: 30,
+    bookmarkSyncFingerprint: '',
     _rsPanesBeforeHide: null,
   };
 }
