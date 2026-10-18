@@ -65,6 +65,8 @@ export interface IndexEntry {
   relationships?: Record<string, string[]>;
   /** External http(s) links in the body. Absent on older index caches. */
   links?: LinkRef[];
+  /** Normalized front-matter `url:` (captured note). Absent on older caches. */
+  captured_url?: string | null;
 }
 
 export interface BacklinkRef {

@@ -144,6 +144,9 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
       if (this.running) return;
       const root = workspace.currentFolder;
       if (!root || root.startsWith('saf:')) return;
+      // Both directions read the workspace index. Wait for it instead of
+      // searching the vault file-by-file; the next 60s tick retries.
+      if (!useWorkspaceIndexStore().ready) return;
 
       const intervalMs = Math.max(1, settings.bookmarkSyncIntervalMinutes) * 60_000;
       if (!force && Date.now() - lastAttemptAt < intervalMs) return;
@@ -197,25 +200,24 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
       }
 
       this.total = plan.length;
-      const capturedByDir = new Map<string, Set<string>>();
+      // One global set from the workspace index — no per-folder file scans.
+      // `captured_url` is the normalized frontmatter `url:` written by the
+      // capture pipeline.
+      const index = useWorkspaceIndexStore();
+      const captured = new Set<string>();
+      for (const note of index.entries) {
+        if (note.captured_url) captured.add(note.captured_url);
+      }
       let fatal = false;
 
       for (const entry of plan) {
-        const dir = joinDir(root, entry.folder);
-        let seen = capturedByDir.get(dir);
-        if (!seen) {
-          seen = new Set(
-            await invoke<string[]>('capture_captured_urls', { dir }).catch(() => []),
-          );
-          capturedByDir.set(dir, seen);
-        }
-
-        if (seen.has(entry.normalized_url)) {
+        if (captured.has(entry.normalized_url)) {
           this.skipped += 1;
           this.done += 1;
           continue;
         }
 
+        const dir = joinDir(root, entry.folder);
         this.currentTitle = entry.title;
         try {
           const outcome = await invoke<{ error: string | null }>('capture_fetch_page', {
@@ -228,7 +230,7 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
           else this.captured += 1;
           // The stub note still carries `url:`, so don't retry a failed page
           // forever. Same behavior as the manual capture panel.
-          seen.add(entry.normalized_url);
+          captured.add(entry.normalized_url);
         } catch {
           this.failed += 1;
           fatal = true;

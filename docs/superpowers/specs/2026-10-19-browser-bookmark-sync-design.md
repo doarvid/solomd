@@ -63,6 +63,9 @@ pub struct LinkRef {
 
 #[serde(default)]
 pub links: Vec<LinkRef>,
+/// 采集笔记 frontmatter 里 `url:` 的归一化值。
+#[serde(default)]
+pub captured_url: Option<String>,
 ```
 
 抽取规则（在 `scan_file` 的正文处理里完成）：
@@ -223,7 +226,7 @@ pub struct ApplyReport {
 一轮流程：
 
 1. `bookmarks_catalog()`。
-2. **读方向**：fingerprint 与上次持久化的值不同（或强制）才继续；`bookmarks_sync_plan()` 返回 `SoloMD/` 里用户新增的书签；按 `folder` 分组调用 `capture_captured_urls(dir)` 得到已采集 URL 集合；对未采集项串行 `capture_fetch_page({ dir, url, fallback_title: title, source_title: null })`。
+2. **读方向**：fingerprint 与上次持久化的值不同（或强制）才继续；`bookmarks_sync_plan()` 返回 `SoloMD/` 里用户新增的书签；**从 `workspaceIndex.entries` 一次性取出所有 `captured_url` 组成全局集合**（不再逐目录调用 `capture_captured_urls` 扫文件）；对未采集项串行 `capture_fetch_page({ dir, url, fallback_title: title, source_title: null })`。索引未就绪时整轮跳过，60 秒后重试。
 3. **写方向**：从 `workspaceIndex.entries` 构造 `BookmarkWriteEntry[]`；`bookmarks_apply(entries)`。
 4. 保存 fingerprint（读方向真的完成时）和 `lastRunAt`。
 5. 更新状态；失败的采集不中断后续条目。

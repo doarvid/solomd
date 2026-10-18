@@ -84,6 +84,11 @@ pub struct IndexEntry {
     /// (note → browser). Defaults to empty for entries from an older cache.
     #[serde(default)]
     pub links: Vec<LinkRef>,
+    /// Normalized front-matter `url:` for captured notes. The bookmark sync
+    /// reads this once per workspace instead of re-scanning every folder to
+    /// answer "is this page already captured?".
+    #[serde(default)]
+    pub captured_url: Option<String>,
 }
 
 /// One external link in a note body.
@@ -534,6 +539,7 @@ fn scan_file(path: &Path) -> Result<IndexEntry, String> {
     let title = extract_title(&frontmatter_json, &headings);
     let summary = extract_summary(body);
     let relationships = extract_relationships(&frontmatter_json);
+    let captured_url = captured_url_from_frontmatter(&frontmatter_json);
 
     Ok(IndexEntry {
         path: path.to_string_lossy().to_string(),
@@ -550,7 +556,25 @@ fn scan_file(path: &Path) -> Result<IndexEntry, String> {
         title,
         relationships,
         links,
+        captured_url,
     })
+}
+
+/// Normalize the capture pipeline's `url:` front-matter value so the bookmark
+/// sync can compare it with `capture_store::normalize_url` output without any
+/// extra IPC or file reads.
+fn captured_url_from_frontmatter(fm: &serde_json::Value) -> Option<String> {
+    let raw = fm.get("url")?.as_str()?.trim();
+    let lower = raw.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return None;
+    }
+    let normalized = super::capture_store::normalize_url(raw);
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
 }
 
 /// Collect external `http(s)` links from the body.
@@ -1122,6 +1146,7 @@ mod tests {
                 headings: vec![],
                 tasks: vec![],
                 links: vec![],
+                captured_url: None,
                 summary: String::new(),
                 title: None,
             }
@@ -1168,6 +1193,7 @@ mod tests {
                 headings: vec![],
                 tasks: vec![],
                 links: vec![],
+                captured_url: None,
                 summary: String::new(),
                 title: title.map(|s| s.to_string()),
             }
@@ -1459,7 +1485,7 @@ fn read_context(path: &Path, line_no: u32) -> Vec<String> {
 
 #[cfg(test)]
 mod task_scan_tests {
-    use super::{extract_links, extract_tasks};
+    use super::{captured_url_from_frontmatter, extract_links, extract_tasks};
 
     #[test]
     fn finds_open_and_done_items_with_file_line_numbers() {
@@ -1549,5 +1575,26 @@ mod task_scan_tests {
         let links = extract_links("Go to https://example.com/a. Then stop.\n");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://example.com/a");
+    }
+
+    #[test]
+    fn captured_url_is_normalized_from_frontmatter() {
+        let fm: serde_json::Value =
+            serde_yaml::from_str("url: https://example.com/p?utm_source=x&id=7\n")
+                .expect("yaml");
+        assert_eq!(
+            captured_url_from_frontmatter(&fm).as_deref(),
+            Some("https://example.com/p?id=7")
+        );
+    }
+
+    #[test]
+    fn captured_url_ignores_non_http_and_missing_values() {
+        assert!(captured_url_from_frontmatter(&serde_json::json!({})).is_none());
+        assert!(captured_url_from_frontmatter(
+            &serde_json::json!({ "url": "javascript:alert(1)" })
+        )
+        .is_none());
+        assert!(captured_url_from_frontmatter(&serde_json::json!({ "url": 42 })).is_none());
     }
 }
