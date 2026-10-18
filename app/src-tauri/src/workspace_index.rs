@@ -80,6 +80,20 @@ pub struct IndexEntry {
     /// that predates this field.
     #[serde(default)]
     pub relationships: HashMap<String, Vec<String>>,
+    /// External `http(s)` links found in the body. Feeds bookmark sync
+    /// (note → browser). Defaults to empty for entries from an older cache.
+    #[serde(default)]
+    pub links: Vec<LinkRef>,
+}
+
+/// One external link in a note body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkRef {
+    pub url: String,
+    /// Link text; empty for autolinks and bare URLs.
+    pub text: String,
+    /// 1-based line number, body-relative like `WikilinkRef::line`.
+    pub line: u32,
 }
 
 /// F3 — one inverse (referenced-by) edge resolved over the in-memory index.
@@ -504,6 +518,7 @@ fn scan_file(path: &Path) -> Result<IndexEntry, String> {
     };
 
     let wikilinks = extract_wikilinks(body);
+    let links = extract_links(body);
     let mut tags = extract_body_tags(body);
     if let serde_json::Value::Object(map) = &frontmatter_json {
         if let Some(t) = map.get("tags") {
@@ -534,7 +549,72 @@ fn scan_file(path: &Path) -> Result<IndexEntry, String> {
         summary,
         title,
         relationships,
+        links,
     })
+}
+
+/// Collect external `http(s)` links from the body.
+///
+/// Deliberately shallow: inline links, autolinks and bare URLs; no code-block
+/// awareness (same trade-off as wikilink extraction). Images are skipped.
+fn extract_links(body: &str) -> Vec<LinkRef> {
+    static LINK_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\[([^\[\]\n]*)\]\((https?://[^)\s]+)\)").expect("link regex")
+    });
+    static BARE_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"https?://[^\s<>"'()`]+"#).expect("bare url regex"));
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (idx, line) in body.lines().enumerate() {
+        let line_no = idx as u32 + 1;
+        // Byte ranges already consumed by an inline-link match (including the
+        // leading `!` for images) so the bare-URL pass doesn't double report.
+        let mut covered: Vec<(usize, usize)> = Vec::new();
+
+        for cap in LINK_RE.captures_iter(line) {
+            let whole = cap.get(0).expect("whole match");
+            let Some(url) = cap.get(2) else { continue };
+            let is_image = line[..whole.start()].ends_with('!');
+            let start = if is_image {
+                whole.start().saturating_sub(1)
+            } else {
+                whole.start()
+            };
+            covered.push((start, whole.end()));
+            if is_image {
+                continue;
+            }
+            if seen.insert(url.as_str().to_string()) {
+                out.push(LinkRef {
+                    url: url.as_str().to_string(),
+                    text: cap[1].to_string(),
+                    line: line_no,
+                });
+            }
+        }
+
+        for m in BARE_RE.find_iter(line) {
+            if covered
+                .iter()
+                .any(|(start, end)| m.start() >= *start && m.start() < *end)
+            {
+                continue;
+            }
+            let raw = m.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            if raw.len() <= "https://".len() {
+                continue;
+            }
+            if seen.insert(raw.to_string()) {
+                out.push(LinkRef {
+                    url: raw.to_string(),
+                    text: String::new(),
+                    line: line_no,
+                });
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,6 +1121,7 @@ mod tests {
                 tags: vec![],
                 headings: vec![],
                 tasks: vec![],
+                links: vec![],
                 summary: String::new(),
                 title: None,
             }
@@ -1086,6 +1167,7 @@ mod tests {
                 tags: vec![],
                 headings: vec![],
                 tasks: vec![],
+                links: vec![],
                 summary: String::new(),
                 title: title.map(|s| s.to_string()),
             }
@@ -1377,7 +1459,7 @@ fn read_context(path: &Path, line_no: u32) -> Vec<String> {
 
 #[cfg(test)]
 mod task_scan_tests {
-    use super::extract_tasks;
+    use super::{extract_links, extract_tasks};
 
     #[test]
     fn finds_open_and_done_items_with_file_line_numbers() {
@@ -1422,5 +1504,50 @@ mod task_scan_tests {
     fn keeps_priority_and_due_tokens_for_the_frontend_to_parse() {
         let tasks = extract_tasks("- [ ] ship it ⏫ 📅 2026-09-10\n");
         assert_eq!(tasks[0].text, "ship it ⏫ 📅 2026-09-10");
+    }
+
+    #[test]
+    fn links_extract_inline_autolink_and_bare() {
+        let body = "See [Rust](https://www.rust-lang.org/) and <https://example.com/a>.\n\
+                    Bare https://example.org/b?q=1 here.\n\
+                    ![img](https://example.com/pic.png)";
+        let links = extract_links(body);
+        let urls: Vec<_> = links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://www.rust-lang.org/",
+                "https://example.com/a",
+                "https://example.org/b?q=1",
+            ]
+        );
+        assert_eq!(links[0].text, "Rust");
+        assert_eq!(links[1].text, "");
+        assert_eq!(links[0].line, 1);
+    }
+
+    #[test]
+    fn links_dedupe_within_a_file_and_skip_non_http() {
+        let body =
+            "[a](javascript:alert(1))\n[b](https://x.com)\n[c](https://x.com)\n[d](mailto:a@b.c)";
+        let links = extract_links(body);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://x.com");
+        assert_eq!(links[0].text, "b");
+        assert_eq!(links[0].line, 2);
+    }
+
+    #[test]
+    fn links_do_not_double_count_inline_urls_as_bare_urls() {
+        let links = extract_links("[docs](https://example.com/docs)\n");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://example.com/docs");
+    }
+
+    #[test]
+    fn links_strip_trailing_sentence_punctuation_from_bare_urls() {
+        let links = extract_links("Go to https://example.com/a. Then stop.\n");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://example.com/a");
     }
 }

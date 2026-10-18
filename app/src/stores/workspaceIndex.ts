@@ -23,6 +23,15 @@ export interface WikilinkRef {
   line: number;
 }
 
+/** One external `http(s)` link found in a note body (bookmark sync). */
+export interface LinkRef {
+  url: string;
+  /** Link text; empty for autolinks and bare URLs. */
+  text: string;
+  /** 1-based line number, body-relative. */
+  line: number;
+}
+
 /** One `- [ ]` / `- [x]` item found by the Rust index. `line` is 1-based and
  *  counts front matter — the task panel rewrites the checkbox on that line. */
 export interface TaskRef {
@@ -54,6 +63,8 @@ export interface IndexEntry {
    * are excluded. May be absent on entries served from an older index cache.
    */
   relationships?: Record<string, string[]>;
+  /** External http(s) links in the body. Absent on older index caches. */
+  links?: LinkRef[];
 }
 
 export interface BacklinkRef {
