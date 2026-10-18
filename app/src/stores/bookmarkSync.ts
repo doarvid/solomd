@@ -3,9 +3,10 @@
  *
  * Two independent directions, sharing one schedule:
  *
- *   read  — Chromium bookmarks → notes. New bookmarks in the selected folders
- *           are captured through the existing `capture_fetch_page` pipeline
- *           and mirrored under the workspace root.
+ *   read  — Chromium bookmarks → notes. Bookmarks the user drops into the
+ *           managed `SoloMD/` folder are captured through the existing
+ *           `capture_fetch_page` pipeline and mirrored under the workspace
+ *           root. Links we mirrored from notes are marked and skipped.
  *   write — notes → browser. Every external link in the workspace becomes a
  *           bookmark inside the browser's managed `SoloMD/` subtree. The Rust
  *           side reconciles the whole subtree and skips any browser that is
@@ -29,16 +30,8 @@ export interface BookmarkSourceInfo {
   size: number;
 }
 
-export interface BookmarkFolderNode {
-  name: string;
-  path: string[];
-  url_count: number;
-  folders: BookmarkFolderNode[];
-}
-
 export interface BookmarkCatalog {
   sources: BookmarkSourceInfo[];
-  tree: BookmarkFolderNode[];
   fingerprint: string;
 }
 
@@ -194,17 +187,10 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
       if (!force && settings.bookmarkSyncFingerprint === catalog.fingerprint) {
         return;
       }
-      if (settings.bookmarkSyncFolders.length === 0) {
-        settings.bookmarkSyncFingerprint = catalog.fingerprint;
-        settings.persist();
-        return;
-      }
 
       let plan: BookmarkPlanEntry[];
       try {
-        plan = await invoke<BookmarkPlanEntry[]>('bookmarks_sync_plan', {
-          folders: settings.bookmarkSyncFolders,
-        });
+        plan = await invoke<BookmarkPlanEntry[]>('bookmarks_sync_plan');
       } catch (e) {
         this.lastError = String(e);
         return; // don't advance the fingerprint — retry next round

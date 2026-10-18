@@ -387,13 +387,13 @@ export const nl: I18n = {
       heading: 'Browser bookmarks',
       enable: 'Sync bookmarks with notes',
       enableHint:
-        'Reads Chromium bookmarks (Chrome, Edge, Brave, Arc, Vivaldi, Chromium) and captures newly bookmarked pages into your workspace. Every link in your notes is also written back into the browser\'s SoloMD folder.',
+        'Reads Chromium bookmarks (Chrome, Edge, Brave, Arc, Vivaldi, Chromium). Bookmarks you drop into the browser\'s SoloMD folder become notes; every link in your notes is mirrored back into that folder.',
       sources: 'Detected sources',
       sourceCount: '({count})',
       scanning: 'Scanning…',
       rescan: 'Rescan',
       noSources: 'No Chromium bookmark files found on this machine.',
-      treeHint: 'Choose the bookmark folders to capture. Subfolders are mirrored under the workspace root.',
+      treeHint: 'Drop a bookmark into the browser\'s SoloMD folder and it becomes a note. Its subfolders mirror under the workspace root.',
       interval: 'Check every',
       minutes: '{count} min',
       syncNow: 'Sync now',
@@ -407,11 +407,11 @@ export const nl: I18n = {
       writeWritten: 'Bookmarks written to {count} profile(s)',
       writeWaiting: '{count} browser(s) running — will retry after they quit',
       mirrorHint:
-        'Captured notes land at the workspace root with the same folder structure as the bookmarks. Existing notes are never overwritten.',
+        'Captured notes land at the workspace root with the same folder structure as the SoloMD subfolders. Existing notes are never overwritten.',
       noteSafety:
-        'Deleting a bookmark in your own folders does not delete its note. The SoloMD folder always matches your notes.',
+        'Bookmarks outside SoloMD are never read or modified. Deleting one there has no effect on notes.',
       managedWarning:
-        'The SoloMD bookmark folder is fully managed by SoloMD — manual additions or deletions there are corrected on the next sync.',
+        'SoloMD/ is fully managed: note links are maintained automatically, while bookmarks you add there are kept until their page becomes a note.',
       noWorkspace: 'Open a workspace folder to sync.',
     },
     codeBlockWrap: 'Lange regels in codeblokken laten teruglopen',

@@ -5,10 +5,12 @@
 //! `checksum`. The format is not a public API. We treat the file as opaque
 //! except for the managed subtree:
 //!
-//! - Read: parse into a merged tree across every discovered browser/profile.
-//! - Write: reconcile only the folder marked `meta_info.solomd_managed`;
-//!   user nodes are preserved byte-for-byte, and `checksum` is dropped so
-//!   Chromium recomputes it on the next launch.
+//! - Read: only the managed `SoloMD/` subtree is consulted. URL nodes we
+//!   mirrored from notes are marked (`solomd_mirror`) and skipped; every
+//!   unmarked bookmark there is a page the user wants captured as a note.
+//! - Write: reconcile the folder marked `meta_info.solomd_managed`; nodes
+//!   without a mirror marker are user additions and are preserved, and
+//!   `checksum` is dropped so Chromium recomputes it on the next launch.
 //! - Never write while the browser is running: it would overwrite us from
 //!   memory (and we could drop the user's in-memory changes).
 //!
@@ -45,18 +47,8 @@ pub struct BookmarkSource {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct BookmarkFolderNode {
-    pub name: String,
-    pub path: Vec<String>,
-    /// Total URLs in this folder and all descendants.
-    pub url_count: usize,
-    pub folders: Vec<BookmarkFolderNode>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct BookmarkCatalog {
     pub sources: Vec<BookmarkSource>,
-    pub tree: Vec<BookmarkFolderNode>,
     /// Sorted `(path, mtime, size)` hash. Changes whenever any bookmarks file
     /// changes, so the frontend can skip a read pass.
     pub fingerprint: String,
@@ -97,28 +89,23 @@ pub struct ApplyReport {
 }
 
 // ---------------------------------------------------------------------------
-// Internal tree
+// Write tree
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct UrlNode {
-    name: String,
+#[derive(Debug, Default, Clone)]
+struct DesiredUrl {
+    title: String,
     url: String,
+    /// `true` for links mirrored from notes; `false` for bookmarks the user
+    /// added to the managed folder (they are preserved until captured).
+    mirrored: bool,
 }
 
 #[derive(Debug, Default, Clone)]
-struct Folder {
-    name: String,
-    path: Vec<String>,
-    urls: Vec<UrlNode>,
-    folders: Vec<Folder>,
-}
-
-#[derive(Debug, Default)]
 struct DesiredFolder {
     name: String,
     folders: Vec<DesiredFolder>,
-    urls: Vec<(String, String)>, // (title, url)
+    urls: Vec<DesiredUrl>,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,20 +115,6 @@ struct DesiredFolder {
 #[tauri::command]
 pub fn bookmarks_catalog() -> Result<BookmarkCatalog, String> {
     let sources = discover_sources();
-    let mut docs = Vec::with_capacity(sources.len());
-    for source in &sources {
-        match fs::read_to_string(&source.path) {
-            Ok(text) => match serde_json::from_str::<Value>(&text) {
-                Ok(value) => docs.push(value),
-                Err(_) => continue,
-            },
-            Err(_) => continue,
-        }
-    }
-
-    let roots = merge_documents(docs);
-    let tree = roots.iter().map(to_display_node).collect();
-
     Ok(BookmarkCatalog {
         fingerprint: fingerprint(&sources),
         sources: sources
@@ -154,16 +127,15 @@ pub fn bookmarks_catalog() -> Result<BookmarkCatalog, String> {
                 size: s.size,
             })
             .collect(),
-        tree,
     })
 }
 
+/// Bookmarks the user placed in the managed `SoloMD/` folder that were not
+/// written by us. Everything else in the browser is ignored.
 #[tauri::command]
-pub fn bookmarks_sync_plan(
-    folders: Vec<Vec<String>>,
-) -> Result<Vec<BookmarkPlanEntry>, String> {
+pub fn bookmarks_sync_plan() -> Result<Vec<BookmarkPlanEntry>, String> {
     let docs = read_all_documents();
-    Ok(plan_from_docs(&docs, &folders))
+    Ok(plan_from_docs(&docs))
 }
 
 fn read_all_documents() -> Vec<Value> {
@@ -172,19 +144,6 @@ fn read_all_documents() -> Vec<Value> {
         .filter_map(|s| fs::read_to_string(&s.path).ok())
         .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
         .collect()
-}
-
-fn to_display_node(folder: &Folder) -> BookmarkFolderNode {
-    BookmarkFolderNode {
-        name: folder.name.clone(),
-        path: folder.path.clone(),
-        url_count: count_urls(folder),
-        folders: folder.folders.iter().map(to_display_node).collect(),
-    }
-}
-
-fn count_urls(folder: &Folder) -> usize {
-    folder.urls.len() + folder.folders.iter().map(count_urls).sum::<usize>()
 }
 
 // ---------------------------------------------------------------------------
@@ -313,127 +272,17 @@ fn fingerprint(sources: &[SourceFile]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-// ---------------------------------------------------------------------------
-// Parsing + merging
-// ---------------------------------------------------------------------------
-
-fn merge_documents(docs: Vec<Value>) -> Vec<Folder> {
-    let mut roots: Vec<Folder> = Vec::new();
-    for doc in docs {
-        let Some(roots_obj) = doc.get("roots").and_then(|r| r.as_object()) else {
-            continue;
-        };
-        for key in ROOT_KEYS {
-            let Some(node) = roots_obj.get(key) else { continue };
-            let fallback = match key {
-                "bookmark_bar" => "Bookmarks bar",
-                "other" => "Other bookmarks",
-                _ => "Mobile bookmarks",
-            };
-            let name = node
-                .get("name")
-                .and_then(|n| n.as_str())
-                .filter(|n| !n.is_empty())
-                .unwrap_or(fallback)
-                .to_string();
-            let mut folder = Folder {
-                name: name.clone(),
-                path: vec![name],
-                ..Folder::default()
-            };
-            collect_folder(node, &mut folder);
-            merge_folder(&mut roots, folder);
-        }
-    }
-    for root in &mut roots {
-        dedupe_urls(root);
-    }
-    roots
-}
-
-/// Same URL bookmarked in several profiles (or twice in one) counts once.
-fn dedupe_urls(folder: &mut Folder) {
-    let mut seen = HashSet::new();
-    folder
-        .urls
-        .retain(|url| seen.insert(normalize_url(&url.url)));
-    for child in &mut folder.folders {
-        dedupe_urls(child);
-    }
-}
-
-fn merge_folder(roots: &mut Vec<Folder>, incoming: Folder) {
-    if let Some(existing) = roots.iter_mut().find(|f| f.name == incoming.name) {
-        merge_into(existing, &incoming);
-    } else {
-        roots.push(incoming);
-    }
-}
-
-fn merge_into(dest: &mut Folder, src: &Folder) {
-    dest.urls.extend(src.urls.iter().cloned());
-    for child in &src.folders {
-        if let Some(existing) = dest.folders.iter_mut().find(|f| f.name == child.name) {
-            merge_into(existing, child);
-        } else {
-            dest.folders.push(child.clone());
-        }
-    }
-}
-
-fn collect_folder(node: &Value, folder: &mut Folder) {
-    let Some(children) = node.get("children").and_then(|c| c.as_array()) else {
-        return;
-    };
-    for child in children {
-        let kind = child.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        match kind {
-            "url" => {
-                let url = child.get("url").and_then(|u| u.as_str()).unwrap_or("");
-                if !is_http(url) {
-                    continue;
-                }
-                let name = child
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                folder.urls.push(UrlNode {
-                    name,
-                    url: url.to_string(),
-                });
-            }
-            "folder" => {
-                // Our own mirror must never be read back as a source.
-                if is_managed(child) {
-                    continue;
-                }
-                let name = child
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if name.is_empty() {
-                    continue;
-                }
-                let mut path = folder.path.clone();
-                path.push(name.clone());
-                let mut sub = Folder {
-                    name,
-                    path,
-                    ..Folder::default()
-                };
-                collect_folder(child, &mut sub);
-                folder.folders.push(sub);
-            }
-            _ => {}
-        }
-    }
-}
-
 fn is_managed(node: &Value) -> bool {
     node.get("meta_info")
         .and_then(|m| m.get(MANAGED_MARKER))
+        .and_then(|v| v.as_str())
+        == Some("1")
+}
+
+/// A URL node we wrote from a note link. User-added nodes carry no marker.
+fn is_mirror(node: &Value) -> bool {
+    node.get("meta_info")
+        .and_then(|m| m.get("solomd_mirror"))
         .and_then(|v| v.as_str())
         == Some("1")
 }
@@ -447,52 +296,97 @@ fn is_http(url: &str) -> bool {
 // Read plan
 // ---------------------------------------------------------------------------
 
-fn plan_from_docs(docs: &[Value], selected: &[Vec<String>]) -> Vec<BookmarkPlanEntry> {
-    let roots = merge_documents(docs.to_vec());
+/// _User-added_ URLs inside the managed root, mirroring their folder path
+/// relative to `SoloMD/`. URLs we mirrored from notes are marked and skipped.
+fn plan_from_docs(docs: &[Value]) -> Vec<BookmarkPlanEntry> {
     let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for path in selected {
-        if let Some(node) = find_folder(&roots, path) {
-            collect_plan(node, &mut out, &mut seen);
+    for doc in docs {
+        if let Some(root) = find_managed_root(doc) {
+            collect_user_plan(root, &mut Vec::new(), &mut out, &mut seen);
         }
     }
     out
 }
 
-fn find_folder<'a>(roots: &'a [Folder], path: &[String]) -> Option<&'a Folder> {
-    let (first, rest) = path.split_first()?;
-    let root = roots.iter().find(|f| &f.name == first)?;
-    let mut node = root;
-    for segment in rest {
-        node = node.folders.iter().find(|f| &f.name == segment)?;
+fn find_managed_root(doc: &Value) -> Option<&Value> {
+    let roots = doc.get("roots")?.as_object()?;
+    for key in ROOT_KEYS {
+        let Some(node) = roots.get(key) else { continue };
+        if let Some(found) = find_managed_in(node) {
+            return Some(found);
+        }
     }
-    Some(node)
+    None
 }
 
-fn collect_plan(node: &Folder, out: &mut Vec<BookmarkPlanEntry>, seen: &mut HashSet<String>) {
-    for url in &node.urls {
-        let normalized = normalize_url(&url.url);
-        if normalized.is_empty() || !seen.insert(normalized.clone()) {
-            continue;
-        }
-        let folder = node
-            .path
-            .iter()
-            .filter_map(|s| sanitize_segment(s))
-            .collect();
-        out.push(BookmarkPlanEntry {
-            folder,
-            title: if url.name.trim().is_empty() {
-                host_of(&url.url)
-            } else {
-                url.name.clone()
-            },
-            url: url.url.clone(),
-            normalized_url: normalized,
-        });
+fn find_managed_in(node: &Value) -> Option<&Value> {
+    if is_managed(node) {
+        return Some(node);
     }
-    for child in &node.folders {
-        collect_plan(child, out, seen);
+    let children = node.get("children")?.as_array()?;
+    for child in children {
+        if let Some(found) = find_managed_in(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn collect_user_plan(
+    node: &Value,
+    rel: &mut Vec<String>,
+    out: &mut Vec<BookmarkPlanEntry>,
+    seen: &mut HashSet<String>,
+) {
+    let Some(children) = node.get("children").and_then(|c| c.as_array()) else {
+        return;
+    };
+    for child in children {
+        match child.get("type").and_then(|t| t.as_str()) {
+            Some("url") => {
+                // Mirrored from a note already — capturing it again would
+                // create one note per link in the workspace.
+                if is_mirror(child) {
+                    continue;
+                }
+                let url = child.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                if !is_http(url) {
+                    continue;
+                }
+                let normalized = normalize_url(url);
+                if normalized.is_empty() || !seen.insert(normalized.clone()) {
+                    continue;
+                }
+                let name = child
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                out.push(BookmarkPlanEntry {
+                    folder: rel.iter().filter_map(|s| sanitize_segment(s)).collect(),
+                    title: if name.trim().is_empty() {
+                        host_of(url)
+                    } else {
+                        name
+                    },
+                    url: url.to_string(),
+                    normalized_url: normalized,
+                });
+            }
+            Some("folder") => {
+                let Some(name) = child.get("name").and_then(|n| n.as_str()) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                rel.push(name.to_string());
+                collect_user_plan(child, rel, out, seen);
+                rel.pop();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -581,44 +475,113 @@ fn build_desired(entries: &[BookmarkWriteEntry]) -> DesiredFolder {
         if normalized.is_empty() || !seen.insert(normalized) {
             continue;
         }
-        let segments: Vec<String> = entry
-            .folder
-            .iter()
-            .filter_map(|s| sanitize_segment(s))
-            .collect();
         let title = if entry.title.trim().is_empty() {
             host_of(&entry.url)
         } else {
             entry.title.clone()
         };
-        insert_desired(&mut root, &segments, &title, &entry.url);
+        insert_desired(&mut root, &entry.folder, &title, &entry.url, true);
     }
     sort_desired(&mut root);
     root
 }
 
-fn insert_desired(node: &mut DesiredFolder, folder: &[String], title: &str, url: &str) {
+fn insert_desired(
+    node: &mut DesiredFolder,
+    folder: &[String],
+    title: &str,
+    url: &str,
+    mirrored: bool,
+) {
     if let Some((head, rest)) = folder.split_first() {
-        if let Some(child) = node.folders.iter_mut().find(|f| &f.name == head) {
-            insert_desired(child, rest, title, url);
+        let Some(head) = sanitize_segment(head) else {
+            return;
+        };
+        if let Some(child) = node.folders.iter_mut().find(|f| f.name == head) {
+            insert_desired(child, rest, title, url, mirrored);
             return;
         }
         let mut child = DesiredFolder {
-            name: head.clone(),
+            name: head,
             ..DesiredFolder::default()
         };
-        insert_desired(&mut child, rest, title, url);
+        insert_desired(&mut child, rest, title, url, mirrored);
         node.folders.push(child);
         return;
     }
-    node.urls.push((title.to_string(), url.to_string()));
+    node.urls.push(DesiredUrl {
+        title: title.to_string(),
+        url: url.to_string(),
+        mirrored,
+    });
+}
+
+/// Carry over bookmarks the user placed in `SoloMD/` (no mirror marker) so a
+/// not-yet-captured bookmark is never erased by the write pass. Mirrored URLs
+/// from notes win, so once the page becomes a note the user node disappears
+/// naturally.
+fn merge_user_nodes(desired: &mut DesiredFolder, managed: &Value) {
+    let mut seen = collect_desired_urls(desired);
+    merge_user_nodes_into(desired, managed, &mut Vec::new(), &mut seen);
+    sort_desired(desired);
+}
+
+fn merge_user_nodes_into(
+    desired: &mut DesiredFolder,
+    node: &Value,
+    rel: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let Some(children) = node.get("children").and_then(|c| c.as_array()) else {
+        return;
+    };
+    for child in children {
+        match child.get("type").and_then(|t| t.as_str()) {
+            Some("url") => {
+                if is_mirror(child) {
+                    continue;
+                }
+                let url = child.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                if !is_http(url) {
+                    continue;
+                }
+                let normalized = normalize_url(url);
+                if normalized.is_empty() || !seen.insert(normalized) {
+                    continue;
+                }
+                let title = child
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let title = if title.trim().is_empty() {
+                    host_of(url)
+                } else {
+                    title
+                };
+                insert_desired(desired, rel, &title, url, false);
+            }
+            Some("folder") => {
+                let Some(name) = child.get("name").and_then(|n| n.as_str()) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                rel.push(name.to_string());
+                merge_user_nodes_into(desired, child, rel, seen);
+                rel.pop();
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Sorted output makes the on-disk representation stable across runs, so an
 /// unchanged workspace never rewrites the bookmarks file.
 fn sort_desired(node: &mut DesiredFolder) {
     node.folders.sort_by(|a, b| a.name.cmp(&b.name));
-    node.urls.sort_by(|a, b| a.1.cmp(&b.1));
+    node.urls.sort_by(|a, b| a.url.cmp(&b.url));
     for child in &mut node.folders {
         sort_desired(child);
     }
@@ -650,16 +613,12 @@ fn apply_to_file(path: &Path, desired: &DesiredFolder) -> Result<Option<(usize, 
         return Ok(None); // nothing to mirror yet — don't create an empty folder
     }
 
-    let mut desired_children: Vec<Value> = Vec::new();
-    for folder in &desired.folders {
-        desired_children.push(desired_folder_to_json(folder, &mut next_id));
-    }
-    for (title, url) in &desired.urls {
-        desired_children.push(desired_url_to_json(title, url, &mut next_id));
-    }
-    let desired_value = Value::Array(desired_children);
-
     if let Some(index) = managed_index {
+        // Keep user-added bookmarks until their page has become a note.
+        let mut aligned = desired.clone();
+        merge_user_nodes(&mut aligned, &children[index]);
+        let desired_value = Value::Array(desired_children(&aligned, &mut next_id));
+
         let existing = children[index]
             .get("children")
             .cloned()
@@ -668,7 +627,7 @@ fn apply_to_file(path: &Path, desired: &DesiredFolder) -> Result<Option<(usize, 
             return Ok(None);
         }
         let old_urls = collect_urls(&existing);
-        let new_urls = collect_desired_urls(desired);
+        let new_urls = collect_desired_urls(&aligned);
         let added = new_urls.difference(&old_urls).count();
         let removed = old_urls.difference(&new_urls).count();
         children[index]["children"] = desired_value;
@@ -676,6 +635,7 @@ fn apply_to_file(path: &Path, desired: &DesiredFolder) -> Result<Option<(usize, 
         return Ok(Some((added, removed)));
     }
 
+    let desired_value = Value::Array(desired_children(desired, &mut next_id));
     let name = available_managed_name(children);
     let mut node = json!({
         "type": "folder",
@@ -711,14 +671,19 @@ fn available_managed_name(children: &[Value]) -> String {
     }
 }
 
-fn desired_folder_to_json(folder: &DesiredFolder, next_id: &mut u64) -> Value {
+fn desired_children(folder: &DesiredFolder, next_id: &mut u64) -> Vec<Value> {
     let mut children: Vec<Value> = Vec::new();
     for child in &folder.folders {
         children.push(desired_folder_to_json(child, next_id));
     }
-    for (title, url) in &folder.urls {
-        children.push(desired_url_to_json(title, url, next_id));
+    for url in &folder.urls {
+        children.push(desired_url_to_json(url, next_id));
     }
+    children
+}
+
+fn desired_folder_to_json(folder: &DesiredFolder, next_id: &mut u64) -> Value {
+    let children = desired_children(folder, next_id);
     let id = take_id(next_id);
     json!({
         "type": "folder",
@@ -731,16 +696,20 @@ fn desired_folder_to_json(folder: &DesiredFolder, next_id: &mut u64) -> Value {
     })
 }
 
-fn desired_url_to_json(title: &str, url: &str, next_id: &mut u64) -> Value {
+fn desired_url_to_json(url: &DesiredUrl, next_id: &mut u64) -> Value {
     let id = take_id(next_id);
-    json!({
+    let mut node = json!({
         "type": "url",
-        "name": title,
-        "url": url,
+        "name": url.title,
+        "url": url.url,
         "id": id.to_string(),
         "guid": new_guid(next_id),
         "date_added": chrome_timestamp(),
-    })
+    });
+    if url.mirrored {
+        node["meta_info"] = json!({ "solomd_mirror": "1" });
+    }
+    node
 }
 
 fn take_id(next_id: &mut u64) -> u64 {
@@ -782,6 +751,14 @@ fn canonical(value: &Value) -> Value {
             if let Some(children) = map.get("children") {
                 out.insert("children".into(), canonical(children));
             }
+            // Marker changes must trigger a write (mirrored vs user-added),
+            // but other unknown meta_info keys stay ignored.
+            if let Some(mirror) = map
+                .get("meta_info")
+                .and_then(|m| m.get("solomd_mirror"))
+            {
+                out.insert("solomd_mirror".into(), mirror.clone());
+            }
             Value::Object(out)
         }
         other => other.clone(),
@@ -821,8 +798,8 @@ fn collect_desired_urls(node: &DesiredFolder) -> HashSet<String> {
 }
 
 fn collect_desired_urls_into(node: &DesiredFolder, out: &mut HashSet<String>) {
-    for (_, url) in &node.urls {
-        let n = normalize_url(url);
+    for url in &node.urls {
+        let n = normalize_url(&url.url);
         if !n.is_empty() {
             out.insert(n);
         }
@@ -976,28 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_merges_roots_and_counts_urls() {
-        let tree = merge_documents(vec![fixture()]);
-        let bar = &tree[0];
-        assert_eq!(bar.name, "Bookmarks bar");
-        assert_eq!(count_urls(bar), 3);
-        assert_eq!(bar.folders[0].name, "Tech");
-        assert_eq!(count_urls(&bar.folders[0]), 2);
-    }
-
-    #[test]
-    fn catalog_merges_same_path_across_profiles() {
-        let mut second = fixture();
-        second["roots"]["bookmark_bar"]["children"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({ "type": "url", "name": "Vue", "url": "https://vuejs.org/", "id": "8" }));
-        let tree = merge_documents(vec![fixture(), second]);
-        assert_eq!(count_urls(&tree[0]), 4);
-    }
-
-    #[test]
-    fn managed_subtree_is_not_read_back() {
+    fn plan_reads_only_user_bookmarks_inside_the_managed_root() {
         let mut doc = fixture();
         doc["roots"]["bookmark_bar"]["children"]
             .as_array_mut()
@@ -1005,30 +961,28 @@ mod tests {
             .push(json!({
                 "type": "folder",
                 "name": "SoloMD",
+                "meta_info": { "solomd_managed": "1" },
                 "children": [
-                    { "type": "url", "name": "Mirror", "url": "https://mirror.example/", "id": "9" }
-                ],
-                "meta_info": { "solomd_managed": "1" }
+                    { "type": "url", "name": "User", "url": "https://user.example/", "id": "9" },
+                    { "type": "url", "name": "Mirror", "url": "https://mirror.example/", "id": "10",
+                      "meta_info": { "solomd_mirror": "1" } },
+                    { "type": "folder", "name": "Tech", "children": [
+                        { "type": "url", "name": "Nested", "url": "https://nested.example/", "id": "11" }
+                    ]}
+                ]
             }));
-        let tree = merge_documents(vec![doc]);
-        assert!(!tree[0].folders.iter().any(|f| f.name == "SoloMD"));
-    }
-
-    #[test]
-    fn plan_mirrors_selected_folder_and_dedupes_urls() {
-        let plan = plan_from_docs(
-            &[fixture()],
-            &[vec!["Bookmarks bar".into(), "Tech".into()]],
-        );
+        let plan = plan_from_docs(&[doc]);
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].folder, vec!["Bookmarks bar", "Tech"]);
-        assert_eq!(plan[0].normalized_url, "https://doc.rust-lang.org");
-        assert_eq!(plan[1].normalized_url, "https://example.com/page");
+        assert_eq!(plan[0].folder, Vec::<String>::new());
+        assert_eq!(plan[0].normalized_url, "https://user.example");
+        assert_eq!(plan[0].title, "User");
+        assert_eq!(plan[1].folder, vec!["Tech"]);
+        assert_eq!(plan[1].normalized_url, "https://nested.example");
     }
 
     #[test]
-    fn plan_skips_non_http_and_unknown_folders() {
-        let plan = plan_from_docs(&[fixture()], &[vec!["Other bookmarks".into()], vec!["Nope".into()]]);
+    fn plan_ignores_bookmarks_outside_the_managed_root() {
+        let plan = plan_from_docs(&[fixture()]);
         assert!(plan.is_empty());
     }
 
@@ -1054,7 +1008,8 @@ mod tests {
         let desired = build_desired(&entries);
         assert_eq!(desired.folders.len(), 1);
         assert_eq!(desired.folders[0].urls.len(), 2);
-        assert_eq!(desired.folders[0].urls[0].1, "https://a.example/");
+        assert_eq!(desired.folders[0].urls[0].url, "https://a.example/");
+        assert!(desired.folders[0].urls[0].mirrored);
     }
 
     fn write_fixture(dir: &Path) -> PathBuf {
@@ -1162,6 +1117,76 @@ mod tests {
             .map(|c| c["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["Keep"]);
+    }
+
+    #[test]
+    fn apply_preserves_user_bookmarks_until_they_are_captured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(dir.path());
+        let first = desired_for(&[(&["Notes"], "Note", "https://note.example/")]);
+        apply_to_file(&path, &first).unwrap();
+
+        // Simulate the user adding a bookmark to SoloMD while Chrome is closed.
+        let mut doc: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let managed = doc["roots"]["bookmark_bar"]["children"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|c| c["meta_info"]["solomd_managed"] == "1")
+            .unwrap();
+        managed["children"].as_array_mut().unwrap().push(json!({
+            "type": "url",
+            "name": "User pick",
+            "url": "https://user.example/",
+            "id": "99"
+        }));
+        fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+        // Next write pass: the note set changed, the user node must survive.
+        let second = desired_for(&[(&["Notes"], "Other", "https://other.example/")]);
+        apply_to_file(&path, &second).unwrap();
+
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let managed = after["roots"]["bookmark_bar"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["meta_info"]["solomd_managed"] == "1")
+            .unwrap();
+        let mut urls = Vec::new();
+        fn walk(node: &Value, urls: &mut Vec<(String, bool)>) {
+            for child in node["children"].as_array().into_iter().flatten() {
+                if child["type"] == "url" {
+                    urls.push((
+                        child["url"].as_str().unwrap().to_string(),
+                        child["meta_info"]["solomd_mirror"] == "1",
+                    ));
+                }
+                if child["type"] == "folder" {
+                    walk(child, urls);
+                }
+            }
+        }
+        walk(managed, &mut urls);
+        urls.sort();
+        assert_eq!(
+            urls,
+            vec![
+                ("https://other.example/".to_string(), true),
+                ("https://user.example/".to_string(), false),
+            ]
+        );
+        let user = urls
+            .iter()
+            .find(|(u, _)| u == "https://user.example/")
+            .expect("user bookmark preserved");
+        assert!(!user.1, "user bookmark must stay unmarked so it is captured");
+        let mirrored = urls
+            .iter()
+            .find(|(u, _)| u == "https://other.example/")
+            .expect("note link mirrored");
+        assert!(mirrored.1);
+        assert!(!urls.iter().any(|(u, _)| u == "https://note.example/"));
     }
 
     #[test]

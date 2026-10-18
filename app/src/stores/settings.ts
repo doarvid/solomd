@@ -456,13 +456,11 @@ interface Settings {
   // note. Default on. Matches Tolaria's auto_advance_inbox_after_organize.
   autoAdvanceInboxAfterOrganize: boolean;
   // ── Browser bookmark sync (Chromium) ──────────────────────────────────────
-  // Read direction: capture newly bookmarked pages into notes, mirroring the
-  // selected bookmark folders under the workspace root.
-  // Write direction: mirror every note link into the browser's managed
-  // `SoloMD/` subtree (only while that browser is not running).
+  // Read direction: capture bookmarks the user puts in the managed `SoloMD/`
+  // folder into notes, mirroring their subfolders under the workspace root.
+  // Write direction: mirror every note link into that same `SoloMD/` subtree
+  // (only while that browser is not running).
   bookmarkSyncEnabled: boolean;
-  /** Selected bookmark folder paths (`["Bookmarks bar", "Tech"]`). */
-  bookmarkSyncFolders: string[][];
   bookmarkSyncIntervalMinutes: number;
   /** Fingerprint of all discovered Bookmarks files at the last read pass. */
   bookmarkSyncFingerprint: string;
@@ -754,7 +752,6 @@ function defaults(): Settings {
     inboxWorkflowEnabled: true,
     autoAdvanceInboxAfterOrganize: true,
     bookmarkSyncEnabled: false,
-    bookmarkSyncFolders: [] as string[][],
     bookmarkSyncIntervalMinutes: 30,
     bookmarkSyncFingerprint: '',
     _rsPanesBeforeHide: null,
@@ -801,6 +798,11 @@ function load(): Settings {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Settings>;
       const merged: Settings = { ...defaults(), ...parsed };
+      // v4.15 — bookmark folder selection was removed: the managed SoloMD/
+      // folder is now the only sync surface. Drop the stale key so it does
+      // not keep getting written back to localStorage.
+      delete (merged as Partial<Settings> & { bookmarkSyncFolders?: unknown })
+        .bookmarkSyncFolders;
       // pdfDefaults is a nested object: do a clamping merge so a missing
       // sub-key (older settings blob) doesn't yield `undefined` and a
       // tampered numeric stays in range.

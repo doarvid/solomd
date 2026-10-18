@@ -8,7 +8,7 @@
 
 在设置里开启后，SoloMD 与 Chromium 系浏览器的书签保持双向同步：
 
-1. **书签 → 笔记**：用户勾选一个或多个书签目录；新增书签对应的网页被采集为笔记，目录结构镜像到工作区根。已有笔记永不覆盖。
+1. **书签 → 笔记**：用户把书签放进浏览器里的 `SoloMD/` 目录，该页面被采集为笔记；`SoloMD/` 下的子目录结构镜像到工作区根。已有笔记永不覆盖。
 2. **笔记 → 书签**：工作区笔记里的所有外链写入浏览器 `SoloMD/` 托管目录，目录镜像笔记所在目录。`SoloMD/` 是笔记的投影，**永远和笔记对齐**。
 3. 全部自动化：应用启动后同步一次，运行期间按间隔检查；无需用户逐个点击。
 
@@ -16,7 +16,7 @@
 
 - **不做实时同步**：浏览器运行时无法安全写入，写入统一排队到浏览器退出后。
 - **不做书签删除的传播到笔记**：从用户自己的书签目录里删掉书签，不会删除已采集的笔记。
-- **不改用户自己的书签**：只读用户勾选的目录；写入只发生在 `SoloMD/` 托管子树内。
+- **不改用户自己的书签**：只读 `SoloMD/` 托管子树；写入也只发生在该子树内。
 - **不支持 Firefox / Safari**：本期只做 Chromium 系。
 - **不做移动端**：设置项在手机/平板隐藏，命令在移动端返回空。
 - **不做用户可编辑的同步规则**：目录选择 + 开关 + 间隔，足够。
@@ -92,13 +92,12 @@ pub links: Vec<LinkRef>,
 - 跳过 `System Profile`、`Guest Profile` 等非用户 Profile。
 - 移动端（`cfg(target_os = "ios"/"android")`）返回空列表。
 
-### 2.2 合并
+### 2.2 读取范围
 
-- 每个文件解析成三个根：`bookmark_bar`、`other`、`synced`（缺失的根跳过）。
-- 根节点显示名取 JSON 的 `name`；没有就用根 key。
-- 跨浏览器、跨 Profile 按**完整目录路径**（`Vec<String>`）合并成一棵树。
-- URL 节点保存原始 URL、标题、所属来源。
-- **跳过带 `meta_info.solomd_managed` 标记的子树**，避免应用自己写的书签被反向采集。
+- 只读取每个 Profile 里带 `meta_info.solomd_managed == "1"` 的托管根及其子树。
+- 托管子树中带 `meta_info.solomd_mirror == "1"` 的 URL 节点是应用从笔记镜像过来的，**跳过**，避免把每条笔记外链都再采成一篇笔记。
+- 其余 URL 节点都是用户放进 `SoloMD/` 的书签，进入采集计划。
+- 普通书签目录一律不读。
 
 ### 2.3 命令
 
@@ -109,25 +108,17 @@ bookmarks_catalog() -> BookmarkCatalog
 ```rust
 pub struct BookmarkCatalog {
     pub sources: Vec<BookmarkSource>,   // browser/profile/path/mtime/size
-    pub tree: BookmarkFolderNode,       // 只含目录结构与 url_count
     pub fingerprint: String,            // sha256(path + mtime + size)，排序后
-}
-
-pub struct BookmarkFolderNode {
-    pub name: String,
-    pub path: Vec<String>,
-    pub url_count: usize,
-    pub folders: Vec<BookmarkFolderNode>,
 }
 ```
 
 ```rust
-bookmarks_sync_plan(folders: Vec<Vec<String>>) -> Vec<BookmarkPlanEntry>
+bookmarks_sync_plan() -> Vec<BookmarkPlanEntry>
 ```
 
 ```rust
 pub struct BookmarkPlanEntry {
-    /// 相对工作区根的镜像目录（已按平台清洗）。
+    /// 相对工作区根的镜像目录（已按平台清洗），相对 `SoloMD/`。
     pub folder: Vec<String>,
     pub title: String,
     pub url: String,
@@ -135,9 +126,8 @@ pub struct BookmarkPlanEntry {
 }
 ```
 
-- DFS 所选目录及其子孙。
-- 只收 `http`/`https`。
-- 按 `capture_store::normalize_url` 去重；同一 URL 出现在多个所选目录时只保留第一个。
+- 递归托管根，只收**没有** `solomd_mirror` 标记的 `http`/`https` 节点。
+- 按 `capture_store::normalize_url` 去重；同一 URL 出现在多个 Profile 时只保留第一个。
 - 目录名用 `capture_store::safe_filename` 清洗。
 
 ## 3. 笔记 → 书签写入
@@ -180,15 +170,16 @@ pub struct ApplyReport {
    - 没有 → 新建 `SoloMD`，带标记；若已存在同名但无标记的用户目录，改名 `SoloMD (2)`。
 5. 用输入构造期望子树：
    - 目录 = 笔记目录分段（清洗后）。
-   - 叶子 = URL 节点，title 按输入。
+   - 叶子 = URL 节点，title 按输入，`meta_info.solomd_mirror = "1"`。
    - 全局按归一化 URL 去重。
-6. 比较现有托管子树的规范表示（路径 + URL + 标题）。完全一致 → 不写文件。
-7. 不一致 → **整体替换**托管根的 `children`：
-   - 新节点生成唯一数字 `id`（全文件最大值 + 1 递增）、UUID v4 形式的 `guid`、WebKit epoch 微秒 `date_added`；目录额外 `date_modified`、`date_group_modified` 可省略。
-   - 删除托管子树中不再需要的节点；空目录随之消失。
-   - 用户自己的书签节点原样保留，不触碰。
-8. 序列化前移除 `checksum` 字段（Chromium 启动时会重新计算）。
-9. 临时文件 + `rename` 原子替换。
+6. **保留用户添加的书签**：现有托管子树里没有 `solomd_mirror` 标记的 URL 节点，如果其 URL 不在期望集合里，按原相对路径并入期望树（不加标记）；一旦对应页面被采成笔记，URL 进入期望集合，该节点被带标记的镜像节点取代。
+7. 比较现有托管子树的规范表示（路径 + URL + 标题 + 镜像标记）。完全一致 → 不写文件。
+8. 不一致 → **替换**托管根的 `children`：
+   - 新节点生成唯一数字 `id`（全文件最大值 + 1 递增）、UUID v4 形式的 `guid`、WebKit epoch 微秒 `date_added`。
+   - 镜像节点删除后不复存在；空目录随之消失。
+   - 用户自己的书签节点（托管子树之外）原样保留，不触碰。
+9. 序列化前移除 `checksum` 字段（Chromium 启动时会重新计算）。
+10. 临时文件 + `rename` 原子替换。
 
 ### 3.3 进程检测
 
@@ -232,7 +223,7 @@ pub struct ApplyReport {
 一轮流程：
 
 1. `bookmarks_catalog()`。
-2. **读方向**：fingerprint 与上次持久化的值不同（或强制）才继续；`bookmarks_sync_plan(selected)`；按 `folder` 分组调用 `capture_captured_urls(dir)` 得到已采集 URL 集合；对未采集项串行 `capture_fetch_page({ dir, url, fallback_title: title, source_title: null })`。
+2. **读方向**：fingerprint 与上次持久化的值不同（或强制）才继续；`bookmarks_sync_plan()` 返回 `SoloMD/` 里用户新增的书签；按 `folder` 分组调用 `capture_captured_urls(dir)` 得到已采集 URL 集合；对未采集项串行 `capture_fetch_page({ dir, url, fallback_title: title, source_title: null })`。
 3. **写方向**：从 `workspaceIndex.entries` 构造 `BookmarkWriteEntry[]`；`bookmarks_apply(entries)`。
 4. 保存 fingerprint（读方向真的完成时）和 `lastRunAt`。
 5. 更新状态；失败的采集不中断后续条目。
@@ -247,24 +238,24 @@ pub struct ApplyReport {
 
 1. 总开关（默认关）。
 2. 读取来源：检测到的浏览器 × Profile 数量与名称。
-3. 目录树多选（带 URL 计数），来自 `bookmarks_catalog().tree`。
-4. 写入说明：写入全部检测到的 Profile 的 `SoloMD/`；浏览器运行中会排队。
-5. 同步间隔：15 / 30 / 60 分钟（默认 30）。
-6. 「立即同步」按钮 + 进度 + 上次结果。
-7. 明确文案：
-   - 笔记落在工作区根，目录与书签一致。
+3. 写入说明：写入全部检测到的 Profile 的 `SoloMD/`；浏览器运行中会排队。
+4. 同步间隔：15 / 30 / 60 分钟（默认 30）。
+5. 「立即同步」按钮 + 进度 + 上次结果。
+6. 明确文案：
+   - 把书签放进浏览器的 `SoloMD/` 即会采成笔记；子目录镜像到工作区根。
    - 已有笔记不会被覆盖。
-   - `SoloMD/` 由应用完全管理，手动增删会在下一轮被纠正。
-   - 从用户自己的书签目录删除书签不会删笔记。
+   - `SoloMD/` 之外的书签不读也不改。
+   - 应用镜像的书签有标记，不会被再次采成笔记；用户手动加进 `SoloMD/` 的书签会保留到被采集为止。
 
 设置字段（localStorage，随 settings store 持久化）：
 
 ```ts
 bookmarkSyncEnabled: boolean;            // default false
-bookmarkSyncFolders: string[][];         // default []
 bookmarkSyncIntervalMinutes: number;     // default 30
 bookmarkSyncFingerprint: string;         // default ''
 ```
+
+> 旧版本保存的 `bookmarkSyncFolders` 在 `load()` 时丢弃。
 
 ## 6. 错误处理与边界
 

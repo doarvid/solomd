@@ -2,20 +2,17 @@
 /**
  * Settings → Integrations → browser bookmark sync.
  *
- * The tree comes from the merged Chromium profiles; checking a folder mirrors
- * it (and all descendants) under the workspace root. The write direction is
- * described here but has no per-folder config: notes always project into the
- * managed `SoloMD/` bookmark subtree.
+ * There is no folder picker anymore: the browser's managed `SoloMD/` folder is
+ * the only surface. Bookmarks the user drops there are captured into notes
+ * (mirroring its subfolders under the workspace root), and every note link is
+ * written back into the same folder.
  */
 import { computed, onMounted, ref } from 'vue';
 
 import { useI18n } from '../i18n';
 import { isMobile } from '../lib/platform';
 import { useSettingsStore } from '../stores/settings';
-import {
-  useBookmarkSyncStore,
-  type BookmarkFolderNode,
-} from '../stores/bookmarkSync';
+import { useBookmarkSyncStore } from '../stores/bookmarkSync';
 import { useWorkspaceStore } from '../stores/workspace';
 
 const { t } = useI18n();
@@ -25,24 +22,6 @@ const sync = useBookmarkSyncStore();
 
 const scanning = ref(false);
 
-interface Row {
-  node: BookmarkFolderNode;
-  depth: number;
-}
-
-const rows = computed<Row[]>(() => {
-  const out: Row[] = [];
-  const walk = (nodes: BookmarkFolderNode[], depth: number) => {
-    for (const node of nodes) {
-      out.push({ node, depth });
-      walk(node.folders, depth + 1);
-    }
-  };
-  if (sync.catalog) walk(sync.catalog.tree, 0);
-  return out;
-});
-
-const selectedKeys = computed(() => new Set(settings.bookmarkSyncFolders.map(keyOf)));
 const sourceNames = computed(() => {
   const catalog = sync.catalog;
   if (!catalog) return [];
@@ -52,25 +31,6 @@ const sourceNames = computed(() => {
 const canSync = computed(
   () => settings.bookmarkSyncEnabled && !!workspace.currentFolder && !isMobile(),
 );
-
-function keyOf(path: string[]): string {
-  return JSON.stringify(path);
-}
-
-function isChecked(path: string[]): boolean {
-  return selectedKeys.value.has(keyOf(path));
-}
-
-function toggleFolder(path: string[]) {
-  const key = keyOf(path);
-  const next = settings.bookmarkSyncFolders.filter((p) => keyOf(p) !== key);
-  if (next.length === settings.bookmarkSyncFolders.length) next.push(path);
-  settings.bookmarkSyncFolders = next;
-  settings.persist();
-  // Folders changed → the next read pass must not be skipped by fingerprint.
-  settings.bookmarkSyncFingerprint = '';
-  settings.persist();
-}
 
 function toggleEnabled() {
   settings.bookmarkSyncEnabled = !settings.bookmarkSyncEnabled;
@@ -164,27 +124,7 @@ const writeSummary = computed(() => {
       <p v-else class="bsync__hint bsync__hint--mono">
         {{ sourceNames.join('  ·  ') }}
       </p>
-
-      <div class="bsync__tree">
-        <p class="bsync__hint">{{ t('settings.bookmarkSync.treeHint') }}</p>
-        <label
-          v-for="row in rows"
-          :key="keyOf(row.node.path)"
-          class="bsync__tree-row"
-          :style="{ paddingLeft: `${row.depth * 16}px` }"
-        >
-          <input
-            type="checkbox"
-            :checked="isChecked(row.node.path)"
-            @change="toggleFolder(row.node.path)"
-          />
-          <span class="bsync__tree-name">{{ row.node.name }}</span>
-          <span class="bsync__muted">{{ row.node.url_count }}</span>
-        </label>
-        <p v-if="rows.length === 0" class="bsync__hint">
-          {{ t('settings.bookmarkSync.noSources') }}
-        </p>
-      </div>
+      <p class="bsync__hint">{{ t('settings.bookmarkSync.treeHint') }}</p>
 
       <label class="bsync__row">
         {{ t('settings.bookmarkSync.interval') }}
@@ -270,30 +210,6 @@ const writeSummary = computed(() => {
 .bsync__muted {
   font-size: 11px;
   color: var(--text-muted);
-}
-.bsync__tree {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 240px;
-  overflow: auto;
-  padding: 6px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-}
-.bsync__tree-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  line-height: 1.6;
-  cursor: pointer;
-}
-.bsync__tree-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .bsync__select {
   padding: 3px 6px;

@@ -389,13 +389,13 @@ export const zh: I18n = {
       heading: '浏览器书签',
       enable: '书签与笔记双向同步',
       enableHint:
-        '读取 Chromium 系浏览器（Chrome、Edge、Brave、Arc、Vivaldi、Chromium）的书签，把新增书签的页面采集进工作区；同时把笔记里的所有外链写回浏览器的 SoloMD 目录。',
+        '读取 Chromium 系浏览器（Chrome、Edge、Brave、Arc、Vivaldi、Chromium）的书签。把书签放进浏览器的 SoloMD 目录，它就会变成笔记；笔记里的所有外链也会写回这个目录。',
       sources: '检测到的来源',
       sourceCount: '（{count} 个）',
       scanning: '扫描中…',
       rescan: '重新扫描',
       noSources: '这台机器上没有找到 Chromium 书签文件。',
-      treeHint: '选择要采集的书签目录。子目录会按相同结构镜像到工作区根目录。',
+      treeHint: '把书签放进浏览器的 SoloMD 目录，它就会变成笔记。子目录会按相同结构镜像到工作区根目录。',
       interval: '检查间隔',
       minutes: '{count} 分钟',
       syncNow: '立即同步',
@@ -409,11 +409,11 @@ export const zh: I18n = {
       writeWritten: '已写入 {count} 个浏览器 Profile',
       writeWaiting: '{count} 个浏览器正在运行 —— 退出后重试',
       mirrorHint:
-        '采集的笔记落在工作区根目录，目录结构与书签一致。已有笔记永远不会被覆盖。',
+        '采集的笔记落在工作区根目录，目录结构与 SoloMD 里的子目录一致。已有笔记永远不会被覆盖。',
       noteSafety:
-        '从你自己的书签目录删除书签不会删除对应笔记。SoloMD 目录始终与笔记保持对齐。',
+        'SoloMD 之外的书签不会被读取，也不会被修改；在那里删除书签不影响笔记。',
       managedWarning:
-        'SoloMD 书签目录由应用完全管理 —— 手动增删的内容会在下一轮同步时被纠正。',
+        'SoloMD 目录由应用管理：笔记外链会自动维护，你手动添加进去的书签会保留到对应页面变成笔记为止。',
       noWorkspace: '先打开一个工作区文件夹再同步。',
     },
     codeBlockWrap: '代码块内自动换行',
