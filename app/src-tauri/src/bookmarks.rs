@@ -303,10 +303,27 @@ fn plan_from_docs(docs: &[Value]) -> Vec<BookmarkPlanEntry> {
     let mut seen: HashSet<String> = HashSet::new();
     for doc in docs {
         if let Some(root) = find_managed_root(doc) {
+            // Mirrors written before `solomd_mirror` existed carry no markers.
+            // Treat such a legacy subtree as app-authored: capturing 3000+
+            // old mirror nodes as if the user had just added them was the
+            // "120/3168" crawl. The next write pass stamps markers.
+            if !has_mirror(root) {
+                continue;
+            }
             collect_user_plan(root, &mut Vec::new(), &mut out, &mut seen);
         }
     }
     out
+}
+
+fn has_mirror(node: &Value) -> bool {
+    if is_mirror(node) {
+        return true;
+    }
+    node.get("children")
+        .and_then(|c| c.as_array())
+        .map(|children| children.iter().any(has_mirror))
+        .unwrap_or(false)
 }
 
 fn find_managed_root(doc: &Value) -> Option<&Value> {
@@ -521,6 +538,11 @@ fn insert_desired(
 /// from notes win, so once the page becomes a note the user node disappears
 /// naturally.
 fn merge_user_nodes(desired: &mut DesiredFolder, managed: &Value) {
+    // A subtree with no marker at all predates the mirror marker: its nodes
+    // are the old mirror, not user picks. Rewrite it from notes only.
+    if !has_mirror(managed) {
+        return;
+    }
     let mut seen = collect_desired_urls(desired);
     merge_user_nodes_into(desired, managed, &mut Vec::new(), &mut seen);
     sort_desired(desired);
@@ -987,6 +1009,25 @@ mod tests {
     }
 
     #[test]
+    fn plan_ignores_legacy_managed_subtree_without_markers() {
+        let mut doc = fixture();
+        doc["roots"]["bookmark_bar"]["children"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "folder",
+                "name": "SoloMD",
+                "meta_info": { "solomd_managed": "1" },
+                "children": [
+                    { "type": "url", "name": "Old mirror 1", "url": "https://a.example/", "id": "9" },
+                    { "type": "url", "name": "Old mirror 2", "url": "https://b.example/", "id": "10" }
+                ]
+            }));
+        // No `solomd_mirror` anywhere → written by an older build, not user input.
+        assert!(plan_from_docs(&[doc]).is_empty());
+    }
+
+    #[test]
     fn desired_tree_dedupes_and_sorts() {
         let entries = vec![
             BookmarkWriteEntry {
@@ -1187,6 +1228,50 @@ mod tests {
             .expect("note link mirrored");
         assert!(mirrored.1);
         assert!(!urls.iter().any(|(u, _)| u == "https://note.example/"));
+    }
+
+    #[test]
+    fn apply_rewrites_legacy_unmarked_subtree_with_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = fixture();
+        doc["roots"]["bookmark_bar"]["children"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "folder",
+                "name": "SoloMD",
+                "id": "20",
+                "meta_info": { "solomd_managed": "1" },
+                "children": [
+                    { "type": "url", "name": "Stale mirror", "url": "https://stale.example/", "id": "21" }
+                ]
+            }));
+        let path = dir.path().join("Bookmarks");
+        fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+        let desired = desired_for(&[(&["Notes"], "Fresh", "https://fresh.example/")]);
+        apply_to_file(&path, &desired).unwrap();
+
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let managed = after["roots"]["bookmark_bar"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["meta_info"]["solomd_managed"] == "1")
+            .unwrap();
+        let urls = collect_urls(managed);
+        assert!(urls.contains("https://fresh.example"));
+        assert!(
+            !urls.contains("https://stale.example"),
+            "legacy unmarked nodes must not be preserved as user picks"
+        );
+        let fresh = managed["children"][0]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["url"] == "https://fresh.example/")
+            .unwrap();
+        assert_eq!(fresh["meta_info"]["solomd_mirror"], "1");
     }
 
     #[test]

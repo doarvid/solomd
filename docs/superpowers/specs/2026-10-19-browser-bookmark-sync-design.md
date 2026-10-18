@@ -100,6 +100,7 @@ pub captured_url: Option<String>,
 - 只读取每个 Profile 里带 `meta_info.solomd_managed == "1"` 的托管根及其子树。
 - 托管子树中带 `meta_info.solomd_mirror == "1"` 的 URL 节点是应用从笔记镜像过来的，**跳过**，避免把每条笔记外链都再采成一篇笔记。
 - 其余 URL 节点都是用户放进 `SoloMD/` 的书签，进入采集计划。
+- **旧版本兼容**：如果整个托管子树里一个 `solomd_mirror` 标记都没有，说明它是旧版本写入的镜像；整棵跳过，不采集。下一次写入会补上标记。
 - 普通书签目录一律不读。
 
 ### 2.3 命令

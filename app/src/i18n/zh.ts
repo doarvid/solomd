@@ -400,7 +400,7 @@ export const zh: I18n = {
       minutes: '{count} 分钟',
       syncNow: '立即同步',
       syncing: '同步中…',
-      syncingRead: '正在读取书签…',
+      syncingRead: '正在采集书签页面…',
       syncingWrite: '正在写入书签…',
       lastRun: '上次同步：',
       never: '尚未同步',

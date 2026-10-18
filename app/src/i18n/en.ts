@@ -404,7 +404,7 @@ export const en = {
       minutes: '{count} min',
       syncNow: 'Sync now',
       syncing: 'Syncing…',
-      syncingRead: 'Reading bookmarks…',
+      syncingRead: 'Capturing bookmark pages…',
       syncingWrite: 'Writing bookmarks…',
       lastRun: 'Last sync:',
       never: 'Not synced yet',
