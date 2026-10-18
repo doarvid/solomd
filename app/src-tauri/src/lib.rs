@@ -118,6 +118,8 @@ pub mod capture_store;
 pub mod page_assets;
 // GitHub 仓库页直接读 README，不做正文抽取。
 pub mod github_readme;
+// 浏览器书签双向同步（仅桌面；移动端返回空）。
+pub mod bookmarks;
 #[cfg(desktop)]
 mod browser;
 #[cfg(mobile)]
@@ -316,6 +318,9 @@ pub fn run() {
             capture_store::capture_fetch_page,
             capture_store::capture_captured_urls,
             capture_store::capture_normalize_url,
+            bookmarks::bookmarks_catalog,
+            bookmarks::bookmarks_sync_plan,
+            bookmarks::bookmarks_apply,
             quick_capture::quick_capture_open,
             quick_capture::quick_capture_close,
             quick_capture::quick_capture_write,
