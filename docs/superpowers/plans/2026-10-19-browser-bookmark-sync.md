@@ -1,5 +1,7 @@
 # 浏览器书签双向同步 Implementation Plan
 
+> **修订（2026-10-19）：** 实现后调整为只同步浏览器 `SoloMD/` 托管目录，移除了设置里的书签目录选择。以 spec 和当前代码为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add bidirectional sync between Chromium bookmarks and SoloMD notes, configured in Settings.
