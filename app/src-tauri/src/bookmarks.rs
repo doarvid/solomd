@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::capture_store::{normalize_url, safe_filename};
+// `super::`, not `crate::` — this file compiles into two roots (lib via
+// lib.rs, bin via runner.rs's #[path]). See webdoc.rs for the same note.
+use super::capture_store::{normalize_url, safe_filename};
 
 const ROOT_KEYS: [&str; 3] = ["bookmark_bar", "other", "synced"];
 const MANAGED_MARKER: &str = "solomd_managed";

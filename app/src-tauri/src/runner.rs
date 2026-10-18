@@ -134,6 +134,9 @@ mod capture_store;
 mod page_assets;
 #[path = "github_readme.rs"]
 mod github_readme;
+// 浏览器书签双向同步（仅桌面；移动端返回空）。
+#[path = "bookmarks.rs"]
+mod bookmarks;
 #[cfg(desktop)]
 #[path = "browser.rs"]
 mod browser;
@@ -1112,6 +1115,10 @@ pub fn run_with(initial_file: Option<String>) {
             capture_store::capture_fetch_page,
             capture_store::capture_captured_urls,
             capture_store::capture_normalize_url,
+            // 书签双向同步。
+            bookmarks::bookmarks_catalog,
+            bookmarks::bookmarks_sync_plan,
+            bookmarks::bookmarks_apply,
         ])
         .on_menu_event(|app_handle, event| {
             let id = event.id().0.clone();
