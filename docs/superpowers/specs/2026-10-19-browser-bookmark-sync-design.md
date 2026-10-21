@@ -107,6 +107,8 @@ pub captured_url: Option<String>,
 
 ### 2.3 命令
 
+三个 `bookmarks_*` 命令都是 `async` + `spawn_blocking`。Tauri 会把同步命令放在主线程执行，解析/写回数 MB 的 `Bookmarks` JSON 会让整个界面卡住。
+
 ```rust
 bookmarks_catalog() -> BookmarkCatalog
 ```

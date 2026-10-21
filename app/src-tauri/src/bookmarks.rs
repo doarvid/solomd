@@ -112,8 +112,17 @@ struct DesiredFolder {
 // Catalog
 // ---------------------------------------------------------------------------
 
+/// Sync commands run on a blocking pool. Tauri executes non-`async` commands
+/// on the main thread, and parsing/writing a multi-MB `Bookmarks` JSON there
+/// froze the whole UI for the duration of the sync.
 #[tauri::command]
-pub fn bookmarks_catalog() -> Result<BookmarkCatalog, String> {
+pub async fn bookmarks_catalog() -> Result<BookmarkCatalog, String> {
+    tauri::async_runtime::spawn_blocking(catalog_inner)
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
+fn catalog_inner() -> Result<BookmarkCatalog, String> {
     let sources = discover_sources();
     Ok(BookmarkCatalog {
         fingerprint: fingerprint(&sources),
@@ -133,9 +142,13 @@ pub fn bookmarks_catalog() -> Result<BookmarkCatalog, String> {
 /// Bookmarks the user placed in the managed `SoloMD/` folder that were not
 /// written by us. Everything else in the browser is ignored.
 #[tauri::command]
-pub fn bookmarks_sync_plan() -> Result<Vec<BookmarkPlanEntry>, String> {
-    let docs = read_all_documents();
-    Ok(plan_from_docs(&docs))
+pub async fn bookmarks_sync_plan() -> Result<Vec<BookmarkPlanEntry>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let docs = read_all_documents();
+        Ok(plan_from_docs(&docs))
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
 }
 
 fn read_all_documents() -> Vec<Value> {
@@ -418,7 +431,13 @@ fn host_of(url: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn bookmarks_apply(entries: Vec<BookmarkWriteEntry>) -> Result<ApplyReport, String> {
+pub async fn bookmarks_apply(entries: Vec<BookmarkWriteEntry>) -> Result<ApplyReport, String> {
+    tauri::async_runtime::spawn_blocking(move || apply_inner(entries))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
+fn apply_inner(entries: Vec<BookmarkWriteEntry>) -> Result<ApplyReport, String> {
     let desired_root = build_desired(&entries);
     let sources = discover_sources();
     let mut report = ApplyReport {
