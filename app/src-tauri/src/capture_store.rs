@@ -493,7 +493,11 @@ pub async fn capture_fetch_page(
     let path = write_reference_with_assets(
         &dir,
         &title,
-        &final_url,
+        // Point the note at the URL the user asked for (the bookmark / link),
+        // not the post-redirect URL. Dedupe compares against the requested
+        // URL; using `final_url` here made every http→https / domain redirect
+        // look uncaptured and produced `-2`, `-3` duplicates.
+        &url,
         &captured,
         &via,
         &meta,

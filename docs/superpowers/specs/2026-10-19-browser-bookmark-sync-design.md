@@ -62,11 +62,13 @@ pub struct LinkRef {
 }
 
 #[serde(default)]
-pub links: Vec<LinkRef>,
+pub links: Vec<LinkRef>,   // 每条链接带 normalized_url
 /// 采集笔记 frontmatter 里 `url:` 的归一化值。
 #[serde(default)]
 pub captured_url: Option<String>,
 ```
+
+读取书签前，前端用索引一次性构建两个集合：已采集的 `captured_url`，以及**所有笔记正文链接的 `normalized_url`**。后者用于识别旧版本写进 `SoloMD/`、却没有镜像标记的应用生成节点——它们的 URL 必然已经是某篇笔记的链接，不能再次采集。
 
 抽取规则（在 `scan_file` 的正文处理里完成）：
 
@@ -227,7 +229,8 @@ pub struct ApplyReport {
 一轮流程：
 
 1. `bookmarks_catalog()`。
-2. **读方向**：fingerprint 与上次持久化的值不同（或强制）才继续；`bookmarks_sync_plan()` 返回 `SoloMD/` 里用户新增的书签；**从 `workspaceIndex.entries` 一次性取出所有 `captured_url` 组成全局集合**（不再逐目录调用 `capture_captured_urls` 扫文件）；对未采集项串行 `capture_fetch_page({ dir, url, fallback_title: title, source_title: null })`。索引未就绪时整轮跳过，60 秒后重试。
+2. **读方向**：fingerprint 与上次持久化的值不同（或强制）才继续；`bookmarks_sync_plan()` 返回 `SoloMD/` 里的未标记节点；从 `workspaceIndex.entries` 一次性构建 `captured_url` 和「所有笔记链接的 `normalized_url`」两个集合，跳过二者命中的条目（后者过滤旧版本无标记的应用镜像）；再按「镜像目录 + 标题」兜底跳过重定向前采集的旧笔记；剩余条目用 4 路并发 `capture_fetch_page`。采完刷新索引再进入写方向。索引未就绪时整轮跳过，60 秒后重试。
+   - 采集写出的 frontmatter `url:` 使用**用户请求的 URL**（书签 URL），不是重定向后的最终 URL，保证下一轮能按 URL 去重。
 3. **写方向**：从 `workspaceIndex.entries` 构造 `BookmarkWriteEntry[]`；`bookmarks_apply(entries)`。
 4. 保存 fingerprint（读方向真的完成时）和 `lastRunAt`。
 5. 更新状态；失败的采集不中断后续条目。

@@ -26,6 +26,8 @@ export interface WikilinkRef {
 /** One external `http(s)` link found in a note body (bookmark sync). */
 export interface LinkRef {
   url: string;
+  /** `capture_normalize_url(url)`; absent on older index caches. */
+  normalized_url?: string;
   /** Link text; empty for autolinks and bare URLs. */
   text: string;
   /** 1-based line number, body-relative. */

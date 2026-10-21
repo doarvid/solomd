@@ -95,6 +95,10 @@ pub struct IndexEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkRef {
     pub url: String,
+    /// `normalize_url(url)` — lets bookmark sync answer "is this note link
+    /// already a mirrored bookmark?" without any extra IPC.
+    #[serde(default)]
+    pub normalized_url: String,
     /// Link text; empty for autolinks and bare URLs.
     pub text: String,
     /// 1-based line number, body-relative like `WikilinkRef::line`.
@@ -610,8 +614,10 @@ fn extract_links(body: &str) -> Vec<LinkRef> {
                 continue;
             }
             if seen.insert(url.as_str().to_string()) {
+                let raw = url.as_str().to_string();
                 out.push(LinkRef {
-                    url: url.as_str().to_string(),
+                    normalized_url: super::capture_store::normalize_url(&raw),
+                    url: raw,
                     text: cap[1].to_string(),
                     line: line_no,
                 });
@@ -631,6 +637,7 @@ fn extract_links(body: &str) -> Vec<LinkRef> {
             }
             if seen.insert(raw.to_string()) {
                 out.push(LinkRef {
+                    normalized_url: super::capture_store::normalize_url(raw),
                     url: raw.to_string(),
                     text: String::new(),
                     line: line_no,
@@ -1559,6 +1566,7 @@ mod task_scan_tests {
         let links = extract_links(body);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://x.com");
+        assert_eq!(links[0].normalized_url, "https://x.com");
         assert_eq!(links[0].text, "b");
         assert_eq!(links[0].line, 2);
     }

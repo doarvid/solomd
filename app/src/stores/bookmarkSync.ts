@@ -228,10 +228,34 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
       // capture pipeline.
       const index = useWorkspaceIndexStore();
       const captured = new Set<string>();
+      // Every URL already linked from a note. Old builds mirrored note links
+      // into SoloMD without the mirror marker, so a big part of the unmarked
+      // backlog is actually our own output; capturing it again would crawl
+      // thousands of links.
+      const noteLinked = new Set<string>();
+      // Notes captured through a redirect before this fix stored the final
+      // URL, so `captured_url` no longer matches the bookmark. Fall back to
+      // "same mirrored folder + same (sanitized) title" to avoid re-capturing
+      // them as `-2`, `-3` duplicates.
+      const capturedByPathTitle = new Set<string>();
       for (const note of index.entries) {
-        if (note.captured_url) captured.add(note.captured_url);
+        for (const link of note.links ?? []) {
+          if (link.normalized_url) noteLinked.add(link.normalized_url);
+        }
+        if (!note.captured_url) continue;
+        captured.add(note.captured_url);
+        const rel = relativePath(root, note.path);
+        if (rel === null) continue;
+        const dir = rel.split('/').slice(0, -1).join('/');
+        const stem = note.stem.replace(/-\d+$/, '').toLowerCase();
+        capturedByPathTitle.add(`${dir}\u0000${stem}`);
       }
-      const todo = plan.filter((e) => !captured.has(e.normalized_url));
+      const todo = plan.filter((e) => {
+        if (captured.has(e.normalized_url)) return false;
+        if (noteLinked.has(e.normalized_url)) return false;
+        const key = `${e.folder.join('/')}\u0000${safeStem(e.title).toLowerCase()}`;
+        return !capturedByPathTitle.has(key);
+      });
       this.skipped = plan.length - todo.length;
       this.total = todo.length;
 
@@ -304,9 +328,14 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
           const label = text.trim() || hostOf(url);
           entries.push({ folder, title: `${note.stem} · ${label}`, url });
         };
-        for (const link of note.links ?? []) add(link.url, link.text);
-        const fm = note.frontmatter as Record<string, unknown> | null;
-        if (fm && typeof fm.url === 'string') add(fm.url, '');
+        // Captured pages (awesome lists, directories) can contain thousands of
+        // outbound links. Mirror only the page itself; mirroring its body
+        // links exploded SoloMD from 5k to 22k bookmarks.
+        if (note.captured_url) {
+          add(note.captured_url, '');
+        } else {
+          for (const link of note.links ?? []) add(link.url, link.text);
+        }
       }
 
       try {
@@ -328,6 +357,17 @@ function hostOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** Rough mirror of `capture_store::safe_filename` for dedupe comparisons. */
+function safeStem(title: string): string {
+  let s = title
+    .replace(/[\x00-\x1f]/g, ' ')
+    .replace(/[<>:"/\\|?*]/g, '-');
+  s = s.split(/\s+/).filter(Boolean).join(' ');
+  s = s.replace(/^[.\-\s]+|[.\-\s]+$/g, '');
+  if (s.length > 120) s = s.slice(0, 120).trimEnd();
+  return s || 'untitled';
 }
 
 function joinDir(root: string, segments: string[]): string {
