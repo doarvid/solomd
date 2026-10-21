@@ -8,6 +8,8 @@
  * engine WebView2 uses — to count pages (#337).
  */
 
+import { buildExportCustomCss, getActiveCustomCss } from './custom-theme';
+
 export type PrintTheme = 'light' | 'dark' | 'follow';
 
 export interface MountedPrintOverlay {
@@ -22,6 +24,7 @@ export function mountPrintOverlay(
   bodyHtml: string,
   printTheme: PrintTheme,
   styleCss: string,
+  customCss?: string,
 ): MountedPrintOverlay {
   let overlay = document.getElementById('solomd-print-overlay') as HTMLDivElement | null;
   if (!overlay) {
@@ -51,11 +54,17 @@ export function mountPrintOverlay(
   // rules in main.css release them while this class is on <html>.
   document.documentElement.classList.add('solomd-printing');
 
+  const activeCustomCss = buildExportCustomCss(
+    customCss !== undefined ? customCss : getActiveCustomCss(),
+    '#solomd-print-overlay, .solomd-print-content',
+  );
+  const combinedCss = [styleCss, activeCustomCss].filter(Boolean).join('\n');
+
   let styleEl: HTMLStyleElement | null = null;
-  if (styleCss) {
+  if (combinedCss) {
     styleEl = document.createElement('style');
     styleEl.id = 'solomd-print-style';
-    styleEl.textContent = styleCss;
+    styleEl.textContent = combinedCss;
     document.head.appendChild(styleEl);
   }
 

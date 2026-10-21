@@ -11,7 +11,8 @@
 //!      ends up with the original plaintext content
 
 use app_lib::crypto::{
-    crypto_encrypt_for_push_inner as crypto_encrypt_for_push, crypto_set_passphrase,
+    crypto_encrypt_for_push_inner as crypto_encrypt_for_push,
+    crypto_set_passphrase_blocking as crypto_set_passphrase,
 };
 use app_lib::github_sync::{github_pull_inner, github_push_inner};
 use git2::{Repository, Signature};

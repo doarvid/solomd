@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch, watchEffect, computed, provide, nextTick } from 'vue';
+import { onMounted, onBeforeUnmount, ref, watch, watchEffect, computed, provide, nextTick, defineAsyncComponent } from 'vue';
+import { useLazyComponent } from './composables/useLazyComponent';
+import { macTitleBar, winTitleBar } from './lib/chrome';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -10,26 +12,24 @@ import { recordDay, shouldPrompt, type StarPromptState } from './lib/star-prompt
 import { readText as readClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { setMarkdownHardBreaks, setMarkdownAutoNumberHeadings, setMarkdownSmartQuotes } from './lib/markdown';
 import { openNewWindow } from './lib/new-window';
+import { ensureSpellDict } from './lib/spell-suggest';
 import Toolbar from './components/Toolbar.vue';
 import TelemetryBanner from './components/TelemetryBanner.vue';
 import TileRoot from './components/TileRoot.vue';
-import StatusBar from './components/StatusBar.vue';
-import CommandPalette from './components/CommandPalette.vue';
-import QuickSwitcher from './components/QuickSwitcher.vue';
+import StatsPill from './components/StatsPill.vue';
 import Outline from './components/Outline.vue';
 import BacklinksPanel from './components/BacklinksPanel.vue';
-import AndroidFolderPicker from './components/AndroidFolderPicker.vue';
-import NeighborhoodPanel from './components/NeighborhoodPanel.vue';
-import RelationshipsPanel from './components/RelationshipsPanel.vue';
-import TagsPanel from './components/TagsPanel.vue';
-import TasksPanel from './components/TasksPanel.vue';
-import TableEditor from './components/TableEditor.vue';
-import FormulaEditor from './components/FormulaEditor.vue';
-import TypesPanel from './components/TypesPanel.vue';
-import HistoryPanel from './components/HistoryPanel.vue';
-import PropertiesInspector from './components/PropertiesInspector.vue';
-import AgentPanel from './components/AgentPanel.vue';
-import RelatedLinksPanel from './components/RelatedLinksPanel.vue';
+const NeighborhoodPanel = defineAsyncComponent(() => import('./components/NeighborhoodPanel.vue'));
+const RelationshipsPanel = defineAsyncComponent(() => import('./components/RelationshipsPanel.vue'));
+const TagsPanel = defineAsyncComponent(() => import('./components/TagsPanel.vue'));
+const TasksPanel = defineAsyncComponent(() => import('./components/TasksPanel.vue'));
+const TableEditor = defineAsyncComponent(() => import('./components/TableEditor.vue'));
+const FormulaEditor = defineAsyncComponent(() => import('./components/FormulaEditor.vue'));
+const TypesPanel = defineAsyncComponent(() => import('./components/TypesPanel.vue'));
+const HistoryPanel = defineAsyncComponent(() => import('./components/HistoryPanel.vue'));
+const PropertiesInspector = defineAsyncComponent(() => import('./components/PropertiesInspector.vue'));
+const AgentPanel = defineAsyncComponent(() => import('./components/AgentPanel.vue'));
+const RelatedLinksPanel = defineAsyncComponent(() => import('./components/RelatedLinksPanel.vue'));
 import RsSplitter from './components/RsSplitter.vue';
 import { useAutoCommit } from './composables/useAutoCommit';
 import { useGithubSync } from './composables/useGithubSync';
@@ -37,44 +37,45 @@ import { useSessionRestore } from './composables/useSessionRestore';
 import SessionRestoreDialog from './components/SessionRestoreDialog.vue';
 import WhiteboardOverlay from './components/WhiteboardOverlay.vue';
 import AIRewriteOverlay from './components/AIRewriteOverlay.vue';
-import BasesView from './components/BasesView.vue';
+const BasesView = defineAsyncComponent(() => import('./components/BasesView.vue'));
 import { BASES_OPEN_EVENT, BASES_CLOSE_EVENT } from './composables/useBasesView';
-import InboxView from './components/InboxView.vue';
+const InboxView = defineAsyncComponent(() => import('./components/InboxView.vue'));
 import { INBOX_OPEN_EVENT, INBOX_CLOSE_EVENT } from './composables/useInboxView';
 // v4.6.1 F2 — Type lens (center-pane filtered view of one type's members).
-import TypeLensView from './components/TypeLensView.vue';
+const TypeLensView = defineAsyncComponent(() => import('./components/TypeLensView.vue'));
 import { TYPE_LENS_OPEN_EVENT, TYPE_LENS_CLOSE_EVENT } from './composables/useTypeLens';
-import FileTree from './components/FileTree.vue';
+import Sidebar from './components/Sidebar.vue';
+import PhoneTabBar from './components/PhoneTabBar.vue';
+import { usePhoneStore } from './stores/phone';
 // v4.6 F5 — Saved filtered views (sidebar panel + filtered list + editor).
-import ViewsPanel from './components/ViewsPanel.vue';
 import ViewNoteList from './components/ViewNoteList.vue';
 import ViewEditorDialog from './components/ViewEditorDialog.vue';
 import { VIEW_OPEN_EVENT, VIEW_CLOSE_EVENT } from './composables/useSavedViews';
-import SettingsPanel from './components/SettingsPanel.vue';
-import MarkdownHelp from './components/MarkdownHelp.vue';
 import GlobalSearch from './components/GlobalSearch.vue';
-import RagSearch from './components/RagSearch.vue';
-import CjkProofread from './components/CjkProofread.vue';
 import ReadingView from './components/ReadingView.vue';
-import AboutDialog from './components/AboutDialog.vue';
-import AgentSetupWizard from './components/AgentSetupWizard.vue';
 import UnsavedDialog from './components/UnsavedDialog.vue';
 import FileChangedDialog from './components/FileChangedDialog.vue';
-import ImageUrlDialog from './components/ImageUrlDialog.vue';
 import Toast from './components/Toast.vue';
+import KeyboardBar from './components/KeyboardBar.vue';
+import { forceKeyboardBarPreview } from './lib/platform';
 import { useTabsStore } from './stores/tabs';
 import { useSettingsStore, buildEditorFontStack, setRightSidebarShell } from './stores/settings';
 import { useWindowsStore, isAuxLabel } from './stores/windows';
 import { useTilesStore } from './stores/tiles';
 import { usePomodoroStore } from './stores/pomodoro';
 import { useFiles } from './composables/useFiles';
-import { useExport } from './composables/useExport';
 import { useShortcuts } from './composables/useShortcuts';
 import { useFileWatcher } from './composables/useFileWatcher';
 import { loadCustomTheme } from './lib/custom-theme';
-import { isIOS, isMacOS, isAndroid, isMobile } from './lib/platform';
-import { useViewport } from './composables/useViewport';
-import { nativeMenuAccelerators } from './lib/keybindings';
+import { ensureCustomFontLoaded } from './lib/custom-font';
+import { isIOS, isMacOS, isAndroid, isMobile, isWindowsDesktop } from './lib/platform';
+import { useViewport, useTabletOverlay } from './composables/useViewport';
+import { toNativeSpec } from './lib/app-menu';
+import { themeFamily } from './lib/themes';
+import type { Theme, ViewMode } from './types';
+import { useAppMenu } from './composables/useAppMenu';
+import { useUpdateCheck } from './composables/useUpdateCheck';
+import { useCommands } from './composables/useCommands';
 import { useI18n } from './i18n';
 import { quickCaptureError } from './lib/quick-capture-status';
 import { tableEditor, closeTableEditor } from './lib/table-editor-bus';
@@ -92,7 +93,10 @@ import { isBrowserTab } from './lib/tab-kind';
 import { overlayDepth, useOverlayPresence, useOverlayPresenceOf } from './lib/overlay-presence';
 import { setBrowserPageZoom } from './lib/browser-rect';
 import { IS_APP_STORE_BUILD } from './lib/app-build';
-import UiPreview from './components/UiPreview.vue';
+import { runWhenIdle } from './lib/idle';
+import { MERMAID_INSERT_SNIPPET } from './lib/insert-snippet';
+import { focusActiveEditorSoon } from './lib/editor-focus';
+const UiPreview = defineAsyncComponent(() => import('./components/UiPreview.vue'));
 
 /* v4.6 dev-only UI gallery. `?uikit` renders ONLY the design-system preview
  * and skips the normal app, so the token layer can be eyeballed in isolation.
@@ -126,7 +130,6 @@ if (!settings.outlineDefaultOnMigrated) {
 const windowsStore = useWindowsStore();
 const tiles = useTilesStore();
 const files = useFiles();
-const exporter = useExport();
 const workspace = useWorkspaceStore();
 
 // #148 / #151 — Android real-folder vault picking. useFiles.openFolder()
@@ -161,9 +164,7 @@ async function requestAndroidStorage() {
     // running process — see android_restart_app).
     localStorage.setItem('solomd:android-storage-pending', '1');
     await invoke('android_request_all_files_access');
-    toasts.info(
-      '打开「允许管理所有文件 / All files access」后返回,App 会自动重启以让权限生效。',
-    );
+    toasts.info(t('toast.androidAllFilesReturn'));
   } catch (e) {
     toasts.error(String(e));
   }
@@ -244,6 +245,13 @@ function onImageUrlConfirm(url: string, alt: string) {
 // SettingsPanel watches it and switches activeCategory accordingly.
 const settingsInitialSection = ref<string | null>(null);
 function openSettingsAt(section: string | null = null) {
+  // Every "AI isn't set up yet" path (toolbar AI, rewrite overlay, agent
+  // panel) lands here with `integrations`. Until the wizard has been seen,
+  // that first reach for AI gets the guided setup instead of a settings page.
+  if (section === 'integrations' && !IS_APP_STORE_BUILD && !settings.agentWizardSeen) {
+    wizardOpen.value = true;
+    return;
+  }
   settingsInitialSection.value = section;
   settingsOpen.value = true;
 }
@@ -386,6 +394,31 @@ const cjkProofreadOpen = ref(false);
 const aboutOpen = ref(false);
 const wizardOpen = ref(false);
 
+// Startup trim: these dialogs are closed at launch, so they're loaded (module,
+// setup, CSS) the first time they're opened instead of on the mount path, and
+// stay mounted afterwards. `xxxLazy.open` lags the real flag by one tick on
+// the first open — see useLazyComponent.
+const { component: CommandPaletteC, open: paletteLazyOpen } = useLazyComponent(
+  () => import('./components/CommandPalette.vue'), () => paletteOpen.value);
+const { component: QuickSwitcherC, open: quickSwitcherLazyOpen } = useLazyComponent(
+  () => import('./components/QuickSwitcher.vue'), () => quickSwitcherOpen.value);
+const { component: SettingsPanelC, open: settingsLazyOpen } = useLazyComponent(
+  () => import('./components/SettingsPanel.vue'), () => settingsOpen.value);
+const { component: MarkdownHelpC, open: helpLazyOpen } = useLazyComponent(
+  () => import('./components/MarkdownHelp.vue'), () => helpOpen.value);
+const { component: RagSearchC, open: ragSearchLazyOpen } = useLazyComponent(
+  () => import('./components/RagSearch.vue'), () => ragSearchOpen.value);
+const { component: CjkProofreadC, open: cjkProofreadLazyOpen } = useLazyComponent(
+  () => import('./components/CjkProofread.vue'), () => cjkProofreadOpen.value);
+const { component: AboutDialogC, open: aboutLazyOpen } = useLazyComponent(
+  () => import('./components/AboutDialog.vue'), () => aboutOpen.value);
+const { component: AgentSetupWizardC, open: wizardLazyOpen } = useLazyComponent(
+  () => import('./components/AgentSetupWizard.vue'), () => wizardOpen.value);
+const { component: ImageUrlDialogC, open: imageUrlLazyOpen } = useLazyComponent(
+  () => import('./components/ImageUrlDialog.vue'), () => imageUrlDialogOpen.value);
+const { component: AndroidFolderPickerC, open: androidPickerLazyOpen } = useLazyComponent(
+  () => import('./components/AndroidFolderPicker.vue'), () => androidPickerOpen.value);
+
 // Unsaved-changes dialog state
 const unsavedOpen = ref(false);
 const unsavedMode = ref<'tab' | 'window'>('tab');
@@ -407,6 +440,33 @@ function onUnsavedAction(action: 'save' | 'discard' | 'cancel') {
   if (unsavedResolve) {
     unsavedResolve(action);
     unsavedResolve = null;
+  }
+}
+
+/** Push every debounced edit out now: the editors' doc→store sync (350 ms)
+ *  and the session-restore snapshot (500 ms). Without it, a close or quit
+ *  landing inside those windows lost the last thing typed. */
+function flushPendingEdits() {
+  window.dispatchEvent(new Event('solomd:flush-content-sync'));
+}
+
+/** Closing a second editor window: ask about each unsaved tab, the way
+ *  closing a single tab does. False = the user cancelled (or a save failed),
+ *  so the window stays. A second ✕ while the dialog is up is ignored. */
+let closePromptOpen = false;
+async function confirmCloseWithUnsavedTabs(): Promise<boolean> {
+  if (closePromptOpen) return false;
+  closePromptOpen = true;
+  try {
+    for (const tab of tabs.tabs.filter((t) => t.content !== t.savedContent)) {
+      tabs.activate(tab.id);
+      const action = await showUnsavedDialog('window', tab.fileName, 1);
+      if (action === 'cancel') return false;
+      if (action === 'save' && !(await files.saveTab(tab))) return false;
+    }
+    return true;
+  } finally {
+    closePromptOpen = false;
   }
 }
 
@@ -434,7 +494,7 @@ function onFileChangedAction(action: 'reload' | 'overwrite' | 'cancel') {
   }
 }
 
-useShortcuts({
+const shortcuts = useShortcuts({
   openPalette: () => (paletteOpen.value = true),
   openSettings: () => (settingsOpen.value = true),
   openHelp: () => openHelpAt('syntax'),
@@ -487,41 +547,20 @@ function onWheelZoom(e: WheelEvent): void {
 
 // Esc closes the topmost modal
 function onZoomShortcut(e: KeyboardEvent): boolean {
-  // Three independent zoom axes (v4.3.0 issue #72 + PR #74 yzcj105):
-  //   ⌘= / ⌘- / ⌘0           → globalZoom (whole app, CSS zoom)
-  //   ⌘⇧= / ⌘⇧- / ⌘⇧0        → editor font size only
-  //   ⌃⌘= / ⌃⌘- / ⌃⌘0        → preview font size only
-  // On macOS the same shortcuts are also exposed via native View menu
-  // accelerators (runner.rs) — this JS handler covers Linux/Windows and
-  // catches keys before the WebView's built-in browser zoom intercepts them.
-  const cmd = e.metaKey;          // macOS Cmd
-  const ctrlOnly = e.ctrlKey && !e.metaKey; // Linux/Win Ctrl (no Cmd present)
-  if (!cmd && !ctrlOnly) return false;
-  if (e.altKey) return false;
-
-  // Identify axis: Shift = editor; Cmd+Ctrl (both) = preview; otherwise UI.
-  let axis: 'ui' | 'editor' | 'preview' = 'ui';
-  if (e.shiftKey && !(e.metaKey && e.ctrlKey)) axis = 'editor';
-  else if (e.metaKey && e.ctrlKey) axis = 'preview';
-
+  // Three independent zoom axes (v4.3.0 issue #72 + PR #74 yzcj105). The UI
+  // (⌘= / ⌘- / ⌘0) and editor (⌘⇧= / ⌘⇧- / ⌘⇧0) axes are rebindable actions
+  // now (lib/keybindings.ts — the Typora / Word preset hands ⌘= / ⌘- / ⌘0 to
+  // the heading-level commands). Only the preview axis stays here: it is
+  // ⌃⌘ on macOS, which the "Mod" binding grammar cannot express.
+  if (!(e.metaKey && e.ctrlKey) || e.altKey) return false;
   const isIn = e.key === '=' || e.key === '+';
   const isOut = e.key === '-' || e.key === '_';
   const isReset = e.key === '0';
   if (!isIn && !isOut && !isReset) return false;
   e.preventDefault();
-  if (axis === 'editor') {
-    if (isIn) settings.editorFontIn();
-    else if (isOut) settings.editorFontOut();
-    else settings.resetEditorFontSize();
-  } else if (axis === 'preview') {
-    if (isIn) settings.previewFontIn();
-    else if (isOut) settings.previewFontOut();
-    else settings.resetPreviewFontSize();
-  } else {
-    if (isIn) settings.zoomIn();
-    else if (isOut) settings.zoomOut();
-    else settings.resetZoom();
-  }
+  if (isIn) settings.previewFontIn();
+  else if (isOut) settings.previewFontOut();
+  else settings.resetPreviewFontSize();
   return true;
 }
 
@@ -575,6 +614,18 @@ watch(
 watch(
   () => JSON.stringify(tiles.root),
   () => tiles.persist(),
+);
+
+// A split focuses the new pane (tiles.splitPane), but nothing moved the
+// keyboard there, so typing right after Ctrl+\ went nowhere. Follow the
+// pane focus into its editor once that editor has mounted.
+watch(
+  () => tiles.allLeaves.length,
+  (n, prev) => {
+    if (n > prev) {
+      focusActiveEditorSoon(() => tiles.focusedPaneId, { onlyIfIdle: false, strict: true, timeoutMs: 2000 });
+    }
+  },
 );
 
 // Sync tabs.activeId changes to the focused pane's leaf.
@@ -692,7 +743,8 @@ watchEffect(() => {
 watchEffect(() => {
   const f = (settings.codeFontFamily || '').trim();
   if (f) {
-    const quoted = /\s/.test(f) && !/^["']/.test(f) && !f.includes(',') ? `"${f}"` : f;
+    void ensureCustomFontLoaded(f);
+    const quoted = /[\s/.\\]/.test(f) && !/^["']/.test(f) && !f.includes(',') ? `"${f}"` : f;
     document.documentElement.style.setProperty(
       '--font-mono',
       `${quoted}, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace`,
@@ -734,6 +786,9 @@ watchEffect(() => {
 // fallback stack the editor uses — so Preview.vue / ReadingView render in it.
 watchEffect(() => {
   const root = document.documentElement;
+  if (settings.fontFamily.trim()) {
+    void ensureCustomFontLoaded(settings.fontFamily);
+  }
   root.style.setProperty('--content-font-family', buildEditorFontStack(settings.fontFamily));
   // Gitee IK9BBG — reading mode has its own serif stack, so it swallowed the
   // font setting whole. `--content-font-family` can't be used as the override
@@ -746,19 +801,32 @@ watchEffect(() => {
   }
 });
 
-// Sync native menu bar language — and, since #180, the accelerators too:
-// a rebound action must lose its old chord from the native menu, or macOS
-// keeps firing the original and the rebind only ever adds a second key.
+// bug/C1 — the native menu (macOS menubar, Linux window menu) is built from
+// the same tree as the Windows title-bar menubar (lib/app-menu.ts): labels in
+// the UI language, accelerators = the bindings in effect (#180: a rebound
+// action must lose its old chord from the native menu, or macOS keeps firing
+// it and the rebind only ever adds a second key), check marks = live state.
+// Windows has no native menu bar; mobile has none at all.
+const appMenu = useAppMenu();
+const nativeMenuPlatform = '__TAURI_INTERNALS__' in window && !isMobile() && !isWindowsDesktop()
+  ? (isMacOS() ? 'mac' : 'linux')
+  : null;
+// The 面板 › 大纲 check mark is per tab, so switching tabs re-runs this; only
+// rebuild the native menu when the spec actually changed.
+let lastNativeSpec = '';
 watchEffect(() => {
-  // Spread rather than passing the reactive object straight through: reading
-  // it with `hasOwnProperty` (as nativeMenuAccelerators does) does not register
-  // a dependency on a key that does not exist yet, so the first rebind of an
-  // action never re-ran this effect and the native menu kept the old chord.
-  const overrides = { ...settings.keybindings };
-  invoke('set_menu_config', {
-    lang: settings.language,
-    accels: nativeMenuAccelerators(overrides),
-  }).catch(() => {});
+  if (!nativeMenuPlatform) return;
+  const menus = appMenu.menuFor(nativeMenuPlatform);
+  const spec = toNativeSpec(menus, { overrides: { ...settings.keybindings } });
+  const key = JSON.stringify(spec);
+  if (key === lastNativeSpec) return;
+  lastNativeSpec = key;
+  invoke('set_menu_spec', { menus: spec }).catch((e) => {
+    lastNativeSpec = '';
+    console.warn('[menu] set_menu_spec failed', e);
+  });
+});
+watchEffect(() => {
   invoke('save_language_preference', { lang: settings.language }).catch(() => {});
 });
 
@@ -773,6 +841,11 @@ watchEffect(() => {
 let themeAppliedOnce = false;
 watchEffect(() => {
   document.documentElement.setAttribute('data-theme', dataThemeFor(settings.theme, !!settings.customCssPath));
+  // 5.0 tokens: the exact default palette stays out of a marketplace theme's way.
+  document.documentElement.toggleAttribute('data-custom-theme', !!settings.customCssPath);
+  if (isIOS()) {
+    invoke('ios_set_appearance', { dark: themeFamily(settings.theme) === 'dark' }).catch(() => {});
+  }
   const overriddenBy = settings.customCssPath;
   if (!themeAppliedOnce) {
     themeAppliedOnce = true;
@@ -894,17 +967,11 @@ window.addEventListener(
 // it, and changing it reloads, so a user who drops es_ES into
 // `<config>/dictionaries/` and picks it gets Spanish checking immediately
 // instead of every word flagged against an English dictionary.
-let spellcheckLoadedFor: string | null = null;
-watchEffect(async () => {
+// The loaded-for bookkeeping lives in lib/spell-suggest.ts, which the editor
+// right-click menu (#376) also loads through on demand.
+watchEffect(() => {
   const lang = settings.spellcheckLang || 'en_US';
-  if (settings.spellcheckEnabled && spellcheckLoadedFor !== lang) {
-    try {
-      await invoke('spellcheck_init', { lang });
-      spellcheckLoadedFor = lang;
-    } catch (e) {
-      console.warn('spellcheck_init failed', e);
-    }
-  }
+  if (settings.spellcheckEnabled) void ensureSpellDict(lang);
 });
 
 watch(
@@ -960,38 +1027,102 @@ async function openExternalFile() {
   }
 }
 
+const menuCommands = useCommands();
+const updateCheck = useUpdateCheck();
+
+/** Insert-menu snippets (`$|$` marks where the caret lands) — the same
+ *  templates the toolbar's Insert menu uses. */
+const INSERT_SNIPPETS: Record<string, string> = {
+  'insert.mathBlock': '\n$$\n$|$\n$$\n',
+  'insert.mathInline': '$$|$$',
+  'insert.table': '\n| $|$ | Header |\n| --- | --- |\n| cell | cell |\n',
+  'insert.mermaid': MERMAID_INSERT_SNIPPET,
+  'insert.hr': '\n---\n',
+};
+
+/**
+ * Undo / Redo from a menu item (the Windows in-app menubar, and the Linux
+ * native menu, where muda has no predefined Undo/Redo). CodeMirror keeps its
+ * own history, which `execCommand('undo')` never reaches, so a focused
+ * CodeMirror editor gets its real undo/redo command; anything else (the plain
+ * Windows editor, a settings field) gets the browser's.
+ */
+async function runEditHistory(kind: 'undo' | 'redo') {
+  const active = document.activeElement;
+  const cmRoot = active instanceof HTMLElement ? active.closest<HTMLElement>('.cm-editor') : null;
+  if (cmRoot) {
+    const [{ EditorView }, { undo, redo }] = await Promise.all([
+      import('@codemirror/view'),
+      import('@codemirror/commands'),
+    ]);
+    const view = EditorView.findFromDOM(cmRoot);
+    if (view) {
+      (kind === 'undo' ? undo : redo)(view);
+      view.focus();
+      return;
+    }
+  }
+  const isExternalInput =
+    active instanceof HTMLElement &&
+    !active.closest('.plain-host') &&
+    (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+  if (isExternalInput) {
+    document.execCommand(kind);
+    return;
+  }
+  window.dispatchEvent(new CustomEvent('solomd:editor-history', { detail: { op: kind } }));
+}
+
+/**
+ * Every menu click — native (`solomd://menu`) and the Windows title-bar
+ * menubar (`solomd:menu-action`) — lands here. Ids are the bindable action ids
+ * wherever one exists, so a menu item runs exactly what its shortcut runs
+ * (`shortcuts.runAction`); then palette commands by id; the rest are the
+ * menu-only entries below.
+ */
 function dispatchMenuAction(id: string) {
+  // The table's working copy belongs to its original note/view. Native menu
+  // accelerators must not close or change that view underneath the dialog.
+  if (tableEditor.session) {
+    if (id === 'file.closeTab' || id === 'file.exit') {
+      window.dispatchEvent(new Event('solomd:table-close-request'));
+    }
+    return;
+  }
+  if (id.startsWith('recent.open:')) {
+    const path = workspace.recentFiles[Number(id.slice('recent.open:'.length))];
+    if (path) void files.openPath(path);
+    return;
+  }
+  if (id.startsWith('view.mode:')) {
+    settings.setViewMode(id.slice('view.mode:'.length) as ViewMode);
+    return;
+  }
+  if (id.startsWith('theme.set:')) {
+    settings.setTheme(id.slice('theme.set:'.length) as Theme);
+    return;
+  }
+  if (INSERT_SNIPPETS[id]) {
+    window.dispatchEvent(
+      new CustomEvent('solomd:insert-markdown', {
+        detail: { snippet: INSERT_SNIPPETS[id], paneId: tiles.focusedPaneId },
+      }),
+    );
+    return;
+  }
   switch (id) {
-    case 'file.new':
-      files.newFile();
-      break;
-    case 'file.newText':
-      files.newTextFile();
-      break;
-    case 'file.open':
-      files.openFile();
-      break;
     case 'file.openFolder':
       files.openFolder();
-      break;
-    case 'file.import':
-      void files.importDocuments();
-      break;
-    case 'file.save':
-      files.saveActive();
-      break;
-    case 'file.saveAs':
-      files.saveActiveAs();
-      break;
+      return;
     case 'file.openExternal':
       openExternalFile();
-      break;
-    case 'file.print':
-      exporter.exportPdfPrint();
-      break;
-    case 'file.closeTab':
-      if (tabs.activeId) files.closeTabSafe(tabs.activeId);
-      break;
+      return;
+    case 'file.autoSave':
+      settings.toggleAutoSaveOnBlur();
+      return;
+    case 'recent.clear':
+      workspace.clearRecent();
+      return;
     case 'window.new':
       // #280 — this used to dispatch a `solomd:new-window` event that nothing
       // listened for, so the menu item did nothing at all.
@@ -1000,71 +1131,45 @@ function dispatchMenuAction(id: string) {
         const toasts = (await import('./stores/toasts')).useToastsStore();
         toasts.warning(t('toast.newWindowFailed'));
       });
-      break;
+      return;
     case 'file.exit':
-      // #221 — the Windows in-app menubar dropped the native menu's 退出 item.
-      // Routes through Tauri's close-requested flow → unsaved-tabs confirm,
-      // same as the caption ✕ button.
+      // #221 — routes through Tauri's close-requested flow → unsaved-tabs
+      // confirm, same as the caption ✕ button.
       void getCurrentWindow().close();
-      break;
-    case 'view.toggleTheme':
-      settings.toggleTheme();
-      break;
-    case 'view.toggleFileTree':
-      settings.toggleFileTree();
-      break;
-    case 'view.toggleOutline':
-      if (tabs.activeId) tabs.toggleOutline(tabs.activeId);
-      break;
-    case 'view.cycleView':
-      settings.cycleViewMode();
-      break;
-    // v4.3.0 PR #74 — 3-axis zoom from the native View menu.
-    case 'view.zoomUiIn':
-      settings.zoomIn();
-      break;
-    case 'view.zoomUiOut':
-      settings.zoomOut();
-      break;
-    case 'view.zoomUiReset':
-      settings.resetZoom();
-      break;
-    case 'view.zoomEditorIn':
-      settings.editorFontIn();
-      break;
-    case 'view.zoomEditorOut':
-      settings.editorFontOut();
-      break;
-    case 'view.zoomEditorReset':
-      settings.resetEditorFontSize();
-      break;
+      return;
+    case 'view.darkMode':
+      settings.setTheme(themeFamily(settings.theme) === 'dark' ? 'light' : 'dark');
+      return;
+    // v4.3.0 PR #74 — the preview zoom axis is menu/⌃⌘ only.
     case 'view.zoomPreviewIn':
       settings.previewFontIn();
-      break;
+      return;
     case 'view.zoomPreviewOut':
       settings.previewFontOut();
-      break;
+      return;
     case 'view.zoomPreviewReset':
       settings.resetPreviewFontSize();
-      break;
-    case 'view.cmdPalette':
-      paletteOpen.value = true;
-      break;
-    case 'view.settings':
-      settingsOpen.value = true;
-      break;
-    case 'search.global':
-      toggleGlobalSearch();
-      break;
+      return;
     case 'help.markdown':
       openHelpAt('syntax');
-      break;
+      return;
     case 'help.shortcuts':
       openHelpAt('shortcuts');
-      break;
+      return;
     case 'help.cli':
       openHelpAt('cli');
-      break;
+      return;
+    case 'help.checkUpdate':
+      void updateCheck.manualCheckUpdate();
+      return;
+    case 'help.about':
+      aboutOpen.value = true;
+      return;
+    // AI rewrite reads the selection the way the toolbar button does (it
+    // handles the plain editor, AI-off and empty-selection cases).
+    case 'editor.aiRewrite':
+      window.dispatchEvent(new CustomEvent('solomd:toolbar-ai-rewrite'));
+      return;
     // Same routing as the Ctrl+F shortcut: preview has its own find, every
     // editor mode opens the editor's find/replace bar.
     case 'edit.find':
@@ -1073,28 +1178,26 @@ function dispatchMenuAction(id: string) {
       } else {
         window.dispatchEvent(new CustomEvent('solomd:editor-find', { detail: { paneId: tiles.focusedPaneId } }));
       }
-      break;
-    case 'help.about':
-      aboutOpen.value = true;
-      break;
+      return;
+    case 'edit.replace':
+      shortcuts.runAction('editor.replace');
+      return;
     // Windows unified title bar — the in-app Edit menu (Toolbar.vue). The
-    // native menu used PredefinedMenuItems here; in-app we drive the focused
+    // native menu uses PredefinedMenuItems here; in-app we drive the focused
     // editor directly. `execCommand` covers the Windows editors (plain
     // textarea + contenteditable live blocks); the menubar buttons use
     // `mousedown.prevent` so focus never leaves the editor. (CodeMirror —
     // Vim mode on Windows — keeps its own keyboard-driven undo history.)
     case 'edit.undo':
-      document.execCommand('undo');
-      break;
     case 'edit.redo':
-      document.execCommand('redo');
-      break;
+      void runEditHistory(id === 'edit.undo' ? 'undo' : 'redo');
+      return;
     case 'edit.cut':
       document.execCommand('cut');
-      break;
+      return;
     case 'edit.copy':
       document.execCommand('copy');
-      break;
+      return;
     case 'edit.paste':
       // execCommand('paste') is blocked in modern engines; read the clipboard
       // through the Tauri plugin and insert as text at the selection.
@@ -1103,13 +1206,21 @@ function dispatchMenuAction(id: string) {
           if (text) document.execCommand('insertText', false, text);
         })
         .catch(() => {});
-      break;
+      return;
     case 'edit.selectAll':
       document.execCommand('selectAll');
-      break;
-    default:
-      console.warn('unknown menu action', id);
+      return;
   }
+  // A bindable action: exactly what its shortcut does. `false` means it
+  // declined (e.g. formatting while a settings field has focus) — that is an
+  // answer, not a reason to try something else.
+  if (shortcuts.runAction(id) !== null) return;
+  const cmd = menuCommands.find((c) => c.id === id);
+  if (cmd) {
+    void cmd.run();
+    return;
+  }
+  console.warn('unknown menu action', id);
 }
 
 /**
@@ -1147,6 +1258,13 @@ try {
 // `autoSaveOnBlur` setting (default off) inside autoSaveDirtyTabs().
 function onWindowBlur() {
   void files.autoSaveDirtyTabs();
+  // 5.0 — selections and the sidebar highlight go neutral grey while the
+  // window is in the background, as in Finder / Notes (tokens.css
+  // --select-inactive).
+  document.documentElement.classList.add('window-inactive');
+}
+function onWindowFocus() {
+  document.documentElement.classList.remove('window-inactive');
 }
 
 /**
@@ -1157,7 +1275,19 @@ function onWindowBlur() {
  * instead of an empty, unreadable tree.
  */
 async function reconcileIosFolder() {
-  if (!isIOS() || !workspace.currentFolder) return;
+  if (!workspace.currentFolder) return;
+  if (isMacOS()) {
+    try {
+      const reopened = await invoke<string | null>('ios_restore_folder');
+      if (reopened && reopened !== workspace.currentFolder) {
+        workspace.setFolder(reopened);
+      }
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  if (!isIOS()) return;
   try {
     const docs = (await documentDir()).replace(/\/+$/, '');
     const cur = workspace.currentFolder;
@@ -1225,6 +1355,10 @@ function scheduleStarPrompt() {
 onMounted(async () => {
   scheduleStarPrompt();
   bookmarkSync.start();
+  // Launch: put the keyboard in the editor once it has mounted (the
+  // CodeMirror path never focused itself, so typing went nowhere until a
+  // click). Skipped while a dialog is up or something else has focus.
+  focusActiveEditorSoon(() => tiles.focusedPaneId, { timeoutMs: 5000 });
   void reconcileIosFolder();
 
   // #153 (mobile) — Android's WebView reports env(safe-area-inset-top) as 0
@@ -1323,6 +1457,7 @@ onMounted(async () => {
   document.addEventListener('auxclick', onStrayLinkClick);
   window.addEventListener('wheel', onWheelZoom, { passive: false, capture: true });
   window.addEventListener('blur', onWindowBlur);
+  window.addEventListener('focus', onWindowFocus);
   window.addEventListener('solomd:open-help', onOpenHelpEvent as EventListener);
   window.addEventListener('solomd:open-global-search', onOpenSearchEvent as EventListener);
   window.addEventListener('solomd:open-cjk-proofread', onOpenCjkProofreadEvent as EventListener);
@@ -1439,16 +1574,11 @@ onMounted(async () => {
     tabs.newTab();
   }
 
-  // v4.0 first-run agent setup wizard. Fires after the welcome tour on a
-  // fresh install — once. Re-openable from Settings → AI ("Run setup
-  // wizard again") for users who skipped it. We wait one tick so the
-  // welcome tour overlay (if any) shows first. App Store builds skip
-  // entirely (Apple 3.1.1 — no AI surface).
-  if (!IS_APP_STORE_BUILD && !settings.agentWizardSeen) {
-    setTimeout(() => {
-      wizardOpen.value = true;
-    }, isFreshLaunch ? 800 : 0);
-  }
+  // The agent setup wizard no longer opens by itself at first launch: 5.0
+  // starts on the page, and a modal about AI providers was the first thing
+  // a new user saw — covering the phone home screen entirely. It now opens
+  // the first time someone reaches for AI before setting it up (see
+  // `openSettingsAt`), and stays re-openable from Settings → AI.
   // Settings → AI's "Run setup wizard again" button asks here. Registered
   // as a named handler (see `onOpenAgentWizard` below) so onBeforeUnmount
   // can detach it — otherwise every HMR remount stacks another listener.
@@ -1462,16 +1592,38 @@ onMounted(async () => {
   }
   tiles.syncActiveTab();
 
-  // Window close
+  // Window close. Rust intercepts the close of every editor window and names
+  // the one being closed in the payload — the event reaches every window, and
+  // each must only act on its own close.
   try {
-    await listen('solomd://close-requested', async () => {
-      tabs.persist?.();
-      tiles.persist();
+    await listen<string>('solomd://close-requested', async (e) => {
+      const me = getCurrentWindow().label;
+      if (e.payload && e.payload !== me) return;
+      if (tableEditor.session) {
+        window.dispatchEvent(new Event('solomd:table-close-request'));
+        return;
+      }
+      // Editors sync their document into the store on a debounce; text typed
+      // just before the close would otherwise miss the persist below.
+      flushPendingEdits();
+      if (me !== 'main') {
+        // Nothing restores a second window's tabs on the next launch, so its
+        // unsaved edits are asked about here instead of silently dropped.
+        if (!(await confirmCloseWithUnsavedTabs())) return;
+        if (isAuxLabel(me)) windowsStore.unregister(me);
+      } else {
+        tabs.persist?.();
+        tiles.persist();
+      }
       await invoke('force_close_window');
     });
   } catch (err) {
     console.warn('close-requested listener failed', err);
   }
+  // Backstop for teardowns that skip close-requested (macOS ⌘Q terminates
+  // the app without a CloseRequested, a reload): flush and persist
+  // synchronously — the persist watcher would run too late here.
+  window.addEventListener('pagehide', onPageHide);
 
   // #103 — backstop registry cleanup. The destroyed window normally
   // unregisters itself via onCloseRequested, but a webview teardown that
@@ -1481,6 +1633,12 @@ onMounted(async () => {
   try {
     unlistenWindowDestroyed = await listen<string>('solomd://window-destroyed', (e) => {
       if (e.payload && isAuxLabel(e.payload)) windowsStore.unregister(e.payload);
+      // Back from the slideshow window: the caret was nowhere and typing
+      // went to <body> until a click. Hand the keyboard back to the editor.
+      if (e.payload?.startsWith('solomd-slideshow-')) {
+        void getCurrentWindow().setFocus().catch(() => {});
+        focusActiveEditorSoon(() => tiles.focusedPaneId, { timeoutMs: 1500 });
+      }
     });
   } catch (err) {
     console.warn('window-destroyed listener not available', err);
@@ -1528,27 +1686,30 @@ onMounted(async () => {
     console.warn('drag-drop not available', e);
   }
 
-  // Auto-check for updates
-  if (!isIOS() && settings.autoCheckUpdate) {
-    try {
-      const { checkForUpdateOnStartup, openReleaseUrl } = await import('./lib/check-update');
-      const result = await checkForUpdateOnStartup();
-      if (result && result.hasUpdate) {
-        const toastsStore = (await import('./stores/toasts')).useToastsStore();
-        const { useI18n } = await import('./i18n');
-        const { t: tr } = useI18n();
-        // #171 — no auto-opening the browser (it yanks the user out of
-        // whatever they're writing). The toast lingers; clicking it opens
-        // the download page.
-        toastsStore.success(
-          tr('settings.updateAvailable', { version: result.latest || '' }),
-          12000,
-          () => { void openReleaseUrl(result.url); },
-        );
-      }
-    } catch { /* silent */ }
-  }
+  // Auto-check for updates — once startup has settled; nobody waits on it,
+  // and it shouldn't share the main thread with the first keystrokes.
+  if (!isIOS() && settings.autoCheckUpdate) runWhenIdle(() => void checkForUpdatesNow());
 });
+
+async function checkForUpdatesNow(): Promise<void> {
+  try {
+    const { checkForUpdateOnStartup, openReleaseUrl } = await import('./lib/check-update');
+    const result = await checkForUpdateOnStartup();
+    if (result && result.hasUpdate) {
+      const toastsStore = (await import('./stores/toasts')).useToastsStore();
+      const { useI18n } = await import('./i18n');
+      const { t: tr } = useI18n();
+      // #171 — no auto-opening the browser (it yanks the user out of
+      // whatever they're writing). The toast lingers; clicking it opens
+      // the download page.
+      toastsStore.success(
+        tr('settings.updateAvailable', { version: result.latest || '' }),
+        12000,
+        () => { void openReleaseUrl(result.url); },
+      );
+    }
+  } catch { /* silent */ }
+}
 
 function onAIRewriteAccept(e: Event) {
   const detail = (e as CustomEvent).detail || {};
@@ -1655,6 +1816,13 @@ function onOpenAgentWizard() {
   wizardOpen.value = true;
 }
 
+function onLeaveCenterOverlay() {
+  if (inboxViewOpen.value) inboxViewOpen.value = false;
+  if (basesOpen.value) basesOpen.value = false;
+  if (typeLensOpen.value) typeLensOpen.value = false;
+  if (viewOpen.value) viewOpen.value = false;
+}
+
 window.addEventListener('solomd:wiki-open', onWikiOpen as EventListener);
 window.addEventListener('solomd:ai-rewrite-accept', onAIRewriteAccept as EventListener);
 window.addEventListener('solomd:ai-rewrite-cancel', onAIRewriteCancel as EventListener);
@@ -1666,15 +1834,25 @@ window.addEventListener(TYPE_LENS_OPEN_EVENT, onOpenTypeLens as EventListener);
 window.addEventListener(TYPE_LENS_CLOSE_EVENT, onCloseTypeLens as EventListener);
 window.addEventListener(VIEW_OPEN_EVENT, onOpenView as EventListener);
 window.addEventListener(VIEW_CLOSE_EVENT, onCloseView as EventListener);
+window.addEventListener('solomd:leave-center-overlay', onLeaveCenterOverlay);
 window.addEventListener('solomd:open-settings', onOpenSettingsEvent as EventListener);
+
+function onPageHide() {
+  flushPendingEdits();
+  if (getCurrentWindow().label !== 'main') return;
+  tabs.persist?.();
+  tiles.persist();
+}
 
 onBeforeUnmount(() => {
   bookmarkSync.stop();
+  window.removeEventListener('pagehide', onPageHide);
   window.removeEventListener('keydown', onEsc);
   document.removeEventListener('click', onStrayLinkClick);
   document.removeEventListener('auxclick', onStrayLinkClick);
   window.removeEventListener('wheel', onWheelZoom, { capture: true } as EventListenerOptions);
   window.removeEventListener('blur', onWindowBlur);
+  window.removeEventListener('focus', onWindowFocus);
   window.removeEventListener('solomd:open-help', onOpenHelpEvent as EventListener);
   window.removeEventListener('solomd:open-global-search', onOpenSearchEvent as EventListener);
   window.removeEventListener('solomd:open-cjk-proofread', onOpenCjkProofreadEvent as EventListener);
@@ -1683,6 +1861,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('solomd:ai-rewrite-cancel', onAIRewriteCancel as EventListener);
   window.removeEventListener(BASES_OPEN_EVENT, onOpenBases as EventListener);
   window.removeEventListener(BASES_CLOSE_EVENT, onCloseBases as EventListener);
+  window.removeEventListener('solomd:leave-center-overlay', onLeaveCenterOverlay);
   window.removeEventListener(INBOX_OPEN_EVENT, onOpenInbox as EventListener);
   window.removeEventListener(INBOX_CLOSE_EVENT, onCloseInbox as EventListener);
   window.removeEventListener(TYPE_LENS_OPEN_EVENT, onOpenTypeLens as EventListener);
@@ -1774,6 +1953,110 @@ const showSearchPane = computed(() => searchOpen.value);
 // #168 — phone shell: one flag drives the CSS and the behaviour.
 const { isNarrow } = useViewport();
 
+// 5.0 §8 — phone shell: home (笔记) / search / editor as full-screen views.
+const phone = usePhoneStore();
+// 5.0 §7 — iPad portrait: the sidebar floats over the text and steps aside
+// once a note is picked.
+const { isTabletOverlay } = useTabletOverlay();
+// DEV-only: `?layoutdebug` prints the chrome's geometry on screen, for
+// checking layouts in iOS Simulator Safari, which can't be scripted.
+const layoutDebug = ref('');
+if (import.meta.env.DEV && location.search.includes('layoutdebug')) {
+  let lastTap = '-';
+  for (const type of ['pointerdown', 'touchstart', 'click'] as const) {
+    document.addEventListener(type, (e) => {
+      const t = e.target as HTMLElement | null;
+      const pt = 'clientX' in e ? `${Math.round((e as PointerEvent).clientX)},${Math.round((e as PointerEvent).clientY)}` : '';
+      lastTap = `${type} ${pt} ${t?.tagName?.toLowerCase()}.${(t?.className && typeof t.className === 'string' ? t.className : '').split(' ')[0]}`;
+    }, true);
+  }
+  setInterval(() => {
+    const r = (sel: string) => {
+      const e = document.querySelector(sel);
+      if (!e) return '-';
+      const b = e.getBoundingClientRect();
+      return `${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`;
+    };
+    layoutDebug.value = [
+      `mode=${settings.viewMode} rdm=${settings.readingByDefaultOnMobile} view=${phone.view} narrow=${isNarrow.value} vv=${Math.round(window.visualViewport?.height ?? 0)} ih=${innerHeight}`,
+      `scrollY=${Math.round(scrollY)} body=${document.body.scrollTop} html=${document.documentElement.scrollTop}`,
+      `app ${r('.app')}`,
+      `toolbar ${r('.main-col .toolbar')}`,
+      `content ${r('.content')}`,
+      `tap ${lastTap}`,
+    ].join('\n');
+  }, 500);
+}
+function phoneShowEditor() {
+  if (isNarrow.value) phone.show('editor');
+  if (isTabletOverlay.value && settings.showFileTree) settings.toggleFileTree();
+}
+// Opening or switching to a note is what moves a phone to the editor — but
+// not the session restore at launch: a cold start lands on 笔记, the way
+// Notes does. (Opening a file from another app still goes straight to it,
+// through 'solomd:file-opened' below.)
+let phoneTabWatchArmed = false;
+onMounted(() => setTimeout(() => { phoneTabWatchArmed = true; }, 1500));
+watch(() => tabs.activeId, () => {
+  if (!phoneTabWatchArmed) return;
+  // An empty Untitled that appears on its own — opening a folder starts its
+  // session with one — is not the user opening a note: picking a folder
+  // landed on a blank editor instead of the folder's notes. New notes and
+  // opened files announce themselves through 'solomd:file-opened'.
+  const t = tabs.activeTab;
+  if (t && !t.filePath && t.content === '') return;
+  phoneShowEditor();
+});
+// On a phone, reading mode is the editor screen's preview: the full-screen
+// reader would drop the nav bar and leave no way back to 笔记.
+watch(
+  () => [isNarrow.value, settings.viewMode] as const,
+  ([narrow, mode]) => {
+    if (narrow && mode === 'reading') settings.setViewMode('preview');
+  },
+  { immediate: true },
+);
+window.addEventListener('solomd:file-opened', phoneShowEditor);
+// Android's back button: the WebView goes back in its history and only
+// finishes the activity when there is none — and the phone shell never made
+// any, so Back from a note quit the app. Leaving 笔记 for the editor or
+// search pushes one entry; Back pops it and returns to 笔记. The in-app ‹
+// button pops it too, so the two stay in step.
+let phoneHistoryOps = 0; // history.back() calls of ours whose popstate is still due
+watch(
+  () => phone.view,
+  (v, old) => {
+    if (!isNarrow.value) return;
+    if (old === 'home' && v !== 'home') {
+      history.pushState({ solomdPhone: v }, '');
+    } else if (v === 'home' && old !== 'home' && history.state?.solomdPhone) {
+      phoneHistoryOps++;
+      history.back();
+    }
+  },
+);
+window.addEventListener('popstate', () => {
+  if (phoneHistoryOps > 0) {
+    phoneHistoryOps--;
+    return;
+  }
+  if (isNarrow.value && phone.view !== 'home') {
+    window.dispatchEvent(new Event('solomd:close-menus'));
+    phone.show('home');
+  }
+});
+// Back to 笔记 leaves any centre-pane page (inbox, Bases, type lens, saved
+// view) so the next note opens as a note.
+watch(
+  () => phone.view,
+  (v) => {
+    if (v !== 'home') return;
+    inboxViewOpen.value = false;
+    basesOpen.value = false;
+    typeLensOpen.value = false;
+  },
+);
+
 /**
  * Whether any pane in the right strip could draw something right now,
  * ignoring the master hide flag. Most panes need a workspace folder and
@@ -1836,7 +2119,10 @@ setRightSidebarShell({
  */
 const narrowDrawer = computed<'left' | 'right' | null>(() => {
   if (!isNarrow.value) return null;
-  if (settings.showFileTree || settings.showViewsPanel) return 'left';
+  // 5.0: no left drawer on a phone — the file tree is the 笔记 home screen
+  // and the sidebar is not rendered there at all. `showFileTree` (on by
+  // default) still read as an open drawer, so the editor sat under the
+  // scrim, dimmed, with the first tap spent dismissing nothing.
   if (showRightSidebar.value) return 'right';
   return null;
 });
@@ -2053,6 +2339,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       'app--reading': settings.viewMode === 'reading',
       'app--mobile': isMobile(),
       'app--narrow': isNarrow,
+      'app--tablet-overlay': isTabletOverlay && !isNarrow,
       'app--drawer-left': narrowDrawer === 'left',
       'app--drawer-right': narrowDrawer === 'right',
     }"
@@ -2067,14 +2354,20 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       <ReadingView />
     </template>
     <template v-else>
+      <!-- 5.0 window (docs/v5-ui-spec.md §3): on Windows a 44px frameless title
+           bar spans the window; below it — and on every other platform at the
+           top — the sidebar runs full height beside a column holding the 52px
+           header and the workspace. On macOS the traffic lights sit in the
+           sidebar's top inset, or over the header when the sidebar is hidden. -->
       <Toolbar
+        v-if="winTitleBar"
+        variant="titlebar"
         @open-palette="paletteOpen = true"
         @open-settings="openSettingsAt()"
         @open-help="helpOpen = true"
         @open-search="toggleGlobalSearch()"
       />
-      <TelemetryBanner />
-      <div class="workspace">
+      <div class="shell">
         <!-- #168 — on a phone the side panes float over the editor instead of
              stealing its width; this catches the tap that dismisses them. -->
         <div
@@ -2083,10 +2376,42 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
           aria-hidden="true"
           @click="closeNarrowDrawer"
         />
-        <div v-if="settings.showFileTree || settings.showViewsPanel" class="left-stack">
-          <FileTree v-if="settings.showFileTree" />
-          <ViewsPanel v-if="settings.showViewsPanel" />
+        <div
+          v-if="isTabletOverlay && !isNarrow && settings.showFileTree"
+          class="workspace__scrim"
+          aria-hidden="true"
+          @click="settings.toggleFileTree()"
+        />
+        <!-- 5.0 §8 — phone: 笔记 home / search screens with the bottom bar. -->
+        <div v-if="isNarrow && phone.view !== 'editor'" class="phone-screen">
+          <Sidebar
+            v-if="phone.view === 'home'"
+            variant="phone"
+            @open-settings="openSettingsAt()"
+            @open-quick-switcher="quickSwitcherOpen = true"
+            @filter-tag="(tag: string) => { searchPrefill = `#${tag}`; phone.show('search'); }"
+          />
+          <GlobalSearch v-else class="phone-search" :prefill="searchPrefill" @close="phone.show('home')" />
+          <PhoneTabBar @open-settings="openSettingsAt()" />
         </div>
+        <Sidebar
+          v-if="settings.showFileTree && !isNarrow"
+          class="left-stack"
+          :mac-inset="macTitleBar"
+          @toggle="settings.toggleFileTree()"
+          @open-settings="openSettingsAt()"
+          @open-quick-switcher="quickSwitcherOpen = true"
+          @filter-tag="onFilterTag"
+        />
+        <div v-show="!isNarrow || phone.view === 'editor'" class="main-col">
+      <Toolbar
+        @open-palette="paletteOpen = true"
+        @open-settings="openSettingsAt()"
+        @open-help="helpOpen = true"
+        @open-search="toggleGlobalSearch()"
+      />
+      <TelemetryBanner />
+      <div class="workspace">
         <aside
           v-if="showRightSidebar && settings.outlineSide === 'left'"
           class="side-sidebar side-sidebar--left"
@@ -2110,7 +2435,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
                 class="rs-pane-grip"
                 :title="t('rsPane.dragToReorder')"
                 @pointerdown="startPaneReorder($event, p.id)"
-              >⋮⋮</div>
+              />
               <GlobalSearch
                 v-if="p.id === 'search'"
                 :prefill="searchPrefill"
@@ -2156,6 +2481,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
           <TypeLensView v-else-if="typeLensOpen" :type-name="typeLensName" />
           <ViewNoteList v-else-if="viewPaneVisible" />
           <TileRoot v-else :node="tiles.root" @cursor="onCursor" @selection="onSelection" />
+          <StatsPill v-if="!basesOpen && !inboxViewOpen && !typeLensOpen && !viewPaneVisible" :line="cursorLine" :col="cursorCol" :selection-text="selectionText" />
         </div>
         <aside
           v-if="showRightSidebar && settings.outlineSide !== 'left'"
@@ -2180,7 +2506,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
                 class="rs-pane-grip"
                 :title="t('rsPane.dragToReorder')"
                 @pointerdown="startPaneReorder($event, p.id)"
-              >⋮⋮</div>
+              />
               <GlobalSearch
                 v-if="p.id === 'search'"
                 :prefill="searchPrefill"
@@ -2221,7 +2547,8 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
           </template>
         </aside>
       </div>
-      <StatusBar :line="cursorLine" :col="cursorCol" :selection-text="selectionText" />
+        </div>
+      </div>
       <!-- Grid editor for the table under the caret. The pane that found the
            table supplies the write-back closure, so this stays pane-agnostic. -->
       <TableEditor
@@ -2309,22 +2636,26 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       :has-key="aiHasKey"
       @open-settings="(section?: string) => openSettingsAt(section ?? 'integrations')"
     />
-    <CommandPalette :open="paletteOpen" @close="paletteOpen = false" />
-    <QuickSwitcher :open="quickSwitcherOpen" @close="quickSwitcherOpen = false" />
-    <SettingsPanel
-      :open="settingsOpen"
+    <component :is="CommandPaletteC" v-if="CommandPaletteC" :open="paletteLazyOpen" @close="paletteOpen = false" />
+    <component :is="QuickSwitcherC" v-if="QuickSwitcherC" :open="quickSwitcherLazyOpen" @close="quickSwitcherOpen = false" />
+    <component
+      :is="SettingsPanelC"
+      v-if="SettingsPanelC"
+      :open="settingsLazyOpen"
       :initial-section="settingsInitialSection"
       @close="settingsOpen = false; settingsInitialSection = null; refreshAiHasKey()"
     />
-    <MarkdownHelp :open="helpOpen" :tab="helpTab" @close="helpOpen = false" />
-    <RagSearch
-      :open="ragSearchOpen"
+    <component :is="MarkdownHelpC" v-if="MarkdownHelpC" :open="helpLazyOpen" :tab="helpTab" @close="helpOpen = false" />
+    <component
+      :is="RagSearchC"
+      v-if="RagSearchC"
+      :open="ragSearchLazyOpen"
       @close="ragSearchOpen = false"
       @open-settings="(section?: string) => { ragSearchOpen = false; openSettingsAt(section ?? 'writing'); }"
     />
-    <CjkProofread :open="cjkProofreadOpen" @close="cjkProofreadOpen = false" />
-    <AboutDialog :open="aboutOpen" @close="aboutOpen = false" />
-    <AgentSetupWizard v-if="!IS_APP_STORE_BUILD" :open="wizardOpen" @close="wizardOpen = false" />
+    <component :is="CjkProofreadC" v-if="CjkProofreadC" :open="cjkProofreadLazyOpen" @close="cjkProofreadOpen = false" />
+    <component :is="AboutDialogC" v-if="AboutDialogC" :open="aboutLazyOpen" @close="aboutOpen = false" />
+    <component :is="AgentSetupWizardC" v-if="!IS_APP_STORE_BUILD && AgentSetupWizardC" :open="wizardLazyOpen" @close="wizardOpen = false" />
     <UnsavedDialog
       :open="unsavedOpen"
       :mode="unsavedMode"
@@ -2334,8 +2665,10 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       @discard="onUnsavedAction('discard')"
       @cancel="onUnsavedAction('cancel')"
     />
-    <ImageUrlDialog
-      :open="imageUrlDialogOpen"
+    <component
+      :is="ImageUrlDialogC"
+      v-if="ImageUrlDialogC"
+      :open="imageUrlLazyOpen"
       @confirm="onImageUrlConfirm"
       @cancel="imageUrlDialogOpen = false"
     />
@@ -2351,8 +2684,13 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       @cancel="onFileChangedAction('cancel')"
     />
     <Toast />
-    <AndroidFolderPicker
-      :open="androidPickerOpen"
+    <pre v-if="layoutDebug" class="layout-debug">{{ layoutDebug }}</pre>
+    <!-- 5.0 — format bar above the software keyboard (phones / tablets). -->
+    <KeyboardBar v-if="isMobile() || forceKeyboardBarPreview()" />
+    <component
+      :is="AndroidFolderPickerC"
+      v-if="AndroidFolderPickerC"
+      :open="androidPickerLazyOpen"
       :start="workspace.currentFolder ?? undefined"
       @pick="onAndroidFolderPick"
       @close="androidPickerOpen = false"
@@ -2438,6 +2776,55 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
   padding-right: env(safe-area-inset-right, 0);
   box-sizing: border-box;
 }
+/* 5.0 shell: sidebar column (full height) | main column (header + workspace). */
+.shell {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+.layout-debug {
+  position: fixed;
+  left: 8px;
+  top: 40%;
+  z-index: 99999;
+  margin: 0;
+  padding: 6px 8px;
+  font: 11px/1.4 var(--font-mono);
+  background: rgba(0, 0, 0, 0.75);
+  color: #0f0;
+  border-radius: 6px;
+  pointer-events: none;
+}
+/* 5.0 §7 — iPad portrait: the sidebar floats over the editor. */
+.app--tablet-overlay .shell > .left-stack {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  box-shadow: var(--sh-modal);
+}
+/* 5.0 §8 — a phone home / search screen fills the window. */
+.phone-screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+.phone-screen > .phone-search {
+  flex: 1;
+  min-height: 0;
+}
+.main-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
 .workspace {
   flex: 1;
   display: flex;
@@ -2460,6 +2847,15 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
  * ============================================================ */
 .app--narrow .workspace {
   position: relative;
+}
+.app--narrow .shell > .left-stack {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 40;
+  width: min(86vw, 320px);
+  box-shadow: var(--sh-modal);
 }
 .app--narrow .left-stack,
 .app--narrow .side-sidebar {
@@ -2526,13 +2922,13 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
   width: 260px;
   flex: 0 0 260px;
   min-width: 240px;
-  background: var(--bg-soft, var(--bg));
+  background: var(--bg);
 }
 .side-sidebar--left {
-  border-right: 1px solid var(--border);
+  border-right: var(--bd-hair);
 }
 .side-sidebar--right {
-  border-left: 1px solid var(--border);
+  border-left: var(--bd-hair);
 }
 /* Drag handle for live-resize. Sits on the inner edge of the sidebar
    (right edge of left sidebar, left edge of right sidebar) as a 5px
@@ -2554,8 +2950,8 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
   left: -4px;
 }
 .side-sidebar__resize:hover {
-  background: var(--accent, #6366f1);
-  opacity: 0.5;
+  background: var(--accent);
+  opacity: 0.35;
 }
 /* v4.3.0 PR #75 — right-click context menu floats over the workspace via
    <Teleport to="body">. Toolbar's master-toggle is the canonical hide
@@ -2642,41 +3038,66 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
   border-left: 0;
   border-right: 0;
 }
-/* v4.3.0 issue #57b — drag grip + drop-target highlight for right-sidebar
-   reordering. Grip is intentionally subtle (8px dotted strip at the top of
-   each pane); hovering surfaces it more clearly. Only the grip is draggable
-   so text selection inside the pane still works. */
+/* v4.3.0 issue #57b — drag grip for right-sidebar reordering. 5.0: no
+   longer a strip that takes height; a six-dot handle floats over the top
+   edge of the pane header, centred, and only appears while the pointer is
+   over that pane. Only the grip starts a drag, so text selection inside
+   the pane still works. */
+.rs-pane-host {
+  position: relative;
+}
 .rs-pane-grip {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 10px;
-  flex: 0 0 10px;
-  color: var(--text-faint);
-  font-size: 8px;
-  letter-spacing: 2px;
+  position: absolute;
+  top: 1px;
+  left: 50%;
+  z-index: 3;
+  width: 28px;
+  height: 12px;
+  transform: translateX(-50%);
+  border-radius: var(--r-xs);
+  color: var(--text-3);
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
   /* #131 — pointer-driven reorder: stop the browser turning a vertical drag on
      the grip into a scroll/pan gesture so pointermove tracking stays clean. */
   touch-action: none;
-  background: transparent;
-  transition: background 120ms, color 120ms;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+/* 3 × 2 dots, 2 px, on a 4 px pitch. */
+.rs-pane-grip::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 12px;
+  height: 8px;
+  transform: translate(-50%, -50%);
+  background-image: radial-gradient(circle, currentColor 0.9px, transparent 1.3px);
+  background-size: 4px 4px;
+  background-position: 0 0;
+}
+.rs-pane-host:hover > .rs-pane-grip,
+.rs-pane-grip:focus-visible {
+  opacity: 1;
 }
 .rs-pane-grip:hover {
-  background: var(--bg-hover);
-  color: var(--text-muted);
+  background: var(--fill-1);
+  color: var(--text-2);
 }
 .rs-pane-grip:active {
   cursor: grabbing;
+  background: var(--fill-2);
 }
 .rs-pane-host--dragging {
   opacity: 0.4;
 }
 .rs-pane-host--drop-target {
-  outline: 2px dashed var(--accent);
-  outline-offset: -2px;
+  outline: 0;
+  box-shadow: inset 0 2px 0 var(--accent);
+  background: var(--accent-soft);
 }
 /* Make sure the grip + content layout share vertical space cleanly. */
 .rs-pane-host > .rs-pane-grip + :deep(*) {

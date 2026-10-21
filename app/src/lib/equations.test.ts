@@ -149,3 +149,15 @@ test('a multi-line block is found from inside', () => {
 test('an unterminated formula is not a span', () => {
   assert.equal(findMathSpanAt('text $a+b', 7), null);
 });
+
+test('finds LaTeX \\[ ... \\] and \\( ... \\) spans (#433)', () => {
+  const doc = 'inline \\( x^2 + 1 \\) and display \\[\n\\frac{a}{b}\n\\] done';
+  const inline = findMathSpanAt(doc, doc.indexOf('x^2'))!;
+  assert.equal(inline.display, false);
+  assert.equal(inline.body, 'x^2 + 1');
+
+  const block = findMathSpanAt(doc, doc.indexOf('frac'))!;
+  assert.equal(block.display, true);
+  assert.equal(block.body, '\\frac{a}{b}');
+});
+

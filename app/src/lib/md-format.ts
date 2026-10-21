@@ -11,6 +11,8 @@
  * the format comes off. That is what makes one shortcut enough.
  */
 
+import { applyChanges, renumberChanges } from './list-renumber';
+
 export type FormatKind =
   | 'bold'
   | 'italic'
@@ -85,8 +87,51 @@ function toggleStars(doc: string, from: number, to: number, width: 1 | 2): Forma
   if (has) {
     return { from: s - width, to: e + width, insert: inner, selFrom: s - width, selTo: e - width };
   }
+  // A bare caret inside an existing span the word rule cannot see — CJK,
+  // where the "word" is empty (这是**粗|体**文字), or a Latin span of several
+  // words — takes that span's markers off instead of nesting a new pair.
+  if (from === to) {
+    const span = enclosingStarSpan(doc, from, width);
+    if (span) {
+      const [openEnd, closeStart] = span;
+      return {
+        from: openEnd - width,
+        to: closeStart + width,
+        insert: doc.slice(openEnd, closeStart),
+        selFrom: from - width,
+        selTo: from - width,
+      };
+    }
+  }
   const m = '*'.repeat(width);
   return { from: s, to: e, insert: m + inner + m, selFrom: s + width, selTo: e + width };
+}
+
+/**
+ * The `**…**` (width 2) or `*…*` (width 1) span on the caret's line that
+ * contains `pos`, as [end of the opening run, start of the closing run].
+ * Runs pair up left to right — the second run of a kind closes the first —
+ * so a caret *between* two spans is in neither. A run of 3 counts for both.
+ */
+function enclosingStarSpan(doc: string, pos: number, width: 1 | 2): [number, number] | null {
+  const ls = pos > 0 ? doc.lastIndexOf('\n', pos - 1) + 1 : 0;
+  let le = doc.indexOf('\n', pos);
+  if (le < 0) le = doc.length;
+  const runs: [number, number][] = [];
+  for (let i = ls; i < le; ) {
+    if (doc[i] !== '*') { i++; continue; }
+    let j = i;
+    while (j < le && doc[j] === '*') j++;
+    const n = j - i;
+    if (width === 2 ? n >= 2 : n % 2 === 1) runs.push([i, j]);
+    i = j;
+  }
+  for (let k = 0; k + 1 < runs.length; k += 2) {
+    const openEnd = runs[k][1];
+    const closeStart = runs[k + 1][0];
+    if (closeStart > openEnd && pos >= openEnd && pos <= closeStart) return [openEnd, closeStart];
+  }
+  return null;
 }
 
 function toggleWrap(doc: string, from: number, to: number, marker: string): FormatEdit {
@@ -189,7 +234,49 @@ function togglePrefix(
   });
 }
 
+/**
+ * The closed fenced block (``` or ~~~) whose lines contain [from, to], as
+ * offsets: opening line start, inner start, inner end, closing line end.
+ * Fences are tracked from the top of the document, so a ``` line is known to
+ * open or close.
+ */
+function enclosingFence(doc: string, from: number, to: number): [number, number, number, number] | null {
+  let open: { start: number; end: number; ch: string; len: number } | null = null;
+  let at = 0;
+  while (at <= doc.length) {
+    let end = doc.indexOf('\n', at);
+    if (end < 0) end = doc.length;
+    const line = doc.slice(at, end);
+    const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (m) {
+      if (!open) {
+        if (m[1][0] === '~' || !m[2].includes('`')) open = { start: at, end, ch: m[1][0], len: m[1].length };
+      } else if (m[1][0] === open.ch && m[1].length >= open.len && m[2].trim() === '') {
+        if (from >= open.start && to <= end) {
+          const innerStart = Math.min(open.end + 1, at);
+          return [open.start, innerStart, Math.max(innerStart, at - 1), end];
+        }
+        open = null;
+      }
+    }
+    if (open === null && at > to) return null;
+    at = end + 1;
+  }
+  return null;
+}
+
 function toggleCodeBlock(doc: string, from: number, to: number): FormatEdit {
+  // Inside a block — the caret on either fence line too, which is where the
+  // wrap below leaves it — the command takes the fences off.
+  const fence = enclosingFence(doc, from, to);
+  if (fence) {
+    const [blockStart, innerStart, innerEnd, blockEnd] = fence;
+    const inner = doc.slice(innerStart, innerEnd);
+    const map = (p: number) => Math.max(blockStart, Math.min(blockStart + inner.length, p - (innerStart - blockStart)));
+    return from === to
+      ? { from: blockStart, to: blockEnd, insert: inner, selFrom: map(from), selTo: map(from) }
+      : { from: blockStart, to: blockEnd, insert: inner, selFrom: blockStart, selTo: blockStart + inner.length };
+  }
   const [s, e] = lineSpan(doc, from, to);
   const body = doc.slice(s, e);
   const lines = body.split('\n');
@@ -266,4 +353,157 @@ export function applyFormat(doc: string, from: number, to: number, kind: FormatK
     default:
       return toggleHeading(doc, a, b, Number(kind.slice(1)));
   }
+}
+
+// ---- Tab / Shift+Tab on list items ----
+
+/** indent, marker (`-`, `2.`, `10)`), the spaces after it. */
+const LIST_ITEM = /^( *)([-*+]|\d{1,9}[.)])( +|$)/;
+const ORDERED_NUM = /^( *)(\d{1,9})([.)])/;
+
+interface DocLine {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function linesOf(doc: string): DocLine[] {
+  const out: DocLine[] = [];
+  let at = 0;
+  for (;;) {
+    const nl = doc.indexOf('\n', at);
+    const end = nl < 0 ? doc.length : nl;
+    out.push({ start: at, end, text: doc.slice(at, end) });
+    if (nl < 0) return out;
+    at = nl + 1;
+  }
+}
+
+const leadingSpaces = (t: string) => /^ */.exec(t)![0].length;
+
+/**
+ * Tab / Shift+Tab with the caret (or selection) on list items: nest the
+ * items under the one above, or lift them back out — or null when the first
+ * line is not a list item (or there is nothing to nest under), so the editor
+ * indents as it always did.
+ *
+ * Markdown only nests an item indented to its parent's *content* column:
+ * two spaces under `- `, but three under `2. ` and four under `10. `. A flat
+ * two-space indent under a number is a lazy continuation line, so Tab on
+ * "2. two" turned it into a second line of "1. one" (5.0 regression run,
+ * F-7). Ordered numbers follow on both levels: the nested item starts a new
+ * list at 1 (or continues the one it joins) and the outer list closes the
+ * gap; Shift+Tab does the reverse.
+ */
+export function listIndentEdit(doc: string, from: number, to: number, outdent: boolean): FormatEdit | null {
+  const lines = linesOf(doc);
+  const a = Math.max(0, Math.min(from, to, doc.length));
+  const b = Math.max(0, Math.min(Math.max(from, to), doc.length));
+  const first = lines.findIndex((l) => a <= l.end);
+  let last = lines.findIndex((l) => b <= l.end);
+  // A selection ending right after a newline does not include the next line.
+  if (b > a && last > first && b === lines[last].start) last--;
+  const head = LIST_ITEM.exec(lines[first].text);
+  if (!head || /^[ ]*\t/.test(lines[first].text)) return null;
+  const indent = head[1].length;
+
+  // Tab nests under the nearest item above at the same indent; Shift+Tab
+  // lifts out to the nearest item above at a smaller one.
+  let target = -1;
+  let parent = -1;
+  for (let i = first - 1; i >= 0; i--) {
+    const t = lines[i].text;
+    if (t.trim() === '') continue;
+    const m = LIST_ITEM.exec(t);
+    const ind = leadingSpaces(t);
+    if (!outdent && m && ind === indent) {
+      target = indent + m[2].length + Math.max(1, m[3].length);
+      parent = i;
+      break;
+    }
+    if (outdent && m && ind < indent) {
+      target = ind;
+      parent = i;
+      break;
+    }
+    // Shallower text ends the list; so does same-level text that is no item.
+    if (ind < indent || (!outdent && ind === indent && !m)) break;
+  }
+  if (target < 0) return null;
+  const delta = target - indent;
+
+  // Every touched line moves by the same amount, so a selected sub-list
+  // keeps its shape.
+  const touched = lines.slice(first, last + 1).map((l) => {
+    if (l.text.trim() === '') return l.text;
+    if (delta > 0) return ' '.repeat(delta) + l.text;
+    return l.text.slice(Math.min(leadingSpaces(l.text), -delta));
+  });
+
+  // The moved item's number at its new level: one past the sibling it now
+  // follows, or 1 when it starts a list there.
+  const num = ORDERED_NUM.exec(touched[0]);
+  if (num) {
+    let want = 1;
+    if (outdent) {
+      const pm = ORDERED_NUM.exec(lines[parent].text);
+      if (pm) want = Number(pm[2]) + 1;
+    } else {
+      for (let i = first - 1; i > parent; i--) {
+        const t = lines[i].text;
+        if (t.trim() === '') continue;
+        const ind = leadingSpaces(t);
+        if (ind < target) break;
+        const sm = ORDERED_NUM.exec(t);
+        if (ind === target && sm) {
+          want = Number(sm[2]) + 1;
+          break;
+        }
+      }
+    }
+    touched[0] = num[1] + want + num[3] + touched[0].slice(num[0].length);
+  }
+
+  const spanStart = lines[first].start;
+  const body = touched.join('\n');
+  let next = doc.slice(0, spanStart) + body + doc.slice(lines[last].end);
+  const spanEnd = spanStart + body.length;
+
+  // Lifting an item out of a nested list leaves the items after it as a list
+  // of their own under it, which starts at 1 again.
+  let renumberTo = spanEnd;
+  if (outdent) {
+    const after = linesOf(next).find((l) => l.start > spanEnd && l.text.trim() !== '');
+    const am = after && ORDERED_NUM.exec(after.text);
+    if (after && am && am[1].length === indent && am[2] !== '1') {
+      const numFrom = after.start + am[1].length;
+      next = next.slice(0, numFrom) + '1' + next.slice(numFrom + am[2].length);
+      renumberTo = after.end - (am[2].length - 1);
+    }
+  }
+  const renum = renumberChanges(next, spanStart, renumberTo);
+  const final = applyChanges(next, renum);
+
+  // The selection keeps its place in the text of each line.
+  const map = (p: number) => {
+    let lineStart = spanStart;
+    for (let i = first; i <= last; i++) {
+      const grow = touched[i - first].length - lines[i].text.length;
+      if (p <= lines[i].end) return lineStart + Math.max(0, p - lines[i].start + grow);
+      lineStart += touched[i - first].length + 1;
+    }
+    return p;
+  };
+  const after = (p: number) => {
+    for (const c of renum) if (c.to <= p) p += c.insert.length - (c.to - c.from);
+    return p;
+  };
+  const selFrom = after(map(a));
+  const selTo = after(map(b));
+  // One edit over the part that changed, so every editor applies it the same way.
+  let p = 0;
+  while (p < doc.length && p < final.length && doc[p] === final[p]) p++;
+  let q = 0;
+  while (q < doc.length - p && q < final.length - p && doc[doc.length - 1 - q] === final[final.length - 1 - q]) q++;
+  return { from: p, to: doc.length - q, insert: final.slice(p, final.length - q), selFrom, selTo };
 }

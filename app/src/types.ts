@@ -34,6 +34,9 @@ export interface Tab {
   // without edits because content drifts from savedContent).
   lineEnding?: 'lf' | 'crlf';
   showOutline?: boolean;
+  /** Last caret position (1-based line and column) reported by the editor.
+   *  Persisted with the tab so a relaunch puts the caret back. */
+  cursor?: { line: number; col: number };
 
   // Embedded browser tab (知识检索入口). Absent (undefined) means an ordinary
   // file tab — every persisted tab from an older build therefore migrates

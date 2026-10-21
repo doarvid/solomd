@@ -1,0 +1,35 @@
+// id: B5
+// title: shortcuts and native menu actions cannot close the note behind an open table editor
+const R = checks();
+await fresh('table-commands.md', '| Name | Qty |\n| --- | ---: |\n| Apple | 3 |\n');
+const active = tabs.activeId;
+V().dispatch({ selection: { anchor: doc().indexOf('Apple') + 1 } });
+act('editor.tableEditor');
+const cell = await waitFor(() => $('.tbl__cell[data-cell="0:0"]'));
+cell.textContent = 'Banana';
+cell.dispatchEvent(new InputEvent('input', { bubbles: true }));
+cell.focus();
+key(cell, 'w', { meta: true });
+await sleep(150);
+R.eq(tabs.activeId, active, 'close-tab shortcut leaves the note open behind the table');
+R.t(vis('[data-table-close="cancel"]'), 'shortcut asks about the working copy');
+key($('[data-table-close="cancel"]'), 'w', { meta: true });
+await sleep(100);
+R.eq(tabs.activeId, active, 'close-tab shortcut inside the confirmation cannot close the background note');
+$('[data-table-close="cancel"]')?.click();
+await sleep(100);
+act('file.closeTab');
+await sleep(150);
+R.eq(tabs.activeId, active, 'native menu close-tab leaves the note open behind the table');
+R.t(vis('[data-table-close="cancel"]'), 'native close asks about the working copy');
+$('[data-table-close="cancel"]')?.click();
+await sleep(100);
+const { emitTo } = await import('/node_modules/@tauri-apps/api/event.js');
+await emitTo('main', 'solomd://close-requested', 'main');
+await sleep(150);
+R.t(vis('[data-table-close="cancel"]'), 'window close asks before dropping table edits');
+R.eq(tabs.activeId, active, 'window stays alive with the original note');
+R.eq(cell.textContent, 'Banana', 'working copy retained');
+const { closeTableEditor } = await import('/src/lib/table-editor-bus.ts');
+closeTableEditor();
+return R.done();

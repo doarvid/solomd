@@ -22,11 +22,19 @@
   WriteRegStr SHCTX "Software\Classes\SoloMD.txt\DefaultIcon" "" '"$INSTDIR\icons\file_icon.ico",0'
   WriteRegStr SHCTX "Software\Classes\SoloMD.txt\shell\open\command" "" '"$INSTDIR\SoloMD.exe" "%1"'
 
+  ; #429 — Windows Explorer right-click "New -> Markdown Document (.md)"
+  WriteRegStr SHCTX "Software\Classes\.md\ShellNew" "NullFile" ""
+  WriteRegStr SHCTX "Software\Classes\.md\Markdown Document\ShellNew" "NullFile" ""
+  WriteRegStr SHCTX "Software\Classes\.md\SoloMD.md\ShellNew" "NullFile" ""
+
   ; Force Explorer to refresh icon cache (SHCNE_ASSOCCHANGED).
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  DeleteRegKey SHCTX "Software\Classes\.md\ShellNew"
+  DeleteRegKey SHCTX "Software\Classes\.md\Markdown Document\ShellNew"
+  DeleteRegKey SHCTX "Software\Classes\.md\SoloMD.md\ShellNew"
   DeleteRegKey SHCTX "Software\Classes\SoloMD.md"
   DeleteRegKey SHCTX "Software\Classes\SoloMD.txt"
 !macroend

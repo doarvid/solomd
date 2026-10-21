@@ -1,0 +1,9 @@
+Le formule non vengono più tagliate in basso nell’anteprima, nella vista divisa e nelle esportazioni.
+
+Le tabelle larghe vanno a capo dentro la pagina nell’esportazione PDF, stampa, HTML e immagine.
+
+Nuovi comandi: alzare o abbassare il livello di un titolo, riportare un titolo a paragrafo, selezionare parola, selezionare riga, riaprire una scheda chiusa.
+
+Barra degli strumenti più ordinata: Nuovo, Apri, Esporta, Inserisci e le modalità di visualizzazione ora sono menu.
+
+Grazie al nostro tester 张工, dai cui accurati report sono nate molte di queste correzioni.

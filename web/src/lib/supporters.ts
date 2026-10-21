@@ -1,5 +1,5 @@
 /**
- * The supporter lists — sponsors and promoters — from the one file every
+ * The supporter lists — sponsors, promoters and testers — from the one file every
  * surface reads (public/sponsors.json: this site, the README script, the
  * app's About dialog).
  */
@@ -27,10 +27,19 @@ export interface Promoter {
   quote?: string;
 }
 
+export interface Tester {
+  name: string;
+  since: string;
+  /** What they tested, per language. */
+  contribution: { en: string; zh: string };
+  github?: string;
+}
+
 export const sponsors: Sponsor[] = (data as { sponsors: Sponsor[] }).sponsors ?? [];
 export const promoters: Promoter[] = ((data as { promoters?: Promoter[] }).promoters ?? [])
   .slice()
   .sort((a, b) => (a.since < b.since ? 1 : -1));
+export const testers: Tester[] = (data as { testers?: Tester[] }).testers ?? [];
 export const featuredPromoters = promoters.filter((p) => p.featured && p.quote);
 
 export const PROMOTE_ISSUE_URL =

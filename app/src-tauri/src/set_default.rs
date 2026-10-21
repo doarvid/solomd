@@ -174,6 +174,17 @@ mod windows {
                 {
                     owp.set_value("SoloMD.md", &"").ok();
                 }
+                // #429 — Enable Windows Explorer right-click "New -> Markdown Document" for .md
+                if *ext == ".md" {
+                    if let Ok((sn, _)) = hkcu.create_subkey(format!("{}\\ShellNew", ext_key_path)) {
+                        sn.set_value("NullFile", &"").ok();
+                    }
+                    if let Ok((sn_prog, _)) =
+                        hkcu.create_subkey(format!("{}\\SoloMD.md\\ShellNew", ext_key_path))
+                    {
+                        sn_prog.set_value("NullFile", &"").ok();
+                    }
+                }
                 ok_count += 1;
             }
         }

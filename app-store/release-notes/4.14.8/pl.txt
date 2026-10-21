@@ -1,0 +1,9 @@
+Wzory nie są już ucinane od dołu w podglądzie, widoku dzielonym i eksportach.
+
+Szerokie tabele zawijają się w obrębie strony przy eksporcie do PDF, druku, HTML i obrazu.
+
+Nowe polecenia: podnieś lub obniż poziom nagłówka, zamień nagłówek z powrotem w akapit, zaznacz słowo, zaznacz wiersz, przywróć zamkniętą kartę.
+
+Uporządkowany pasek narzędzi: Nowy, Otwórz, Eksportuj, Wstaw i tryby widoku są teraz menu.
+
+Dziękujemy naszemu testerowi 张工 — wiele z tych poprawek wynika z jego dokładnych zgłoszeń.

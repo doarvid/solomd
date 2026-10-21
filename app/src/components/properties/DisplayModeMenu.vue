@@ -8,9 +8,9 @@
 import { computed } from 'vue';
 import { DsDropdown, type DsDropdownItem } from '../../ui';
 import { useI18n } from '../../i18n';
+import Icons from '../Icons.vue';
 import {
   DISPLAY_MODES,
-  DISPLAY_MODE_LABELS,
   coerceForMode,
   type DisplayMode,
 } from '../../lib/property-types';
@@ -21,7 +21,7 @@ const props = defineProps<{ effectiveMode: DisplayMode; value: unknown }>();
 const emit = defineEmits<{ recast: [DisplayMode] }>();
 
 const items = computed<DsDropdownItem[]>(() =>
-  DISPLAY_MODES.map((m) => ({ value: m, label: DISPLAY_MODE_LABELS[m] })),
+  DISPLAY_MODES.map((m) => ({ value: m, label: t(`inspector.modes.${m}`) })),
 );
 
 function onSelect(mode: string) {
@@ -38,8 +38,8 @@ defineExpose({ coerceForMode });
   <DsDropdown :items="items" align="start" @select="onSelect">
     <template #trigger>
       <button type="button" class="prop-mode-btn" :title="t('inspector.changeType')" :aria-label="t('inspector.changeType')">
-        <span class="prop-mode-btn__label">{{ DISPLAY_MODE_LABELS[effectiveMode] }}</span>
-        <span class="prop-mode-btn__chevron">▾</span>
+        <span class="prop-mode-btn__label">{{ t(`inspector.modes.${effectiveMode}`) }}</span>
+        <Icons class="prop-mode-btn__chevron" name="chevron-down" :size="10" />
       </button>
     </template>
     <template #item="{ item }">
@@ -55,18 +55,18 @@ defineExpose({ coerceForMode });
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  height: 18px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--r-xs);
   background: transparent;
-  border: none;
-  color: var(--text-muted);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11px;
   cursor: pointer;
-  padding: 1px 3px;
-  border-radius: var(--r-sm);
 }
 .prop-mode-btn:hover {
-  background: var(--bg-hover);
+  background: var(--fill-1);
   color: var(--text);
 }
 .prop-mode-btn:focus-visible {
@@ -74,13 +74,13 @@ defineExpose({ coerceForMode });
   box-shadow: var(--ring);
 }
 .prop-mode-btn__chevron {
-  font-size: 8px;
+  flex: 0 0 auto;
 }
 .prop-mode-item {
   display: block;
 }
 .prop-mode-item--active {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 </style>

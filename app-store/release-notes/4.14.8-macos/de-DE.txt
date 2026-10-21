@@ -1,0 +1,11 @@
+Menüs neu geordnet in Ablage, Bearbeiten, Absatz, Format, Navigieren, Darstellung und Hilfe – jede Funktion hat einen Menüeintrag, und die Menüs zeigen das Kürzel, das du tatsächlich verwendest.
+
+Die Symbolleiste passt in eine Zeile: Neu, Öffnen, Export, Einfügen, KI und die Ansichtsmodi sind jetzt Menüs.
+
+Neues Kürzel-Preset „Typora / Word“ sowie neue Befehle für alle: Überschriftenebene erhöhen oder senken, Überschrift wieder zu Absatz, Wort oder Zeile auswählen, Wort löschen, geschlossenen Tab wieder öffnen, F8 Fokusmodus, F9 Schreibmaschinenmodus.
+
+In der geteilten Ansicht lässt sich die Trennlinie ziehen, um Editor und Vorschau anzupassen.
+
+Korrekturen: Formeln werden unten nicht mehr abgeschnitten; breite Tabellen brechen in PDF und Druck um; Enter im Vim-Normalmodus springt eine Zeile nach unten statt eine Zeile einzufügen; ein Klick in eine Auswahl hebt sie wieder auf.
+
+Danke an unseren Tester 张工, dessen sorgfältige Berichte zu vielen dieser Änderungen geführt haben.

@@ -1,0 +1,9 @@
+Formules worden onderaan niet meer afgekapt in voorbeeld, gesplitste weergave en exports.
+
+Brede tabellen lopen binnen de pagina door bij export naar PDF, afdrukken, HTML en afbeelding.
+
+Nieuwe opdrachten: kopniveau verhogen of verlagen, kop terug naar alinea, woord selecteren, regel selecteren, gesloten tabblad heropenen.
+
+Opgeruimde werkbalk: Nieuw, Openen, Exporteren, Invoegen en de weergavemodi zijn nu menu’s.
+
+Dank aan onze tester 张工, wiens zorgvuldige meldingen tot veel van deze verbeteringen leidden.

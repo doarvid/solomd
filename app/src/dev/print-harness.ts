@@ -13,7 +13,8 @@
  * Query params: `?rows=N` table length (default 120), `?pdf=a4` to apply a
  * user-touched A4 page setup instead of the webview default, `?win=1` to add
  * the Windows header/footer-suppressing page frame, `?toc=1` for the
- * table-of-contents page (#347).
+ * table-of-contents page (#347), `?fixture=wide` for a table wider than the
+ * page (#370).
  * `window.__printHarness` reports the overlay's height when ready.
  */
 import '../styles/cjk-font.css';
@@ -38,11 +39,14 @@ import {
   printableBox,
   withPrintPagination,
 } from '../lib/print-pages';
+import { wideTableFixture } from './wide-table-fixture';
 
 const params = new URLSearchParams(location.search);
 const rows = Number(params.get('rows') || 120);
 
 function fixture(): string {
+  // `?fixture=wide` — a table wider than the page (#370).
+  if (params.get('fixture') === 'wide') return wideTableFixture();
   const parts: string[] = ['# 打印分页测试 / Print pagination\n'];
   for (let i = 1; i <= 6; i++) {
     parts.push(

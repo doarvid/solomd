@@ -15,6 +15,173 @@ const paypalUrl = 'https://paypal.me/solomdapp';
 // QR images live in /public/sponsor/.
 const alipayQr = '/sponsor/alipay-qr.jpg';
 const wechatQr = '/sponsor/wechat-qr.jpg';
+
+interface InAppCopy {
+  badgeLabel: string;
+  heading: string;
+  desc: string;
+  tiers: { icon: string; name: string; price: string }[];
+  footnote: string;
+}
+
+const IN_APP_COPY: Record<Lang, InAppCopy> = {
+  zh: {
+    badgeLabel: '✨ 支持者徽章',
+    heading: '应用内自愿赞赏与「支持者」徽章（macOS / iOS / Android）',
+    desc: 'SoloMD 所有核心功能 100% 永久免费、无广告、无订阅墙。在 Mac App Store、iOS App Store 与 Google Play 版本中，你可以在「设置 / 关于 → 支持 SoloMD」中选择任意一档一次性自愿打赏，并在应用内永久点亮专属「✨ 支持者」徽章：',
+    tiers: [
+      { icon: '☕', name: '请喝杯咖啡', price: '¥8 / $0.99' },
+      { icon: '🍜', name: '请吃顿工作餐', price: '¥28 / $2.99' },
+      { icon: '🚀', name: '强力支持', price: '¥68 / $9.99' },
+    ],
+    footnote: '一次性自愿支持（非自动续费订阅）· 支持随时跨设备恢复「✨ 支持者」徽章',
+  },
+  en: {
+    badgeLabel: '✨ Supporter Badge',
+    heading: 'In-App Tip Jar & "✨ Supporter" Badge (macOS / iOS / Android)',
+    desc: '100% of SoloMD features are free forever — no paywalls, no ads, no subscriptions. In the Mac App Store, iOS App Store, and Google Play builds, you can also support independent development directly inside the app (Settings / About → Support SoloMD) with 3 optional one-time tip tiers and permanently unlock the exclusive "✨ Supporter" badge:',
+    tiers: [
+      { icon: '☕', name: 'Buy a Coffee', price: '$0.99' },
+      { icon: '🍜', name: 'Buy a Lunch', price: '$2.99' },
+      { icon: '🚀', name: 'Generous Support', price: '$9.99' },
+    ],
+    footnote: 'One-time voluntary tip (no auto-renewal) · Restore your "✨ Supporter" badge anytime across devices',
+  },
+  ja: {
+    badgeLabel: '✨ サポーターバッジ',
+    heading: 'アプリ内チップと「✨ サポーター」バッジ（macOS / iOS / Android）',
+    desc: 'SoloMD の全機能は永久に 100% 無料（広告・サブスク・機能制限なし）です。Mac App Store / iOS App Store / Google Play 版では、「設定 / 概要 → SoloMD を応援」から 3 段階の買い切りチップで個人開発を応援でき、アプリ内で専用の「✨ サポーター」バッジが永久に点灯します：',
+    tiers: [
+      { icon: '☕', name: 'コーヒーを1杯おごる', price: '$0.99' },
+      { icon: '🍜', name: 'ランチをおごる', price: '$2.99' },
+      { icon: '🚀', name: '全力で応援する', price: '$9.99' },
+    ],
+    footnote: '1回限りの任意チップ（自動更新なし）・いつでもバッジを復元可能',
+  },
+  ko: {
+    badgeLabel: '✨ 서포터 배지',
+    heading: '인앱 자율 후원 및 「✨ 서포터」 배지 (macOS / iOS / Android)',
+    desc: 'SoloMD의 모든 기능은 평생 100% 무료(광고·구독·기능 제한 없음)입니다. Mac App Store, iOS App Store 및 Google Play 버전에서는 앱 내 「설정 / 정보 → SoloMD 후원」에서 3가지 일회성 후원으로 1인 개발을 응원하고 전용 「✨ 서포터」 배지를 영구적으로 활성화할 수 있습니다:',
+    tiers: [
+      { icon: '☕', name: '커피 한 잔 후원하기', price: '$0.99' },
+      { icon: '🍜', name: '든든한 식사 후원하기', price: '$2.99' },
+      { icon: '🚀', name: '든든한 슈퍼 후원하기', price: '$9.99' },
+    ],
+    footnote: '일회성 자율 후원(자동 결제 없음) · 기기 간 배지 복원 지원',
+  },
+  de: {
+    badgeLabel: '✨ Unterstützer-Abzeichen',
+    heading: 'Freiwilliges In-App-Trinkgeld & „✨ Unterstützer“-Abzeichen (macOS / iOS / Android)',
+    desc: 'Alle Funktionen von SoloMD sind dauerhaft zu 100 % kostenlos – ohne Paywalls, Werbung oder Abos. In den Versionen aus dem Mac App Store, iOS App Store und Google Play kannst du die unabhängige Entwicklung direkt in der App mit 3 einmaligen Trinkgeld-Stufen unterstützen und das exklusive „✨ Unterstützer“-Abzeichen dauerhaft freischalten:',
+    tiers: [
+      { icon: '☕', name: 'Einen Kaffee spendieren', price: '$0.99' },
+      { icon: '🍜', name: 'Ein Mittagessen spendieren', price: '$2.99' },
+      { icon: '🚀', name: 'Großzügige Unterstützung', price: '$9.99' },
+    ],
+    footnote: 'Einmaliges freiwilliges Trinkgeld (kein Abo) · Abzeichen jederzeit wiederherstellbar',
+  },
+  fr: {
+    badgeLabel: '✨ Badge Supporter',
+    heading: 'Pourboire intégré et badge « ✨ Supporter » (macOS / iOS / Android)',
+    desc: 'Toutes les fonctionnalités de SoloMD sont 100 % gratuites à vie — sans abonnement, sans publicité ni restriction. Dans les versions Mac App Store, iOS App Store et Google Play, vous pouvez soutenir le développement indépendant directement dans l’application via 3 options de don unique et débloquer définitivement le badge « ✨ Supporter » :',
+    tiers: [
+      { icon: '☕', name: 'Offrir un café', price: '$0.99' },
+      { icon: '🍜', name: 'Offrir un repas', price: '$2.99' },
+      { icon: '🚀', name: 'Soutien généreux', price: '$9.99' },
+    ],
+    footnote: 'Don unique volontaire (sans renouvellement automatique) · Restauration du badge à tout moment',
+  },
+  es: {
+    badgeLabel: '✨ Insignia de Colaborador',
+    heading: 'Propina voluntaria en la app e insignia «✨ Colaborador» (macOS / iOS / Android)',
+    desc: 'Todas las funciones de SoloMD son 100 % gratuitas para siempre, sin suscripciones ni anuncios. En las versiones de Mac App Store, iOS App Store y Google Play, puedes apoyar el desarrollo independiente desde la app con 3 opciones de propina única y desbloquear permanentemente la insignia «✨ Colaborador»:',
+    tiers: [
+      { icon: '☕', name: 'Invitar a un café', price: '$0.99' },
+      { icon: '🍜', name: 'Invitar a un almuerzo', price: '$2.99' },
+      { icon: '🚀', name: 'Apoyo generoso', price: '$9.99' },
+    ],
+    footnote: 'Propina única voluntaria (sin renovación automática) · Restaura tu insignia en cualquier momento',
+  },
+  pt: {
+    badgeLabel: '✨ Emblema de Apoiador',
+    heading: 'Apoio voluntário no app e emblema «✨ Apoiador» (macOS / iOS / Android)',
+    desc: 'Todos os recursos do SoloMD são 100% gratuitos para sempre — sem assinaturas ou anúncios. Nas versões da Mac App Store, iOS App Store e Google Play, você pode apoiar o desenvolvimento independente diretamente no app com 3 opções de contribuição única e desbloquear permanentemente o emblema «✨ Apoiador»:',
+    tiers: [
+      { icon: '☕', name: 'Pagar um café', price: '$0.99' },
+      { icon: '🍜', name: 'Pagar um almoço', price: '$2.99' },
+      { icon: '🚀', name: 'Apoio generoso', price: '$9.99' },
+    ],
+    footnote: 'Contribuição única voluntária (sem renovação automática)',
+  },
+  it: {
+    badgeLabel: '✨ Badge Sostenitore',
+    heading: 'Mancia volontaria in-app e badge «✨ Sostenitore» (macOS / iOS / Android)',
+    desc: 'Tutte le funzionalità di SoloMD sono gratuite al 100% per sempre. Nelle versioni Mac App Store, iOS App Store e Google Play puoi sostenere lo sviluppo indipendente direttamente nell’app con 3 opzioni di donazione singola e sbloccare per sempre il badge «✨ Sostenitore»:',
+    tiers: [
+      { icon: '☕', name: 'Offri un caffè', price: '$0.99' },
+      { icon: '🍜', name: 'Offri un pranzo', price: '$2.99' },
+      { icon: '🚀', name: 'Supporto generoso', price: '$9.99' },
+    ],
+    footnote: 'Donazione singola volontaria (nessun abbonamento)',
+  },
+  pl: {
+    badgeLabel: '✨ Odznaka Wspierającego',
+    heading: 'Dobrowolne napiwki w aplikacji i odznaka „✨ Wspierający” (macOS / iOS / Android)',
+    desc: 'Wszystkie funkcje SoloMD są w 100% darmowe na zawsze. W wersjach z Mac App Store, iOS App Store i Google Play możesz wesprzeć niezależny rozwój bezpośrednio w aplikacji dzięki 3 jednorazowym opcjom wsparcia i na stałe odblokować odznakę „✨ Wspierający”:',
+    tiers: [
+      { icon: '☕', name: 'Postaw kawę', price: '$0.99' },
+      { icon: '🍜', name: 'Postaw lunch', price: '$2.99' },
+      { icon: '🚀', name: 'Hojne wsparcie', price: '$9.99' },
+    ],
+    footnote: 'Jednorazowe dobrowolne wsparcie (bez subskrypcji)',
+  },
+  nl: {
+    badgeLabel: '✨ Supporter-badge',
+    heading: 'Vrijwillige in-app fooi & ‘✨ Supporter’-badge (macOS / iOS / Android)',
+    desc: 'Alle functies van SoloMD zijn 100% gratis voor altijd. In de Mac App Store-, iOS App Store- en Google Play-versies kun je onafhankelijke ontwikkeling rechtstreeks in de app steunen met 3 eenmalige fooi-opties en permanent de ‘✨ Supporter’-badge ontgrendelen:',
+    tiers: [
+      { icon: '☕', name: 'Koop een koffie', price: '$0.99' },
+      { icon: '🍜', name: 'Koop een lunch', price: '$2.99' },
+      { icon: '🚀', name: 'Royale steun', price: '$9.99' },
+    ],
+    footnote: 'Eenmalige vrijwillige bijdrage (geen abonnement)',
+  },
+  tr: {
+    badgeLabel: '✨ Destekçi Rozeti',
+    heading: 'Uygulama İçi Gönüllü Destek ve “✨ Destekçi” Rozeti (macOS / iOS / Android)',
+    desc: 'SoloMD’nin tüm özellikleri sonsuza dek %100 ücretsizdir. Mac App Store, iOS App Store ve Google Play sürümlerinde uygulama içinden 3 tek seferlik destek seçeneğiyle bağımsız geliştirmeyi destekleyebilir ve “✨ Destekçi” rozetini kalıcı olarak açabilirsiniz:',
+    tiers: [
+      { icon: '☕', name: 'Bir Kahve Ismarla', price: '$0.99' },
+      { icon: '🍜', name: 'Bir Öğle Yemeği Ismarla', price: '$2.99' },
+      { icon: '🚀', name: 'Güçlü Destek', price: '$9.99' },
+    ],
+    footnote: 'Tek seferlik gönüllü destek (otomatik yenilenen abonelik yoktur)',
+  },
+  sv: {
+    badgeLabel: '✨ Supporter-märke',
+    heading: 'Frivillig dricks i appen och ”✨ Supporter”-märke (macOS / iOS / Android)',
+    desc: 'Alla funktioner i SoloMD är 100 % gratis för alltid. I versionerna från Mac App Store, iOS App Store och Google Play kan du stödja oberoende utveckling direkt i appen med 3 engångsalternativ och låsa upp märket ”✨ Supporter” permanent:',
+    tiers: [
+      { icon: '☕', name: 'Bjud på en kaffe', price: '$0.99' },
+      { icon: '🍜', name: 'Bjud på en lunch', price: '$2.99' },
+      { icon: '🚀', name: 'Generöst stöd', price: '$9.99' },
+    ],
+    footnote: 'Frivilligt engångsstöd (ingen prenumeration)',
+  },
+  uk: {
+    badgeLabel: '✨ Значок прихильника',
+    heading: 'Добровільна підтримка в додатку та значок «✨ Прихильник» (macOS / iOS / Android)',
+    desc: 'Усі функції SoloMD на 100% безкоштовні назавжди. У версіях з Mac App Store, iOS App Store та Google Play ви можете підтримати незалежну розробку безпосередньо в додатку за допомогою 3 одноразових варіантів і назавжди відкрити значок «✨ Прихильник»:',
+    tiers: [
+      { icon: '☕', name: 'Пригостити кавою', price: '$0.99' },
+      { icon: '🍜', name: 'Пригостити обідом', price: '$2.99' },
+      { icon: '🚀', name: 'Щедра підтримка', price: '$9.99' },
+    ],
+    footnote: 'Одноразовий добровільний внесок (без підписки)',
+  },
+};
+
+const inApp = IN_APP_COPY[lang] || IN_APP_COPY.en;
 ---
 
 <section id="sponsor">
@@ -22,6 +189,24 @@ const wechatQr = '/sponsor/wechat-qr.jpg';
     <div class="sponsor__icon">❤️</div>
     <h2>{tr.sponsor.heading}</h2>
     <p class="lead">{tr.sponsor.lead}</p>
+
+    <div class="inapp-supporter">
+      <div class="inapp-supporter__head">
+        <span class="inapp-supporter__pill">{inApp.badgeLabel}</span>
+        <h3>{inApp.heading}</h3>
+      </div>
+      <p class="inapp-supporter__desc">{inApp.desc}</p>
+      <div class="inapp-supporter__tiers">
+        {inApp.tiers.map((tier) => (
+          <div class="inapp-tier">
+            <span class="inapp-tier__icon" aria-hidden="true">{tier.icon}</span>
+            <span class="inapp-tier__name">{tier.name}</span>
+            <span class="inapp-tier__price">{tier.price}</span>
+          </div>
+        ))}
+      </div>
+      <p class="inapp-supporter__note">{inApp.footnote}</p>
+    </div>
 
     <div class="sponsor__grid">
       <!-- GitHub Sponsors -->
@@ -146,7 +331,78 @@ const wechatQr = '/sponsor/wechat-qr.jpg';
     margin-bottom: 8px;
   }
   .sponsor__inner .lead {
-    margin: 16px auto 40px;
+    margin: 16px auto 32px;
+  }
+
+  .inapp-supporter {
+    background: var(--bg-elev);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+    border-radius: 16px;
+    padding: 24px 28px;
+    margin: 0 auto 28px;
+    text-align: left;
+  }
+  .inapp-supporter__head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .inapp-supporter__pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--text);
+  }
+  .inapp-supporter__head h3 {
+    margin: 0;
+    font-size: 1.08rem;
+  }
+  .inapp-supporter__desc {
+    margin: 0 0 16px;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--text-muted);
+  }
+  .inapp-supporter__tiers {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .inapp-tier {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .inapp-tier__icon {
+    font-size: 20px;
+  }
+  .inapp-tier__name {
+    font-size: 14px;
+    font-weight: 600;
+    flex: 1;
+  }
+  .inapp-tier__price {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .inapp-supporter__note {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-faint);
   }
 
   .sponsor__grid {

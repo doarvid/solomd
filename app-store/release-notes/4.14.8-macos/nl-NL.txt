@@ -1,0 +1,11 @@
+Menu’s opnieuw ingedeeld in Archief, Wijzig, Alinea, Opmaak, Navigeer, Weergave en Help — elke functie heeft een menu-item, en de menu’s tonen de sneltoets die je echt gebruikt.
+
+De werkbalk past op één rij: Nieuw, Openen, Exporteren, Invoegen, AI en de weergavemodi zijn nu menu’s.
+
+Nieuwe sneltoetsvoorinstelling “Typora / Word”, plus nieuwe opdrachten voor iedereen: kopniveau verhogen of verlagen, kop terug naar alinea, woord of regel selecteren, woord verwijderen, gesloten tabblad heropenen, F8 focusmodus, F9 typemachinemodus.
+
+Sleep in de gesplitste weergave de scheidingslijn om editor en voorbeeld te vergroten of te verkleinen.
+
+Verbeteringen: formules worden onderaan niet meer afgekapt; brede tabellen lopen door in PDF en afdrukken; Enter in Vim-normale modus gaat een regel omlaag in plaats van er een in te voegen; klikken in een selectie heft die weer op.
+
+Dank aan onze tester 张工, wiens zorgvuldige meldingen tot veel van deze wijzigingen leidden.

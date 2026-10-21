@@ -1,0 +1,9 @@
+Las fórmulas ya no se cortan por abajo en la vista previa, la vista dividida y las exportaciones.
+
+Las tablas anchas se ajustan dentro de la página al exportar a PDF, imprimir, HTML e imagen.
+
+Nuevos comandos: subir o bajar el nivel de un título, convertir un título en párrafo, seleccionar palabra, seleccionar línea, reabrir una pestaña cerrada.
+
+Barra de herramientas más ordenada: Nuevo, Abrir, Exportar, Insertar y los modos de vista ahora son menús.
+
+Gracias a nuestro probador 张工, cuyos informes detallados llevaron a muchas de estas correcciones.

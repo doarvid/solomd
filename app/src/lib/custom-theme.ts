@@ -92,6 +92,49 @@ function applyCss(css: string) {
 }
 
 export function removeCustomTheme() {
+  if (typeof document === 'undefined') return;
   const el = document.getElementById(STYLE_ID);
   if (el) el.remove();
 }
+
+/**
+ * #439 — Return the currently active custom CSS text (injected in
+ * `<style id="solomd-custom-theme">`), or `""` when no custom theme is active.
+ */
+export function getActiveCustomCss(): string {
+  if (typeof document === 'undefined') return '';
+  const el = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
+  return el?.textContent?.trim() ?? '';
+}
+
+/**
+ * #439 — Prepare custom CSS for an export/print container (`containerSelector`,
+ * e.g. `.pdf-page` or `#solomd-print-overlay, .solomd-print-content`).
+ *
+ * Custom themes often define CSS variables or base typography on `:root` or
+ * `body`, while PDF/print containers re-seed variables on their own wrapper
+ * (`#solomd-print-overlay.print-theme-light`, `.pdf-page`). Mirroring `:root` /
+ * `html` / `body` rule blocks onto `containerSelector` ensures both CSS custom
+ * properties and direct typography overrides take effect in exported HTML/PDF.
+ */
+export function buildExportCustomCss(rawCss: string, containerSelector?: string): string {
+  const trimmed = rawCss.trim();
+  if (!trimmed) return '';
+  if (!containerSelector) return trimmed;
+
+  const mirroredRules: string[] = [];
+  const RULE_RE = /([^{}@]+)\{([^{}]*)\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = RULE_RE.exec(trimmed))) {
+    const sel = match[1].trim();
+    const decls = match[2].trim();
+    if (!decls) continue;
+    if (/(^|[,\s])(:root|html|body)([\s,:\[.]|$)/i.test(sel)) {
+      mirroredRules.push(`${containerSelector} { ${decls} }`);
+    }
+  }
+  return mirroredRules.length > 0
+    ? `${trimmed}\n${mirroredRules.join('\n')}`
+    : trimmed;
+}
+

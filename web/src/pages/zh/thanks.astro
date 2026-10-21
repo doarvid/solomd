@@ -3,7 +3,7 @@ import Layout from '../../layouts/Layout.astro';
 import Header from '../../components/Header.astro';
 import Footer from '../../components/Footer.astro';
 import thanksData from '../../data/thanks.json';
-import { sponsors, promoters } from '../../lib/supporters';
+import { sponsors, promoters, testers } from '../../lib/supporters';
 
 const lang = 'zh' as const;
 
@@ -48,6 +48,18 @@ const platformLabel: Record<Donor['platform'], string> = {
           <ul class="supporters__list">
             {sponsors.map((x) => (
               <li>{x.url ? <a href={x.url} target="_blank" rel="noopener">{x.name}</a> : x.name}<span class="supporters__since">{x.since}</span></li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {testers.length > 0 && (
+        <section class="supporters">
+          <h2>测试者</h2>
+          <p class="supporters__lead">细致测试 SoloMD、提交详细问题报告的朋友——很多修复都是从他们的报告开始的。</p>
+          <ul class="supporters__list">
+            {testers.map((x) => (
+              <li>{x.github ? <a href={`https://github.com/${x.github}`} target="_blank" rel="noopener">{x.name}</a> : <strong>{x.name}</strong>}<span class="supporters__since">{x.since}</span><p class="supporters__lead">{x.contribution.zh}</p></li>
             ))}
           </ul>
         </section>

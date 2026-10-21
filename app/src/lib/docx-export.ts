@@ -4,6 +4,7 @@
  *
  * Supports: headings (h1-h6), paragraphs, bold, italic, inline code, links,
  * fenced code blocks, ordered/bullet lists, blockquotes, horizontal rules,
+ * math (as LaTeX source),
  * tables, and embedded images (local + remote).
  */
 
@@ -273,6 +274,11 @@ function buildRuns(inlineToken: Token, style: RunStyle = {}): (TextRun | ImageRu
       case 'code_inline':
         push(new TextRun({ text: tok.content, ...toRunOpts({ ...cur, code: true }) }));
         break;
+      case 'math_inline':
+        // LaTeX source in a math font, so it reads as a formula rather than
+        // as stray prose (Word has no KaTeX).
+        push(new TextRun({ text: tok.content, ...toRunOpts(cur), font: MATH_FONT }));
+        break;
       case 'link_open': {
         const href = tok.attrGet('href') ?? '';
         pendingLink = { href, runs: [] };
@@ -299,6 +305,13 @@ function buildRuns(inlineToken: Token, style: RunStyle = {}): (TextRun | ImageRu
         break;
       }
       case 'html_inline': {
+        // A task item's checkbox (markdown.ts task_lists rule): Word has no
+        // checkbox run, so write the ballot glyph — readable in Word, and
+        // what the DOCX importer turns back into `- [ ]` / `- [x]`.
+        if (/task-list-item-checkbox/.test(tok.content || '')) {
+          push(new TextRun({ text: /\bchecked\b/.test(tok.content) ? '☑ ' : '☐ ', ...toRunOpts(cur) }));
+          break;
+        }
         const srcs = htmlImageSrcs(tok.content || '');
         for (const src of srcs) {
           const img = srcImages.get(src);
@@ -311,6 +324,21 @@ function buildRuns(inlineToken: Token, style: RunStyle = {}): (TextRun | ImageRu
     }
   }
   return out;
+}
+
+const MATH_FONT = 'Cambria Math';
+
+/** Display math as its LaTeX source: centred, one line per source line. */
+function mathBlockParagraph(latex: string): Paragraph {
+  const lines = latex.trim().split('\n');
+  return new Paragraph({
+    children: lines.flatMap((line, idx) => [
+      ...(idx > 0 ? [new TextRun({ break: 1 })] : []),
+      new TextRun({ text: line, font: MATH_FONT }),
+    ]),
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 160, after: 160 },
+  });
 }
 
 function toRunOpts(s: RunStyle) {
@@ -353,10 +381,18 @@ function findMatchingClose(tokens: Token[], start: number, openType: string, clo
   return tokens.length - 1;
 }
 
+/**
+ * #427 — `docx` groups paragraphs into a single Word `<w:num>` unless each
+ * `<ol>` carries its own `instance` number. Without `instance`, every ordered
+ * list in the entire document shares `ordered-list-undefined` and continues
+ * numbering from the previous section (`1, 2, 3` → `4, 5` → … → `45`).
+ */
+let nextOrderedListInstance = 0;
+
 async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: string): Promise<BlockChild[]> {
   const out: BlockChild[] = [];
   let i = 0;
-  const listStack: { type: 'bullet' | 'ordered'; index: number }[] = [];
+  const listStack: { type: 'bullet' | 'ordered'; instance: number; itemParagraphs: number }[] = [];
 
   while (i < tokens.length) {
     const tok = tokens[i];
@@ -379,6 +415,10 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
         const inline = tokens[i + 1];
         i += 3;
         const isInList = listStack.length > 0;
+        const topList = isInList ? listStack[listStack.length - 1] : null;
+        const listLevel = Math.min(Math.max(listStack.length - 1, 0), 8);
+        const isFirstListParagraph = topList ? topList.itemParagraphs === 0 : false;
+        if (topList) topList.itemParagraphs += 1;
 
         // Check if this paragraph contains a standalone image (image-only paragraph)
         if (inline && isImageOnlyParagraph(inline)) {
@@ -418,15 +458,18 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
           new Paragraph({
             children: buildRuns(inline),
             spacing: isInList ? { before: 60, after: 60 } : { before: 120, after: 120 },
-            ...(isInList && {
+            ...(isInList && isFirstListParagraph && topList && {
               numbering:
-                listStack[listStack.length - 1].type === 'ordered'
-                  ? { reference: 'ordered-list', level: Math.min(listStack.length - 1, 8) }
+                topList.type === 'ordered'
+                  ? { reference: 'ordered-list', level: listLevel, instance: topList.instance }
                   : undefined,
               bullet:
-                listStack[listStack.length - 1].type === 'bullet'
-                  ? { level: Math.min(listStack.length - 1, 8) }
+                topList.type === 'bullet'
+                  ? { level: listLevel }
                   : undefined,
+            }),
+            ...(isInList && !isFirstListParagraph && {
+              indent: { left: 720 * (listLevel + 1) },
             }),
           })
         );
@@ -518,6 +561,15 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
         i += 1;
         break;
       }
+      case 'math_block':
+      case 'math_block_eqno': {
+        // Word has no KaTeX: keep display math as its LaTeX source, one
+        // centred Cambria Math line per source line, rather than dropping it
+        // (same choice as the CLI exporter, scripts/solomd-export.mjs).
+        out.push(mathBlockParagraph(tok.content || ''));
+        i += 1;
+        break;
+      }
       case 'hr':
         out.push(
           new Paragraph({
@@ -587,11 +639,11 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
         break;
       }
       case 'bullet_list_open':
-        listStack.push({ type: 'bullet', index: 0 });
+        listStack.push({ type: 'bullet', instance: 0, itemParagraphs: 0 });
         i += 1;
         break;
       case 'ordered_list_open':
-        listStack.push({ type: 'ordered', index: 0 });
+        listStack.push({ type: 'ordered', instance: ++nextOrderedListInstance, itemParagraphs: 0 });
         i += 1;
         break;
       case 'bullet_list_close':
@@ -600,6 +652,11 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
         i += 1;
         break;
       case 'list_item_open':
+        if (listStack.length > 0) {
+          listStack[listStack.length - 1].itemParagraphs = 0;
+        }
+        i += 1;
+        break;
       case 'list_item_close':
         i += 1;
         break;
@@ -747,6 +804,7 @@ export async function markdownToDocxBlob(
   plantumlServer: string | null = null,
 ): Promise<Blob> {
   srcImages.clear();
+  nextOrderedListInstance = 0;
   plantumlServerForRun = plantumlServer;
   // Apply the same leniency preprocessors the HTML render path uses (malformed
   // table delimiters, list re-indent, inline-HTML blocks) so DOCX export
@@ -776,6 +834,7 @@ export async function markdownToDocxBlob(
     );
   }
 
+  const orderedFormats = ['decimal', 'lowerLetter', 'lowerRoman'] as const;
   const doc = new Document({
     creator: 'SoloMD',
     title: tpl.title || _title,
@@ -801,11 +860,17 @@ export async function markdownToDocxBlob(
       config: [
         {
           reference: 'ordered-list',
-          levels: [
-            { level: 0, format: 'decimal', text: '%1.', alignment: AlignmentType.START },
-            { level: 1, format: 'lowerLetter', text: '%2.', alignment: AlignmentType.START },
-            { level: 2, format: 'lowerRoman', text: '%3.', alignment: AlignmentType.START },
-          ],
+          levels: Array.from({ length: 9 }, (_, level) => ({
+            level,
+            format: orderedFormats[level % 3],
+            text: `%${level + 1}.`,
+            alignment: AlignmentType.START,
+            style: {
+              paragraph: {
+                indent: { left: 720 * (level + 1), hanging: 360 },
+              },
+            },
+          })),
         },
       ],
     },

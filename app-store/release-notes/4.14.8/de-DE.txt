@@ -1,0 +1,9 @@
+Formeln werden in Vorschau, geteilter Ansicht und Exporten unten nicht mehr abgeschnitten.
+
+Breite Tabellen brechen im PDF-, Druck-, HTML- und Bildexport innerhalb der Seite um.
+
+Neue Befehle: Überschriftenebene erhöhen oder senken, Überschrift wieder zu Absatz machen, Wort auswählen, Zeile auswählen, geschlossenen Tab wieder öffnen.
+
+Aufgeräumte Symbolleiste: Neu, Öffnen, Export, Einfügen und die Ansichtsmodi sind jetzt Menüs.
+
+Danke an unseren Tester 张工, dessen sorgfältige Berichte zu vielen dieser Korrekturen geführt haben.

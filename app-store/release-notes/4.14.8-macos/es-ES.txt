@@ -1,0 +1,11 @@
+Menús reorganizados en Archivo, Edición, Párrafo, Formato, Navegar, Visualización y Ayuda: cada función tiene su entrada de menú y los menús muestran el atajo que realmente usas.
+
+La barra de herramientas cabe en una fila: Nuevo, Abrir, Exportar, Insertar, IA y los modos de vista ahora son menús.
+
+Nuevo preajuste de atajos «Typora / Word» y nuevos comandos para todos: subir o bajar el nivel de un título, volver un título a párrafo, seleccionar palabra o línea, borrar palabra, reabrir pestaña cerrada, F8 modo concentración, F9 modo máquina de escribir.
+
+En la vista dividida puedes arrastrar el divisor para cambiar el tamaño del editor y la vista previa.
+
+Correcciones: las fórmulas ya no se cortan por abajo; las tablas anchas se ajustan en PDF e impresión; Intro en el modo normal de Vim baja una línea en lugar de insertar una; hacer clic dentro de una selección la anula.
+
+Gracias a nuestro probador 张工, cuyos informes detallados llevaron a muchos de estos cambios.

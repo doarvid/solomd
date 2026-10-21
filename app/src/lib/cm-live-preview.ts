@@ -14,7 +14,7 @@
  */
 
 import { syntaxTree, HighlightStyle, syntaxHighlighting } from '@codemirror/language';
-import { RangeSetBuilder } from '@codemirror/state';
+import { Prec, RangeSetBuilder } from '@codemirror/state';
 import {
   Decoration,
   DecorationSet,
@@ -152,22 +152,22 @@ const makeLiveMarkdownPlugin = (showMarkers: boolean) => ViewPlugin.fromClass(
 // scale with the user's font-size setting. Heading colors gradient from
 // stronger (h1) to softer (h6) for visual hierarchy.
 export const markdownRichStyle = HighlightStyle.define([
-  { tag: t.heading1, fontSize: '1.7em', fontWeight: '700', lineHeight: '1.25', color: 'var(--md-h1)' },
-  { tag: t.heading2, fontSize: '1.4em', fontWeight: '700', lineHeight: '1.3', color: 'var(--md-h2)' },
-  { tag: t.heading3, fontSize: '1.22em', fontWeight: '700', color: 'var(--md-h3)' },
-  { tag: t.heading4, fontSize: '1.1em', fontWeight: '700', color: 'var(--md-h4)' },
-  { tag: t.heading5, fontWeight: '700', color: 'var(--md-h5)' },
-  { tag: t.heading6, fontWeight: '700', color: 'var(--md-h6)' },
+  // 5.0 §2 type scale (30/650, 20/620, 17/600 at the 16px default).
+  { tag: t.heading1, fontSize: '1.875em', fontWeight: '650', lineHeight: '1.25', letterSpacing: '-0.015em', color: 'var(--md-h1)' },
+  { tag: t.heading2, fontSize: '1.25em', fontWeight: '620', lineHeight: '1.3', color: 'var(--md-h2)' },
+  { tag: t.heading3, fontSize: '1.0625em', fontWeight: '600', color: 'var(--md-h3)' },
+  { tag: t.heading4, fontWeight: '600', color: 'var(--md-h4)' },
+  { tag: t.heading5, fontWeight: '600', color: 'var(--md-h5)' },
+  { tag: t.heading6, fontWeight: '600', color: 'var(--md-h6)' },
   { tag: t.strong, fontWeight: '700', color: 'var(--md-strong)' },
   { tag: t.emphasis, fontStyle: 'italic', color: 'var(--md-em)' },
   { tag: t.strikethrough, textDecoration: 'line-through', color: 'var(--text-muted)' },
-  { tag: t.link, color: 'var(--md-link)' },
-  { tag: t.url, color: 'var(--md-url)' },
-  { tag: t.monospace, fontFamily: 'var(--font-mono)', color: 'var(--md-code)', backgroundColor: 'var(--md-code-bg)' },
-  { tag: t.quote, color: 'var(--md-quote)', fontStyle: 'italic' },
-  { tag: t.list, color: 'var(--md-list)' },
-  { tag: t.processingInstruction, color: 'var(--text-faint)' },
-  { tag: t.contentSeparator, color: 'var(--md-hr)' },
+  { tag: t.link, color: 'var(--accent-text)', textDecoration: 'underline' },
+  { tag: t.url, color: 'var(--accent-text)', textDecoration: 'underline' },
+  { tag: t.monospace, fontFamily: 'var(--font-mono)', color: 'var(--text)', backgroundColor: 'var(--fill-1)' },
+  { tag: t.quote, color: 'var(--text-2)' },
+  { tag: t.processingInstruction, color: 'var(--text-3)' },
+  { tag: t.contentSeparator, color: 'var(--text-3)' },
   // Code block syntax highlighting (provided by nested language packages)
   { tag: t.keyword, color: 'var(--syn-keyword)' },
   { tag: t.string, color: 'var(--syn-string)' },
@@ -206,9 +206,14 @@ const liveTheme = EditorView.theme({
   // `.cm-selectionLayer`, parking selection beneath the per-char
   // backgrounds painted by `t.monospace`. Need `!important` to beat
   // the inline style; 45% alpha keeps glyphs readable underneath.
-  '.cm-selectionLayer': { zIndex: '2 !important' },
+  // #368 — once the layer sits ABOVE the text its rectangles swallow every
+  // mousedown inside the selection: the event never reaches `.cm-content`,
+  // so CodeMirror can't collapse the selection on click (after Select All
+  // there is nowhere left to click). The layer is purely visual — let
+  // pointer events fall through to the text, as CM's own cursor layer does.
+  '.cm-selectionLayer': { zIndex: '2 !important', pointerEvents: 'none' },
   '.cm-selectionBackground': {
-    backgroundColor: 'rgba(255,159,64,0.45) !important',
+    backgroundColor: 'var(--accent-soft) !important',
   },
 });
 
@@ -234,19 +239,20 @@ export function livePreviewExtension(opts: { showMarkers?: boolean } = {}) {
 // a rendered preview — instead of both looking like a preview. (User ask,
 // 2026-06-20: "没打开实时预览时标题还是被预览了 / 两个按钮等于一样了".)
 export const markdownPlainStyle = HighlightStyle.define([
-  { tag: t.heading1, color: 'var(--md-h1)' },
-  { tag: t.heading2, color: 'var(--md-h2)' },
-  { tag: t.heading3, color: 'var(--md-h3)' },
-  { tag: t.heading4, color: 'var(--md-h4)' },
-  { tag: t.heading5, color: 'var(--md-h5)' },
-  { tag: t.heading6, color: 'var(--md-h6)' },
-  { tag: t.strong, color: 'var(--md-strong)' },
-  { tag: t.emphasis, color: 'var(--md-em)' },
-  { tag: t.strikethrough, color: 'var(--text-muted)' },
-  { tag: t.link, color: 'var(--md-link)' },
-  { tag: t.url, color: 'var(--md-url)' },
+  { tag: t.heading1, color: 'var(--md-h1)', fontWeight: 'normal', textDecoration: 'none' },
+  { tag: t.heading2, color: 'var(--md-h2)', fontWeight: 'normal', textDecoration: 'none' },
+  { tag: t.heading3, color: 'var(--md-h3)', fontWeight: 'normal', textDecoration: 'none' },
+  { tag: t.heading4, color: 'var(--md-h4)', fontWeight: 'normal', textDecoration: 'none' },
+  { tag: t.heading5, color: 'var(--md-h5)', fontWeight: 'normal', textDecoration: 'none' },
+  { tag: t.heading6, color: 'var(--md-h6)', fontWeight: 'normal', textDecoration: 'none' },
+  { tag: t.heading, fontWeight: 'normal', textDecoration: 'none' },
+  { tag: t.strong, color: 'var(--md-strong)', fontWeight: 'normal' },
+  { tag: t.emphasis, color: 'var(--md-em)', fontStyle: 'normal' },
+  { tag: t.strikethrough, color: 'var(--text-muted)', textDecoration: 'none' },
+  { tag: t.link, color: 'var(--md-link)', textDecoration: 'none' },
+  { tag: t.url, color: 'var(--md-url)', textDecoration: 'none' },
   { tag: t.monospace, fontFamily: 'var(--font-mono)', color: 'var(--md-code)' },
-  { tag: t.quote, color: 'var(--md-quote)' },
+  { tag: t.quote, color: 'var(--md-quote)', fontStyle: 'normal' },
   { tag: t.list, color: 'var(--md-list)' },
   { tag: t.processingInstruction, color: 'var(--text-faint)' },
   { tag: t.contentSeparator, color: 'var(--md-hr)' },
@@ -265,5 +271,5 @@ export const markdownPlainStyle = HighlightStyle.define([
 ]);
 
 export function richHighlightOnly() {
-  return [syntaxHighlighting(markdownPlainStyle)];
+  return [Prec.high(syntaxHighlighting(markdownPlainStyle)), liveTheme];
 }

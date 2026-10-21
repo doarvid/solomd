@@ -1,0 +1,9 @@
+Fórmulas não são mais cortadas embaixo na pré-visualização, na visão dividida e nas exportações.
+
+Tabelas largas quebram linha dentro da página ao exportar para PDF, imprimir, HTML e imagem.
+
+Novos comandos: subir ou descer o nível de um título, voltar um título a parágrafo, selecionar palavra, selecionar linha, reabrir aba fechada.
+
+Barra de ferramentas mais limpa: Novo, Abrir, Exportar, Inserir e os modos de visualização agora são menus.
+
+Obrigado ao nosso testador 张工, cujos relatos cuidadosos levaram a muitas destas correções.

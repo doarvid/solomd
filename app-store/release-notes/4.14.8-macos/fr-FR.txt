@@ -1,0 +1,11 @@
+Menus réorganisés en Fichier, Édition, Paragraphe, Format, Navigation, Présentation et Aide — chaque fonction a son entrée de menu, et les menus affichent le raccourci que vous utilisez vraiment.
+
+La barre d’outils tient sur une ligne : Nouveau, Ouvrir, Exporter, Insérer, IA et les modes d’affichage sont désormais des menus.
+
+Nouveau préréglage de raccourcis « Typora / Word », et de nouvelles commandes pour tous : monter ou descendre le niveau d’un titre, retransformer un titre en paragraphe, sélectionner le mot ou la ligne, supprimer le mot, rouvrir un onglet fermé, F8 mode concentration, F9 mode machine à écrire.
+
+En vue partagée, faites glisser le séparateur pour redimensionner l’éditeur et l’aperçu.
+
+Corrections : les formules ne sont plus coupées en bas ; les tableaux larges passent à la ligne en PDF et à l’impression ; Entrée en mode normal Vim descend d’une ligne au lieu d’en insérer une ; un clic dans une sélection la désélectionne.
+
+Merci à notre testeur 张工, dont les rapports minutieux sont à l’origine de beaucoup de ces changements.

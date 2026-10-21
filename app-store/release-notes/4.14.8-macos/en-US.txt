@@ -1,0 +1,11 @@
+Menus reorganised into File, Edit, Paragraph, Format, Navigate, View and Help — every feature now has a menu entry, and menus show the shortcut you actually use.
+
+The toolbar fits in one row: New, Open, Export, Insert, AI and the view modes are now menus.
+
+New “Typora / Word” shortcut preset, plus new commands for everyone: raise or lower a heading level, turn a heading back into a paragraph, select word or line, delete word, reopen a closed tab, F8 focus mode, F9 typewriter mode.
+
+Drag the divider in split view to resize the editor and preview.
+
+Fixes: formulas no longer cut off at the bottom; wide tables wrap in PDF and print; Enter in Vim normal mode moves down instead of inserting a line; clicking inside a selection deselects again.
+
+Thank you to our tester 张工, whose careful reports led to many of these changes.

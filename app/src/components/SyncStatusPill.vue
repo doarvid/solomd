@@ -16,7 +16,7 @@
  * Hover surfaces last-push / last-pull / remote URL in a tooltip.
  */
 import { computed } from 'vue';
-import { isMacOS } from '../lib/platform';
+import { usesCommandKey } from '../lib/platform';
 import { useSettingsStore } from '../stores/settings';
 import { shortcutLabel } from '../lib/keybindings';
 import { useGithubSyncStore } from '../stores/githubSync';
@@ -24,6 +24,11 @@ import { useGithubSync } from '../composables/useGithubSync';
 import { useWorkspaceStore } from '../stores/workspace';
 import { useToastsStore } from '../stores/toasts';
 import { useI18n } from '../i18n';
+import Icons from './Icons.vue';
+
+/** 'pill' — the status-bar pill. 'footer' — the 5.0 sidebar footer: a line
+ *  icon + a short word (已同步 / 未同步 / 同步中 / 有冲突), same click actions. */
+const props = withDefaults(defineProps<{ variant?: 'pill' | 'footer' }>(), { variant: 'pill' });
 
 const sync = useGithubSyncStore();
 const ops = useGithubSync();
@@ -32,7 +37,7 @@ const toasts = useToastsStore();
 const { t } = useI18n();
 // #180 — the chord in this sentence comes from the user's bindings, not from
 // a literal baked into the translation.
-const macChord = isMacOS();
+const macChord = usesCommandKey();
 const kbSettings = useSettingsStore();
 function withChord(key: string, actionId: string): string {
   return t(key, { key: shortcutLabel(actionId, kbSettings.keybindings, macChord) || '—' });
@@ -97,6 +102,15 @@ const mode = computed<Mode>(() => {
   return { glyph: '✓', label: cleanLabel, action: 'noop', tone: 'ok' };
 });
 
+/** Short state word + icon for the sidebar footer. */
+const footer = computed<{ icon: string; text: string }>(() => {
+  const tone = mode.value.tone;
+  if (tone === 'busy') return { icon: 'sync', text: t('sidebar.syncing') };
+  if (tone === 'err') return { icon: 'sync', text: t('sidebar.syncConflicts') };
+  if (tone === 'warn') return { icon: 'cloud', text: t('sidebar.unsynced') };
+  return { icon: 'check-circle', text: t('sidebar.synced') };
+});
+
 function fmtAgo(ts: number | null | undefined): string {
   if (!ts) return t('githubSync.never') || 'never';
   const dt = Date.now() / 1000 - ts;
@@ -118,7 +132,7 @@ const tooltip = computed(() => {
     `${t('githubSync.lastPush') || 'Last push'}: ${fmtAgo(s.last_push_at)}`,
     `${t('githubSync.lastPull') || 'Last pull'}: ${fmtAgo(s.last_pull_at)}`,
   ];
-  if (s.encrypted) lines.push(`🔒 ${t('githubSync.pillEncrypted') || 'End-to-end encrypted'}`);
+  if (s.encrypted) lines.push(t('githubSync.pillEncrypted') || 'End-to-end encrypted');
   return lines.join('\n');
 });
 
@@ -163,76 +177,133 @@ async function onClick() {
 
 <template>
   <button
-    v-if="visible"
+    v-if="visible && props.variant === 'footer'"
+    class="sync-foot"
+    :class="`sync-foot--${mode.tone}`"
+    type="button"
+    :title="tooltip"
+    @click="onClick"
+  >
+    <Icons :name="footer.icon" :size="14" class="sync-foot__icon" />
+    <span class="sync-foot__text">{{ footer.text }}</span>
+  </button>
+  <button
+    v-else-if="visible"
     class="sync-pill"
     :class="`sync-pill--${mode.tone}`"
     :title="tooltip"
     @click="onClick"
   >
-    <span class="sync-pill__cloud">{{ status?.encrypted ? '🔒' : '☁' }}</span>
-    <span class="sync-pill__glyph">{{ mode.glyph }}</span>
+    <Icons
+      class="sync-pill__cloud"
+      :name="mode.tone === 'busy' ? 'sync' : 'cloud'"
+      :size="13"
+    />
+    <span v-if="mode.tone === 'err'" class="sync-pill__glyph">{{ status?.conflicts.length ?? 0 }}</span>
+    <span v-else-if="mode.glyph === '●'" class="sync-pill__dot" aria-hidden="true" />
+    <span v-else-if="mode.glyph.startsWith('↑') || mode.glyph.startsWith('↓')" class="sync-pill__glyph">{{ mode.glyph }}</span>
   </button>
 </template>
 
 <style scoped>
+.sync-foot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+.sync-foot:hover {
+  background: var(--fill-1);
+  color: var(--text-2);
+}
+.sync-foot__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-foot--warn .sync-foot__icon {
+  color: var(--accent);
+}
+.sync-foot--err {
+  color: var(--danger);
+}
+.sync-foot--busy .sync-foot__icon {
+  animation: sync-spin 1s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sync-foot--busy .sync-foot__icon {
+    animation: none;
+  }
+}
 .sync-pill {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 1px 8px;
+  height: 22px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: var(--r-full);
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
   font-family: inherit;
-  transition: all 0.12s;
-  line-height: 1.6;
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .sync-pill:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--fill-1);
+  color: var(--text);
+}
+.sync-pill:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
 }
 .sync-pill__cloud {
-  font-size: 11px;
-  line-height: 1;
+  flex: 0 0 auto;
 }
 .sync-pill__glyph {
-  font-family: var(--font-mono);
-  letter-spacing: 0.02em;
-  min-width: 14px;
+  min-width: 10px;
   text-align: center;
 }
-
-.sync-pill--ok { color: var(--text-faint); border-color: var(--border); }
-.sync-pill--ok:hover { color: var(--text); }
+.sync-pill__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
 
 .sync-pill--warn {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent-text);
 }
 .sync-pill--warn:hover {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
 
 .sync-pill--err {
-  color: #d12;
-  border-color: rgba(221, 17, 34, 0.5);
+  color: var(--danger);
 }
 .sync-pill--err:hover {
-  background: rgba(221, 17, 34, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
 }
 
-.sync-pill--busy {
-  color: var(--text-muted);
-  border-color: var(--border);
-}
-.sync-pill--busy .sync-pill__glyph {
-  display: inline-block;
-  animation: sync-spin 0.8s linear infinite;
+.sync-pill--busy .sync-pill__cloud {
+  animation: sync-spin 0.9s linear infinite;
 }
 @keyframes sync-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .sync-pill--busy .sync-pill__cloud { animation: none; }
+}
 </style>

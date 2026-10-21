@@ -1,9 +1,10 @@
+import { createTypeRequested } from '../lib/create-type-request';
 import { FORMAT_KINDS } from '../lib/md-format';
 import { invoke } from '@tauri-apps/api/core';
 import { useFiles } from './useFiles';
 import { useSettingsStore } from '../stores/settings';
 import { shortcutLabel } from '../lib/keybindings';
-import { isMacOS, isMobile } from '../lib/platform';
+import { isMobile, usesCommandKey } from '../lib/platform';
 import { useTabsStore } from '../stores/tabs';
 import { useTilesStore } from '../stores/tiles';
 import { useExport } from './useExport';
@@ -49,7 +50,7 @@ export function useCommands(): Command[] {
   // #180 — the palette must show the chord that actually works today, not
   // the one that shipped: a rebound action would otherwise advertise a key
   // that now does something else.
-  const mac = isMacOS();
+  const mac = usesCommandKey();
   const kb = (actionId: string) => shortcutLabel(actionId, settings.keybindings, mac) || undefined;
   const tabs = useTabsStore();
   const tiles = useTilesStore();
@@ -129,9 +130,21 @@ export function useCommands(): Command[] {
     return `https://${host}/${owner}/${repo}${blobSeg}${branch}/${rel}`;
   }
 
+  /**
+   * The active tab with the editor's last keystrokes in `content`. CodeMirror
+   * syncs doc→tab.content on a 350ms debounce, so a command that reads the
+   * text right after typing saw the old document — and the transforms then
+   * wrote that back over what had just been typed (5.0 regression run, F-5).
+   * Same flush `saveTab` does.
+   */
+  function freshActiveTab() {
+    window.dispatchEvent(new Event('solomd:flush-content-sync'));
+    return tabs.activeTab;
+  }
+
   /** Replace the active editor's content (used for the Chinese conversion commands). */
   function transformActive(fn: (s: string) => string, successMsg: string) {
-    const t = tabs.activeTab;
+    const t = freshActiveTab();
     if (!t) {
       toasts.warning('No active document');
       return;
@@ -176,6 +189,7 @@ export function useCommands(): Command[] {
       run: () => files.openFolder(),
     },
     { id: 'file.closeTab', title: 'Close Tab', shortcut: kb('file.closeTab'), run: () => tabs.activeId && files.closeTabSafe(tabs.activeId) },
+    { id: 'tab.reopenClosed', title: 'Reopen Closed Tab', shortcut: kb('tab.reopenClosed'), run: () => void files.reopenClosedTab() },
 
     // v4.0.3 — Open active document in system default editor
     {
@@ -217,7 +231,7 @@ export function useCommands(): Command[] {
     },
     { id: 'view.toggleNeighborhood', title: 'View: Toggle Neighborhood Pane', hint: 'Per-note relationship explorer — frontmatter wikilink groups, inverse relationships, and backlinks; click to open, ⌘/Ctrl-click to pivot', run: () => settings.toggleNeighborhood() },
     { id: 'view.toggleTypesPanel', title: 'View: Toggle Types Pane', hint: 'Type-driven sidebar — notes with `type:<Name>` grouped into collapsible first-class sections (types-as-lenses)', run: () => settings.toggleTypesPanel() },
-    { id: 'type.create', title: 'Types: New Type…', hint: 'Create a type-definition note (`type: Type`) so its members get a first-class sidebar section', run: () => { if (!settings.showTypesPanel) settings.toggleTypesPanel(); window.dispatchEvent(new CustomEvent('solomd:create-type')); } },
+    { id: 'type.create', title: 'Types: New Type…', hint: 'Create a type-definition note (`type: Type`) so its members get a first-class sidebar section', run: () => { settings.rightSidebarHidden = false; if (!settings.showTypesPanel) settings.toggleTypesPanel(); createTypeRequested.value = true; } },
     { id: 'view.toggleHistoryPanel', title: 'View: Toggle History Pane', hint: 'Show / hide the per-note version history pane (does not disable Auto-Git)', run: () => settings.toggleHistoryPanel() },
     { id: 'view.toggleInspector', title: 'View: Toggle Properties Inspector', shortcut: kb('view.toggleInspector'), hint: 'Edit the active note’s YAML frontmatter as typed properties (text / number / date / status / tags / relation)', run: () => settings.toggleInspector() },
     { id: 'view.resetSidebarPanes', title: 'View: Reset Sidebar Pane Heights', hint: 'Clear stored per-pane heights so the right sidebar returns to even-share flex layout', run: () => settings.clearRightSidebarPaneHeights() },
@@ -226,9 +240,22 @@ export function useCommands(): Command[] {
     { id: 'view.toggleTheme', title: 'View: Toggle Theme', run: () => settings.toggleTheme() },
     { id: 'view.toggleLivePreview', title: 'View: Toggle Live Preview / Raw Source (Markdown)', run: () => settings.toggleLivePreview() },
     { id: 'view.toggleSpellCheck', title: 'View: Toggle Spell Check', run: () => settings.toggleSpellCheck() },
-    { id: 'view.toggleFocusMode', title: 'View: Toggle Focus Mode', run: () => settings.toggleFocusMode() },
+    { id: 'view.toggleFocusMode', title: 'View: Toggle Focus Mode', shortcut: kb('view.toggleFocusMode'), run: () => settings.toggleFocusMode() },
     { id: 'view.toggleToolbar', title: 'View: Show / Hide Toolbar Buttons', shortcut: kb('view.toggleToolbar'), run: () => settings.toggleToolbarHidden() },
-    { id: 'view.toggleTypewriter', title: 'View: Toggle Typewriter Mode', run: () => settings.toggleTypewriterMode() },
+    { id: 'view.toggleTypewriter', title: 'View: Toggle Typewriter Mode', shortcut: kb('view.toggleTypewriter'), run: () => settings.toggleTypewriterMode() },
+    { id: 'view.zoomUiIn', title: 'UI: Zoom In', shortcut: kb('view.zoomUiIn'), run: () => settings.zoomIn() },
+    { id: 'view.zoomUiOut', title: 'UI: Zoom Out', shortcut: kb('view.zoomUiOut'), run: () => settings.zoomOut() },
+    { id: 'view.zoomUiReset', title: 'UI: Reset Zoom', shortcut: kb('view.zoomUiReset'), run: () => settings.resetZoom() },
+    { id: 'view.zoomEditorIn', title: 'Editor: Zoom In', shortcut: kb('view.zoomEditorIn'), run: () => settings.editorFontIn() },
+    { id: 'view.zoomEditorOut', title: 'Editor: Zoom Out', shortcut: kb('view.zoomEditorOut'), run: () => settings.editorFontOut() },
+    { id: 'view.zoomEditorReset', title: 'Editor: Reset Zoom', shortcut: kb('view.zoomEditorReset'), run: () => settings.resetEditorFontSize() },
+    // bug/C2 — these four lost their toolbar buttons (reading-mode button,
+    // fit-width toggle, the pomodoro chevron, the gear), so the palette has
+    // to carry them. Settings / reading mode also have a chord.
+    { id: 'view.toggleReading', title: 'View: Toggle Reading Mode', shortcut: kb('view.toggleReading'), run: () => settings.toggleReadingMode() },
+    { id: 'view.toggleFitWidth', title: 'View: Toggle Preview Fit Width', run: () => settings.togglePreviewFitWidth() },
+    { id: 'pomodoro.open', title: 'Writing Session (Pomodoro)…', hint: '25 / 50 / 90 minutes or a custom length', run: () => window.dispatchEvent(new CustomEvent('solomd:open-pomodoro')) },
+    { id: 'settings.open', title: 'Settings', shortcut: kb('settings.open'), run: () => window.dispatchEvent(new CustomEvent('solomd:open-settings')) },
 
     // ---- Tile layout ----
     { id: 'tile.splitRight', title: 'Split Editor Right', shortcut: kb('tile.splitRight'), run: () => tiles.splitPane(tiles.focusedPaneId, 'horizontal') },
@@ -285,12 +312,14 @@ export function useCommands(): Command[] {
       id: 'cn.copyPinyin',
       title: 'Chinese: Copy Active Document as Pinyin',
       run: async () => {
-        const t = tabs.activeTab;
-        if (!t) {
+        if (!tabs.activeTab) {
           toasts.warning('No active document');
           return;
         }
-        await writeText((await loadChineseConvert()).pinyin(t.content));
+        const { pinyin } = await loadChineseConvert();
+        const t = freshActiveTab();
+        if (!t) return;
+        await writeText(pinyin(t.content));
         toasts.success('Pinyin copied to clipboard');
       },
     },
@@ -309,12 +338,22 @@ export function useCommands(): Command[] {
 
     {
       id: 'editor.find',
-      title: 'Find / Replace in note…',
+      title: 'Find…',
       shortcut: kb('editor.find'),
       hint: 'Open the find & replace bar in the current editor',
       run: () =>
         window.dispatchEvent(
           new CustomEvent('solomd:editor-find', { detail: { paneId: tiles.focusedPaneId } }),
+        ),
+    },
+    {
+      id: 'editor.replace',
+      title: 'Replace…',
+      shortcut: kb('editor.replace'),
+      hint: 'Open the find & replace bar with the caret in the replace field',
+      run: () =>
+        window.dispatchEvent(
+          new CustomEvent('solomd:editor-find', { detail: { paneId: tiles.focusedPaneId, replace: true } }),
         ),
     },
 
@@ -436,6 +475,24 @@ export function useCommands(): Command[] {
       shortcut: kb('editor.caseCycle'),
       run: () => window.dispatchEvent(new CustomEvent('solomd:transform-case', { detail: { mode: 'cycle' } })),
     },
+    // B4 — Typora-style selection and heading commands. Editor.vue applies
+    // them on whichever of its three editors the active pane runs.
+    ...(
+      [
+        ['editor.selectWord', 'Select Word', 'selectWord'],
+        ['editor.deleteWord', 'Delete Word', 'deleteWord'],
+        ['editor.selectLine', 'Select Line', 'selectLine'],
+        ['editor.jumpToSelection', 'Jump to Selection', 'jumpToSelection'],
+        ['heading.promote', 'Increase Heading Level', 'headingPromote'],
+        ['heading.demote', 'Decrease Heading Level', 'headingDemote'],
+        ['heading.paragraph', 'Convert to Paragraph', 'headingParagraph'],
+      ] as const
+    ).map(([id, title, cmd]) => ({
+      id,
+      title,
+      shortcut: kb(id),
+      run: () => window.dispatchEvent(new CustomEvent('solomd:editor-command', { detail: { cmd } })),
+    })),
     {
       id: 'editor.caseUpper',
       title: 'UPPERCASE',
@@ -485,7 +542,7 @@ export function useCommands(): Command[] {
       shortcut: kb('format.markdown'),
       hint: 'Reformat the active document — normalize lists, tables, spacing',
       run: async () => {
-        const t = tabs.activeTab;
+        const t = freshActiveTab();
         if (!t) {
           toasts.warning('No active document');
           return;
@@ -495,8 +552,15 @@ export function useCommands(): Command[] {
           return;
         }
         try {
-          const next = await formatMarkdown(t.content);
-          if (next === t.content) {
+          const src = t.content;
+          const next = await formatMarkdown(src);
+          // Prettier loads on first use: anything typed while it did would be
+          // overwritten by a result formatted from the older text.
+          if (freshActiveTab()?.id !== t.id || t.content !== src) {
+            toasts.info('The document changed while formatting — run Format again');
+            return;
+          }
+          if (next === src) {
             toasts.info('Already formatted');
             return;
           }
@@ -528,6 +592,7 @@ export function useCommands(): Command[] {
     // Gitee IK8QJQ — the raster/text distinction decides whether the output
     // is searchable, so it belongs in the palette too, not just the toolbar.
     { id: 'export.pdfPrint', title: 'Export to PDF (text)…', hint: 'real selectable text, via system print', shortcut: kb('export.pdfPrint'), run: () => exporter.exportPdfPrint() },
+    { id: 'file.print', title: 'Print…', hint: 'Open the system print dialog', shortcut: kb('file.print'), run: () => exporter.printDocument() },
     { id: 'export.pdf', title: 'Export to PDF (image)…', hint: 'rasterised, text not selectable', run: () => exporter.exportPdf() },
     { id: 'export.image', title: 'Export to Image (PNG)…', run: () => exporter.exportImage() },
     { id: 'export.epub', title: 'Export to EPUB…', hint: 'via Pandoc', run: () => pandoc.exportTo('epub') },
@@ -536,6 +601,7 @@ export function useCommands(): Command[] {
     { id: 'export.rtf', title: 'Export to RTF…', hint: 'via Pandoc', run: () => pandoc.exportTo('rtf') },
     { id: 'export.pandocCustom', title: 'Export via Pandoc Template…', run: () => pandoc.exportTo('custom') },
     { id: 'export.copyHtml', title: 'Copy as HTML', shortcut: kb('export.copyHtml'), run: () => exporter.copyAsHtml() },
+    { id: 'export.copyWord', title: 'Copy as Word', shortcut: kb('export.copyWord'), run: () => exporter.copyAsWord() },
     { id: 'export.copyPlain', title: 'Copy as Plain Text', run: () => exporter.copyAsPlainText() },
     { id: 'export.copyMd', title: 'Copy as Markdown', shortcut: kb('export.copyMd'), run: () => exporter.copyAsMarkdown() },
     { id: 'export.copyImage', title: 'Copy as Image (PNG)', run: () => exporter.copyAsImage() },
@@ -678,7 +744,7 @@ export function useCommands(): Command[] {
       shortcut: kb('view.slideshow'),
       hint: 'Render the active document as a fullscreen slideshow (split on `---`)',
       run: async () => {
-        const t = tabs.activeTab;
+        const t = freshActiveTab();
         if (!t) {
           toasts.warning('No active document');
           return;

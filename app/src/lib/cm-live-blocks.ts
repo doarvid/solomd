@@ -47,8 +47,7 @@ import { renderMarkdown, extractImageRoot } from './markdown';
 import { findHtmlBlockEnd } from './html-live-render';
 import { plantumlSvgUrl } from './plantuml';
 import { initMermaid } from './mermaid-lazy';
-import 'katex/contrib/mhchem';
-import katex from 'katex';
+import { getKatex, onRenderDepsChange, renderDepsVersion } from './render-deps';
 import {
   parseTldrawFence,
   TLDRAW_DEFAULT_HEIGHT,
@@ -142,6 +141,14 @@ function isSeparatorRow(line: string): boolean {
 const imageNaturalSizes = new Map<string, { w: number; h: number }>();
 let relayoutTimer: ReturnType<typeof setTimeout> | null = null;
 
+// KaTeX / highlight.js finished loading: rebuild, so widgets rendered without
+// them (see the `deps` field on each) remount with the real output.
+onRenderDepsChange(() => {
+  try {
+    window.dispatchEvent(new CustomEvent('solomd:cm-relayout'));
+  } catch {}
+});
+
 function scheduleImageRelayout(): void {
   if (relayoutTimer) return;
   relayoutTimer = setTimeout(() => {
@@ -219,12 +226,16 @@ class ImageWidget extends WidgetType {
 }
 
 class TableWidget extends WidgetType {
+  // Cells can hold math / code: a widget built before KaTeX or highlight.js
+  // arrived must not count as equal to the one built after (render-deps.ts).
+  private readonly deps = renderDepsVersion();
+
   constructor(private readonly source: string) {
     super();
   }
 
   eq(other: TableWidget): boolean {
-    return other.source === this.source;
+    return other.source === this.source && other.deps === this.deps;
   }
 
   toDOM(): HTMLElement {
@@ -246,6 +257,8 @@ class TableWidget extends WidgetType {
 
 /** Raw block HTML rendered with the same markdown-it pipeline as Preview.vue. */
 class HtmlBlockWidget extends WidgetType {
+  private readonly deps = renderDepsVersion();
+
   constructor(
     private readonly source: string,
     private readonly imageRoot: string | null,
@@ -258,7 +271,8 @@ class HtmlBlockWidget extends WidgetType {
     return (
       other.source === this.source &&
       other.imageRoot === this.imageRoot &&
-      other.filePath === this.filePath
+      other.filePath === this.filePath &&
+      other.deps === this.deps
     );
   }
 
@@ -285,12 +299,14 @@ class HtmlBlockWidget extends WidgetType {
 // the wrapping `$$\n…\n$$` literal so markdown-it-katex sees it as block
 // math and emits `<span class="katex-display">`.
 class MathWidget extends WidgetType {
+  private readonly deps = renderDepsVersion();
+
   constructor(private readonly source: string) {
     super();
   }
 
   eq(other: MathWidget): boolean {
-    return other.source === this.source;
+    return other.source === this.source && other.deps === this.deps;
   }
 
   toDOM(): HTMLElement {
@@ -315,17 +331,26 @@ class MathWidget extends WidgetType {
 // We detect spans with inlineMathSpans() below and replace each with a
 // KaTeX render while the caret is off the line (click in → source returns).
 class InlineMathWidget extends WidgetType {
+  private readonly deps = renderDepsVersion();
+
   constructor(private readonly tex: string) {
     super();
   }
 
   eq(other: InlineMathWidget): boolean {
-    return other.tex === this.tex;
+    return other.tex === this.tex && other.deps === this.deps;
   }
 
   toDOM(): HTMLElement {
     const span = document.createElement('span');
     span.className = 'cm-live-inline-math';
+    // KaTeX still loading (render-deps.ts): show the source, which is what
+    // the line reads without the widget; the load triggers a rebuild.
+    const katex = getKatex();
+    if (!katex) {
+      span.textContent = `$${this.tex}$`;
+      return span;
+    }
     try {
       span.innerHTML = katex.renderToString(this.tex, {
         throwOnError: false,
@@ -377,7 +402,37 @@ function inlineMathSpans(text: string): Array<{ start: number; end: number; tex:
   }
   let i = 0;
   while (i < n) {
-    if (text[i] !== '$' || code[i]) { i++; continue; }
+    if (code[i]) { i++; continue; }
+    // #433 — LaTeX `\( ... \)` and inline `\[ ... \]` delimiters (DeepSeek / ChatGPT).
+    if (
+      text[i] === '\\' &&
+      (i === 0 || text[i - 1] !== '\\') &&
+      (text[i + 1] === '(' || text[i + 1] === '[')
+    ) {
+      const closeChar = text[i + 1] === '[' ? ']' : ')';
+      let j = i + 2;
+      let close = -1;
+      while (j < n - 1) {
+        if (!code[j] && text[j] === '\\' && text[j + 1] === closeChar) {
+          let bs = 0;
+          let k = j;
+          while (k >= i + 2 && text[k] === '\\') { bs++; k--; }
+          if (bs % 2 === 1) { close = j; break; }
+        }
+        j++;
+      }
+      if (close >= 0) {
+        const content = text.slice(i + 2, close).trim();
+        if (content) {
+          spans.push({ start: i, end: close + 2, tex: content });
+          i = close + 2;
+          continue;
+        }
+      }
+      i += 2;
+      continue;
+    }
+    if (text[i] !== '$') { i++; continue; }
     if (i > 0 && text[i - 1] === '\\') { i++; continue; }          // escaped \$
     if (text[i + 1] === '$') { i += 2; continue; }                  // $$ block delimiter
     if (i + 1 >= n || /\s/.test(text[i + 1])) { i++; continue; }    // opening must hug content
@@ -805,14 +860,16 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
             continue;
           }
 
-          // v4.3.0 issue #57a — block math (`$$…$$`).
-          // Recognise either inline `$$E=mc^2$$` on a single line OR a
-          // multi-line block opened with a `$$` line and closed with a `$$`
-          // line. We only collapse if the cursor is outside.
+          // v4.3.0 issue #57a / #433 — block math (`$$…$$` or `\[…\]`).
+          // Recognise either inline `$$E=mc^2$$` / `\[E=mc^2\]` on a single
+          // line OR a multi-line block opened with `$$` / `\[` and closed with
+          // `$$` / `\]`. We only collapse if the cursor is outside.
           const trimmedLine = line.text.trim();
-          if (trimmedLine.startsWith('$$')) {
-            // Single-line `$$ ... $$`?
-            if (trimmedLine.endsWith('$$') && trimmedLine.length > 4) {
+          if (trimmedLine.startsWith('$$') || trimmedLine.startsWith('\\[')) {
+            const isBracket = trimmedLine.startsWith('\\[');
+            const closeDelim = isBracket ? '\\]' : '$$';
+            // Single-line `$$ ... $$` or `\[ ... \]`?
+            if (trimmedLine.endsWith(closeDelim) && trimmedLine.length > 4) {
               const cursorInside = keepSource || cursorLine === i || cursorLineEnd === i;
               if (!cursorInside) {
                 builder.add(
@@ -827,11 +884,17 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
               i += 1;
               continue;
             }
-            // Multi-line block — scan forward for the closing `$$` line.
+            // Multi-line block — scan forward for the closing `$$` or `\]` line.
             let endI = i + 1;
             while (endI <= lastLine) {
-              const next = doc.line(endI);
-              if (next.text.trim().startsWith('$$')) break;
+              const nextTrimmed = doc.line(endI).text.trim();
+              if (
+                isBracket
+                  ? nextTrimmed.startsWith('\\]') || nextTrimmed.endsWith('\\]')
+                  : nextTrimmed.startsWith('$$') || nextTrimmed.endsWith('$$')
+              ) {
+                break;
+              }
               endI += 1;
             }
             if (endI <= lastLine) {
@@ -1022,7 +1085,12 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
           // — the overwhelming majority in a large doc — short-circuit here, so
           // this whole-doc pass doesn't get measurably slower (#5 perf).
           const inlineCursorHere = keepSource || (i >= cursorLine && i <= cursorLineEnd);
-          if (!inlineCursorHere && line.text.indexOf('$') !== -1) {
+          if (
+            !inlineCursorHere &&
+            (line.text.indexOf('$') !== -1 ||
+              line.text.indexOf('\\(') !== -1 ||
+              line.text.indexOf('\\[') !== -1)
+          ) {
             for (const span of inlineMathSpans(line.text)) {
               builder.add(
                 line.from + span.start,
@@ -1219,6 +1287,8 @@ export const liveBlocksTheme = EditorView.theme({
     borderCollapse: 'collapse',
     margin: '0.4em 0',
     fontSize: '0.95em',
+    // Body text runs at 1.8; table rows read better tighter (as in preview).
+    lineHeight: '1.6',
   },
   '.cm-live-block--table th, .cm-live-block--table td': {
     border: '1px solid var(--border)',
@@ -1226,7 +1296,7 @@ export const liveBlocksTheme = EditorView.theme({
     textAlign: 'left',
   },
   '.cm-live-block--table thead th': {
-    background: 'var(--bg-soft)',
+    background: 'var(--bg-elev)',
     fontWeight: '600',
   },
   // v4.3.0 issue #57a — paddings fold in the 0.6em that used to come from the

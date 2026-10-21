@@ -1,0 +1,11 @@
+Menyerna har ordnats om till Arkiv, Redigera, Stycke, Format, Navigera, Visa och Hjälp – varje funktion har ett menyval, och menyerna visar det kortkommando du faktiskt använder.
+
+Verktygsfältet får plats på en rad: Ny, Öppna, Exportera, Infoga, AI och vyerna är nu menyer.
+
+Ny kortkommandoförinställning ”Typora / Word”, plus nya kommandon för alla: höj eller sänk rubriknivå, gör en rubrik till stycke igen, markera ord eller rad, radera ord, öppna en stängd flik igen, F8 fokusläge, F9 skrivmaskinsläge.
+
+Dra avdelaren i delad vy för att ändra storlek på redigeraren och förhandsvisningen.
+
+Rättelser: formler klipps inte längre av nedtill; breda tabeller radbryts i PDF och utskrift; Retur i Vims normalläge flyttar ned en rad i stället för att infoga en; ett klick i en markering avmarkerar igen.
+
+Tack till vår testare 张工, vars noggranna rapporter ledde till många av dessa ändringar.

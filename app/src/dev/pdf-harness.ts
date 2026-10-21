@@ -14,6 +14,7 @@
 import { capturePdfRaster, buildHtml2PdfOptions } from '../lib/pdf-export';
 import { buildPagedCanvas, isCleanRowData } from '../lib/pdf-paginate';
 import type { ResolvedPdfOptions } from '../lib/pdf-options';
+import { wideTableFixture } from './wide-table-fixture';
 
 const statusEl = document.getElementById('status') as HTMLElement;
 const reportEl = document.getElementById('report') as HTMLElement;
@@ -338,6 +339,7 @@ async function run(
     const rasterSize = { width: raw.width, height: raw.height };
     capture.useCanvas(paged.canvas);
     const blob = await capture.finish();
+    window.__pdfHarnessLastPdf = blob;
     const pages = await countPdfPages(blob);
     const expectedPages = paged.breaks.length + 1;
     const gridAligned = pages === expectedPages;
@@ -407,6 +409,8 @@ declare global {
       withEvidence: boolean,
       markdown?: string,
     ) => Promise<HarnessReport>;
+    /** The PDF the last run produced, to save and inspect (#370). */
+    __pdfHarnessLastPdf?: Blob;
     __pdfHarnessScan?: () => Promise<HarnessReport[]>;
     __pdfHarnessDocument?: (markdown: string, label: string) => Promise<HarnessReport>;
     /** The html2pdf options the export builds, for inspection. */
@@ -417,6 +421,7 @@ declare global {
 window.__pdfHarnessRun = run;
 window.__pdfHarnessScan = scan;
 window.__pdfHarnessDocument = runDocument;
+(window as any).__pdfHarnessWideTable = () => runDocument(wideTableFixture(), 'wide table (#370)');
 window.__pdfHarnessOptions = () => buildHtml2PdfOptions('probe', PDF_OPTS);
 
 run(CONFIGS[0], true).then(

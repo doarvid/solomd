@@ -125,3 +125,73 @@ test('mixed lines are completed, not toggled off; italic does not mistake bold',
   assert.equal(run('|**a**\nb|', 'bold'), '|**a**\n**b**|');
   assert.equal(run('|**a**\n**b**|', 'italic'), '|***a***\n***b***|');
 });
+
+test('code block toggles off with the caret on a fence line or inside the block', () => {
+  // F-6A: the wrap leaves the caret on the opening fence; a second press unwraps.
+  assert.equal(run('line one|', 'codeblock'), '```|\nline one\n```');
+  assert.equal(run('```|\nline one\n```', 'codeblock'), '|line one');
+  assert.equal(run('a\n```js\nlet |x = 1;\n```\nb', 'codeblock'), 'a\nlet |x = 1;\nb');
+  assert.equal(run('```\nx\n```|', 'codeblock'), 'x|');
+  assert.equal(run('~~~\n|x|\n~~~', 'codeblock'), '|x|');
+  assert.equal(run('```|\n```', 'codeblock'), '|');
+  // Between two blocks is in neither: it wraps.
+  assert.equal(run('```\na\n```\nmid|\n```\nb\n```', 'codeblock'), '```\na\n```\n```|\nmid\n```\n```\nb\n```');
+  // A ``` inside a ~~~ block does not end it.
+  assert.equal(run('~~~\n```\nx|\n~~~', 'codeblock'), '```\nx|');
+});
+
+test('a bare caret inside an existing bold / italic span removes it, CJK too', () => {
+  // F-6B
+  assert.equal(run('这是**粗|体**文字', 'bold'), '这是粗|体文字');
+  assert.equal(run('这是*斜|体*文字', 'italic'), '这是斜|体文字');
+  assert.equal(run('这是**粗体|**文字', 'bold'), '这是粗体|文字');
+  assert.equal(run('a **two wo|rds** b', 'bold'), 'a two wo|rds b');
+  // Bold is not italic, and the space between two spans is in neither.
+  assert.equal(run('这是**粗|体**文字', 'italic'), '这是**粗*|*体**文字');
+  assert.equal(run('**甲** 中|间 **乙**', 'bold'), '**甲** 中**|**间 **乙**');
+  // Adding bold to CJK still does not swallow the clause.
+  assert.equal(run('这是重|点内容', 'bold'), '这是重**|**点内容');
+});
+
+/** Like `run`, for Tab / Shift+Tab; null when the editor's own indent applies. */
+async function tab(marked: string, outdent = false): Promise<string | null> {
+  const { listIndentEdit } = await import('./md-format.ts');
+  const first = marked.indexOf('|');
+  const rest = marked.slice(first + 1);
+  const second = rest.indexOf('|');
+  const doc = second < 0 ? marked.replace('|', '') : marked.slice(0, first) + rest.replace('|', '');
+  const e = listIndentEdit(doc, first, second < 0 ? first : first + second, outdent);
+  if (!e) return null;
+  const out = doc.slice(0, e.from) + e.insert + doc.slice(e.to);
+  return e.selFrom === e.selTo
+    ? out.slice(0, e.selFrom) + '|' + out.slice(e.selFrom)
+    : out.slice(0, e.selFrom) + '|' + out.slice(e.selFrom, e.selTo) + '|' + out.slice(e.selTo);
+}
+
+test('Tab nests an ordered item at its marker width and renumbers both levels', async () => {
+  // F-7: two spaces under "1. " is a lazy continuation, not a sub-list.
+  assert.equal(await tab('1. one\n2. t|wo\n3. three'), '1. one\n   1. t|wo\n2. three');
+  assert.equal(await tab('9. a\n10. b\n11. c|'), '9. a\n10. b\n    1. c|');
+  // Joining an existing sub-list continues its numbers.
+  assert.equal(await tab('1. one\n   1. a\n2. b|\n3. c'), '1. one\n   1. a\n   2. b|\n2. c');
+  // Bullets keep two spaces.
+  assert.equal(await tab('- a\n- b|'), '- a\n  - b|');
+  // A bullet under a number goes to the number's content column.
+  assert.equal(await tab('1. one\n- x|'), '1. one\n   - x|');
+});
+
+test('Shift+Tab lifts a nested item back out and renumbers', async () => {
+  assert.equal(await tab('1. one\n   1. t|wo\n2. three', true), '1. one\n2. t|wo\n3. three');
+  assert.equal(await tab('1. one\n   1. a|\n   2. b\n2. c', true), '1. one\n2. a|\n   1. b\n3. c');
+  assert.equal(await tab('- a\n  - b|', true), '- a\n- b|');
+});
+
+test('Tab defers to the editor where there is nothing to nest under', async () => {
+  assert.equal(await tab('plain |text'), null);
+  assert.equal(await tab('1. fi|rst'), null);
+  assert.equal(await tab('1. top|', true), null);
+});
+
+test('Tab on a selection of items moves them together', async () => {
+  assert.equal(await tab('1. a\n|2. b\n3. c|'), '1. a\n   |1. b\n   2. c|');
+});

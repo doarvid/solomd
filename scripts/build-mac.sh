@@ -45,6 +45,14 @@ echo "==> SoloMD v${VERSION} — local Mac build with file-icon injection"
 echo "==> Installing frontend deps"
 pnpm install --frozen-lockfile
 
+echo "==> Building a matching universal MCP sidecar"
+../scripts/build-mcp-sidecar.sh aarch64-apple-darwin
+../scripts/build-mcp-sidecar.sh x86_64-apple-darwin
+lipo -create \
+  src-tauri/binaries/solomd-mcp-aarch64-apple-darwin \
+  src-tauri/binaries/solomd-mcp-x86_64-apple-darwin \
+  -output src-tauri/binaries/solomd-mcp-universal-apple-darwin
+
 echo "==> Building .app (no dmg yet)"
 # Every credential Tauri would notarize with is unset here on purpose: it must
 # skip notarization, because the .app is still going to be patched (file icons,

@@ -1,0 +1,47 @@
+name: Tests
+# Unit tests on every push and PR: the 370-odd frontend tests (node:test) and
+# the Rust library tests. Until 2026-10 nothing ran the frontend ones at all.
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: Install
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Run unit tests
+        working-directory: app
+        run: bash scripts/run-tests.sh
+  rust:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev libxdo-dev gnome-keyring dbus-x11
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - name: cargo test --lib + --bin (bin-only modules such as convert.rs)
+        working-directory: app/src-tauri
+        run: |
+          mkdir -p ../dist && [ -f ../dist/index.html ] || echo '<!doctype html>' > ../dist/index.html
+          # tauri.conf bundles the MCP sidecar; the build script only checks it exists.
+          mkdir -p binaries && touch "binaries/solomd-mcp-$(rustc -vV | sed -n 's/^host: //p')"
+          # The crypto tests store a key in the platform keyring: give them a
+          # session bus with an unlocked gnome-keyring.
+          dbus-run-session -- bash -c 'echo -n ci | gnome-keyring-daemon --unlock --components=secrets >/dev/null && cargo test --lib && cargo test --bin SoloMD'

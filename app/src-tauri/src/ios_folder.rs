@@ -243,6 +243,31 @@ mod imp {
     type OpenUrlFn =
         unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject, *mut AnyObject) -> Bool;
 
+    /// Open the security scope of a file URL iOS handed us and remember its
+    /// path. Only that NSURL carries the sandbox extension; tao reduces it to
+    /// a string right after. The scope stays open (and the URL retained) for
+    /// the life of the process, so read_file and a later save back to the
+    /// file both work.
+    unsafe fn grant_scope(url: *mut AnyObject) {
+        if url.is_null() {
+            return;
+        }
+        let is_file: Bool = msg_send![url, isFileURL];
+        if !is_file.as_bool() {
+            return;
+        }
+        let granted: Bool = msg_send![url, startAccessingSecurityScopedResource];
+        if granted.as_bool() {
+            let _: *mut AnyObject = msg_send![url, retain];
+        }
+        let path: *mut AnyObject = msg_send![url, path];
+        if let (Some(p), Ok(mut list)) = (rust_string(path), OPENED.lock()) {
+            if !list.contains(&p) {
+                list.push(p);
+            }
+        }
+    }
+
     unsafe extern "C" fn open_url_hook(
         this: *mut AnyObject,
         cmd: Sel,
@@ -250,25 +275,7 @@ mod imp {
         url: *mut AnyObject,
         options: *mut AnyObject,
     ) -> Bool {
-        if !url.is_null() {
-            let is_file: Bool = msg_send![url, isFileURL];
-            if is_file.as_bool() {
-                // Only the NSURL iOS hands us carries the sandbox extension;
-                // tao reduces it to a string right after this. The scope stays
-                // open (and the URL retained) for the life of the process, so
-                // read_file and a later save back to the file both work.
-                let granted: Bool = msg_send![url, startAccessingSecurityScopedResource];
-                if granted.as_bool() {
-                    let _: *mut AnyObject = msg_send![url, retain];
-                }
-                let path: *mut AnyObject = msg_send![url, path];
-                if let (Some(p), Ok(mut list)) = (rust_string(path), OPENED.lock()) {
-                    if !list.contains(&p) {
-                        list.push(p);
-                    }
-                }
-            }
-        }
+        grant_scope(url);
         match ORIG_OPEN_URL.load(Ordering::SeqCst) {
             0 => Bool::YES,
             f => {
@@ -295,6 +302,105 @@ mod imp {
             let hook: OpenUrlFn = open_url_hook;
             let old = method.set_implementation(std::mem::transmute(hook));
             ORIG_OPEN_URL.store(old as usize, Ordering::SeqCst);
+        }
+    }
+
+    // ── Scene lifecycle (iOS 27 SDK, Tauri 2.12 / tao 0.37) ──────────────
+    // With a UIApplicationSceneManifest, iOS no longer calls the app
+    // delegate's application:openURL:options:. A document opened from Files
+    // arrives at the scene delegate instead — scene:openURLContexts: while the
+    // app runs, and in the connection options of the first scene on a cold
+    // launch, which tao does not read at all. Both are wrapped here; the hooks
+    // must be in place before UIApplicationMain, i.e. between Builder::build
+    // (which registers TaoSceneDelegate) and App::run.
+
+    static ORIG_SCENE_OPEN: AtomicUsize = AtomicUsize::new(0);
+    static ORIG_SCENE_CONNECT: AtomicUsize = AtomicUsize::new(0);
+
+    type SceneOpenFn = unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject);
+    type SceneConnectFn =
+        unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject, *mut AnyObject);
+
+    /// Each UIOpenURLContext in an NSSet → its NSURL's scope opened.
+    unsafe fn grant_contexts(contexts: *mut AnyObject) {
+        if contexts.is_null() {
+            return;
+        }
+        let all: *mut AnyObject = msg_send![contexts, allObjects];
+        let n: usize = msg_send![all, count];
+        for i in 0..n {
+            let ctx: *mut AnyObject = msg_send![all, objectAtIndex: i];
+            let url: *mut AnyObject = msg_send![ctx, URL];
+            grant_scope(url);
+        }
+    }
+
+    unsafe extern "C" fn scene_open_hook(
+        this: *mut AnyObject,
+        cmd: Sel,
+        scene: *mut AnyObject,
+        contexts: *mut AnyObject,
+    ) {
+        grant_contexts(contexts);
+        let f = ORIG_SCENE_OPEN.load(Ordering::SeqCst);
+        if f != 0 {
+            let orig: SceneOpenFn = std::mem::transmute(f);
+            orig(this, cmd, scene, contexts);
+        }
+    }
+
+    unsafe extern "C" fn scene_connect_hook(
+        this: *mut AnyObject,
+        cmd: Sel,
+        scene: *mut AnyObject,
+        session: *mut AnyObject,
+        options: *mut AnyObject,
+    ) {
+        let f = ORIG_SCENE_CONNECT.load(Ordering::SeqCst);
+        if f != 0 {
+            let orig: SceneConnectFn = std::mem::transmute(f);
+            orig(this, cmd, scene, session, options);
+        }
+        // A cold launch from Files: the document is in the connection
+        // options, which tao ignores. Deliver it the way a warm open arrives,
+        // through scene:openURLContexts: (scope opened above, then tao emits
+        // RunEvent::Opened as usual).
+        if options.is_null() {
+            return;
+        }
+        let contexts: *mut AnyObject = msg_send![options, URLContexts];
+        if contexts.is_null() {
+            return;
+        }
+        let n: usize = msg_send![contexts, count];
+        if n > 0 {
+            let _: () = msg_send![this, scene: scene, openURLContexts: contexts];
+        }
+    }
+
+    /// Wrap TaoSceneDelegate's open-URL and connect methods. Call after
+    /// Builder::build and before App::run.
+    pub fn hook_scene_delegate() {
+        let Some(cls) = AnyClass::get("TaoSceneDelegate") else {
+            return;
+        };
+        unsafe {
+            if ORIG_SCENE_OPEN.load(Ordering::SeqCst) == 0 {
+                if let Some(m) = cls.instance_method(objc2::sel!(scene:openURLContexts:)) {
+                    let hook: SceneOpenFn = scene_open_hook;
+                    let old = m.set_implementation(std::mem::transmute(hook));
+                    ORIG_SCENE_OPEN.store(old as usize, Ordering::SeqCst);
+                }
+            }
+            if ORIG_SCENE_CONNECT.load(Ordering::SeqCst) == 0 {
+                if let Some(m) =
+                    cls.instance_method(objc2::sel!(scene:willConnectToSession:options:))
+                {
+                    let hook: SceneConnectFn = scene_connect_hook;
+                    let old = m.set_implementation(std::mem::transmute(hook));
+                    ORIG_SCENE_CONNECT.store(old as usize, Ordering::SeqCst);
+                }
+            }
         }
     }
 
@@ -337,9 +443,200 @@ mod imp {
             Some((path, fresh))
         })
     }
+
+    /// #425 — Synchronize `UIWindow.overrideUserInterfaceStyle` and `tintColor`
+    /// with SoloMD's active theme so the iPadOS native keyboard candidate bar
+    /// and status bar never render white-on-white when SoloMD uses a light
+    /// theme while iPadOS is in Dark Mode (or vice versa).
+    pub unsafe fn set_appearance(dark: bool) {
+        let Some(app_cls) = AnyClass::get("UIApplication") else {
+            return;
+        };
+        let app: *mut AnyObject = msg_send![app_cls, sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        // UIUserInterfaceStyleLight = 1, UIUserInterfaceStyleDark = 2
+        let style: isize = if dark { 2 } else { 1 };
+        let tint: *mut AnyObject = match AnyClass::get("UIColor") {
+            Some(c) => msg_send![
+                c,
+                colorWithRed: 224.0f64 / 255.0f64,
+                green: 123.0f64 / 255.0f64,
+                blue: 57.0f64 / 255.0f64,
+                alpha: 1.0f64
+            ],
+            None => null_mut(),
+        };
+        let scenes: *mut AnyObject = msg_send![app, connectedScenes];
+        if scenes.is_null() {
+            return;
+        }
+        let all: *mut AnyObject = msg_send![scenes, allObjects];
+        let count: usize = msg_send![all, count];
+        let Some(scene_cls) = AnyClass::get("UIWindowScene") else {
+            return;
+        };
+        for i in 0..count {
+            let scene: *mut AnyObject = msg_send![all, objectAtIndex: i];
+            let is_ws: Bool = msg_send![scene, isKindOfClass: scene_cls];
+            if !is_ws.as_bool() {
+                continue;
+            }
+            let windows: *mut AnyObject = msg_send![scene, windows];
+            let n: usize = msg_send![windows, count];
+            for j in 0..n {
+                let w: *mut AnyObject = msg_send![windows, objectAtIndex: j];
+                if w.is_null() {
+                    continue;
+                }
+                let _: () = msg_send![w, setOverrideUserInterfaceStyle: style];
+                if !tint.is_null() {
+                    let _: () = msg_send![w, setTintColor: tint];
+                }
+                let rvc: *mut AnyObject = msg_send![w, rootViewController];
+                if !rvc.is_null() {
+                    let _: () = msg_send![rvc, setNeedsStatusBarAppearanceUpdate];
+                }
+            }
+        }
+    }
 }
 
-#[cfg(target_os = "ios")]
+/// #428 — macOS security-scoped bookmark persistence so folders chosen via
+/// `NSOpenPanel` (such as `~/Documents/...`) retain access across app restarts.
+#[cfg(target_os = "macos")]
+mod mac_imp {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use std::ffi::{c_void, CStr, CString};
+    use std::ptr::null_mut;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// NSURLBookmarkCreationWithSecurityScope = 1 << 11
+    const BOOKMARK_CREATION_SECURITY_SCOPE: usize = 1 << 11;
+    /// NSURLBookmarkResolutionWithSecurityScope = 1 << 10
+    const BOOKMARK_RESOLUTION_SECURITY_SCOPE: usize = 1 << 10;
+
+    static ACTIVE_URL: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe fn ns_string(s: &str) -> *mut AnyObject {
+        let c = CString::new(s).unwrap_or_default();
+        msg_send![AnyClass::get("NSString").unwrap(), stringWithUTF8String: c.as_ptr()]
+    }
+
+    unsafe fn rust_string(ns: *mut AnyObject) -> Option<String> {
+        if ns.is_null() {
+            return None;
+        }
+        let p: *const std::os::raw::c_char = msg_send![ns, UTF8String];
+        (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+    }
+
+    unsafe fn bookmark_of(url: *mut AnyObject) -> Option<Vec<u8>> {
+        let mut err: *mut AnyObject = null_mut();
+        let mut data: *mut AnyObject = msg_send![url,
+            bookmarkDataWithOptions: BOOKMARK_CREATION_SECURITY_SCOPE,
+            includingResourceValuesForKeys: null_mut::<AnyObject>(),
+            relativeToURL: null_mut::<AnyObject>(),
+            error: &mut err as *mut *mut AnyObject];
+        if data.is_null() {
+            err = null_mut();
+            data = msg_send![url,
+                bookmarkDataWithOptions: 0usize,
+                includingResourceValuesForKeys: null_mut::<AnyObject>(),
+                relativeToURL: null_mut::<AnyObject>(),
+                error: &mut err as *mut *mut AnyObject];
+        }
+        if data.is_null() {
+            return None;
+        }
+        let len: usize = msg_send![data, length];
+        let bytes: *const c_void = msg_send![data, bytes];
+        if bytes.is_null() || len == 0 {
+            return None;
+        }
+        Some(std::slice::from_raw_parts(bytes as *const u8, len).to_vec())
+    }
+
+    unsafe fn activate(url: *mut AnyObject) -> Option<String> {
+        let _: Bool = msg_send![url, startAccessingSecurityScopedResource];
+        let _: *mut AnyObject = msg_send![url, retain];
+        let old = ACTIVE_URL.swap(url as usize, Ordering::SeqCst) as *mut AnyObject;
+        if !old.is_null() && old != url {
+            let _: () = msg_send![old, stopAccessingSecurityScopedResource];
+            let _: () = msg_send![old, release];
+        }
+        let path: *mut AnyObject = msg_send![url, path];
+        rust_string(path)
+    }
+
+    pub fn bookmark_for_path(path: &str) -> Option<Vec<u8>> {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let url_cls = AnyClass::get("NSURL")?;
+            let ns_path = ns_string(path);
+            if ns_path.is_null() {
+                return None;
+            }
+            let url: *mut AnyObject =
+                msg_send![url_cls, fileURLWithPath: ns_path, isDirectory: Bool::YES];
+            if url.is_null() {
+                return None;
+            }
+            let _ = activate(url);
+            bookmark_of(url)
+        })
+    }
+
+    pub fn active_path() -> Option<String> {
+        let url = ACTIVE_URL.load(Ordering::SeqCst) as *mut AnyObject;
+        if url.is_null() {
+            return None;
+        }
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let path: *mut AnyObject = msg_send![url, path];
+            rust_string(path)
+        })
+    }
+
+    pub fn restore(bookmark: &[u8]) -> Option<(String, Option<Vec<u8>>)> {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let data: *mut AnyObject = msg_send![AnyClass::get("NSData")?,
+                dataWithBytes: bookmark.as_ptr() as *const c_void,
+                length: bookmark.len()];
+            if data.is_null() {
+                return None;
+            }
+            let url_cls = AnyClass::get("NSURL")?;
+            let mut stale = Bool::NO;
+            let mut err: *mut AnyObject = null_mut();
+            let mut url: *mut AnyObject = msg_send![url_cls,
+                URLByResolvingBookmarkData: data,
+                options: BOOKMARK_RESOLUTION_SECURITY_SCOPE,
+                relativeToURL: null_mut::<AnyObject>(),
+                bookmarkDataIsStale: &mut stale as *mut Bool,
+                error: &mut err as *mut *mut AnyObject];
+            if url.is_null() {
+                stale = Bool::NO;
+                err = null_mut();
+                url = msg_send![url_cls,
+                    URLByResolvingBookmarkData: data,
+                    options: 0usize,
+                    relativeToURL: null_mut::<AnyObject>(),
+                    bookmarkDataIsStale: &mut stale as *mut Bool,
+                    error: &mut err as *mut *mut AnyObject];
+            }
+            if url.is_null() {
+                return None;
+            }
+            let path = activate(url)?;
+            let fresh = if stale.as_bool() { bookmark_of(url) } else { None };
+            Some((path, fresh))
+        })
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn bookmark_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -377,6 +674,26 @@ pub async fn ios_pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     }
 }
 
+/// #428 — Save a security-scoped bookmark on macOS when a folder is picked in
+/// `NSOpenPanel` so access to `~/Documents` / external folders survives app restarts.
+#[tauri::command]
+pub fn macos_bookmark_folder(app: AppHandle, path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bookmark) = mac_imp::bookmark_for_path(&path) {
+            if !bookmark.is_empty() {
+                let _ = std::fs::write(bookmark_path(&app)?, &bookmark);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, path);
+        Ok(())
+    }
+}
+
 /// At launch: reopen the folder picked last time. Its current path, or None
 /// when nothing was picked or the folder is gone.
 #[tauri::command]
@@ -402,10 +719,47 @@ pub fn ios_restore_folder(app: AppHandle) -> Result<Option<String>, String> {
             None => Ok(None),
         }
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(path) = mac_imp::active_path() {
+            return Ok(Some(path));
+        }
+        let file = bookmark_path(&app)?;
+        let Ok(bytes) = std::fs::read(&file) else {
+            return Ok(None);
+        };
+        match mac_imp::restore(&bytes) {
+            Some((path, fresh)) => {
+                if let Some(b) = fresh {
+                    let _ = std::fs::write(&file, b);
+                }
+                Ok(Some(path))
+            }
+            None => Ok(None),
+        }
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
     {
         let _ = app;
         Ok(None)
+    }
+}
+
+/// #425 — Set iOS/iPadOS `UIWindow.overrideUserInterfaceStyle` + `tintColor`
+/// to match SoloMD's effective light/dark theme.
+#[tauri::command]
+pub fn ios_set_appearance(app: AppHandle, dark: bool) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        app.run_on_main_thread(move || unsafe {
+            imp::set_appearance(dark);
+        })
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, dark);
+        Ok(())
     }
 }
 
@@ -414,6 +768,14 @@ pub fn ios_restore_folder(app: AppHandle) -> Result<Option<String>, String> {
 #[cfg(target_os = "ios")]
 pub fn hook_open_url() {
     imp::hook_open_url();
+}
+
+/// Scene-lifecycle counterpart of [`hook_open_url`]: documents opened from
+/// the Files app reach the scene delegate under the iOS 27 SDK. Must run
+/// between `Builder::build` and `App::run`.
+#[cfg(target_os = "ios")]
+pub fn hook_scene_delegate() {
+    imp::hook_scene_delegate();
 }
 
 /// Paths of documents opened in place from the Files app this session —

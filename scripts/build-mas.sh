@@ -44,8 +44,9 @@ fi
 : "${MAS_INSTALLER_IDENTITY:?Set MAS_INSTALLER_IDENTITY (3rd Party Mac Developer Installer cert)}"
 : "${MAS_PROVISIONING_PROFILE:?Set MAS_PROVISIONING_PROFILE (path to .provisionprofile)}"
 
-MAS_VERSION="${MAS_VERSION:-1.0.0}"
-MAS_BUILD_NUMBER="${MAS_BUILD_NUMBER:-1.0.4}"
+PKG_VERSION="$(node -p "require('./app/package.json').version")"
+MAS_VERSION="${MAS_VERSION:-$PKG_VERSION}"
+MAS_BUILD_NUMBER="${MAS_BUILD_NUMBER:-$MAS_VERSION}"
 
 if [ ! -f "$MAS_PROVISIONING_PROFILE" ]; then
   echo "ERROR: provisioning profile not found at $MAS_PROVISIONING_PROFILE" >&2

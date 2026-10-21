@@ -187,6 +187,40 @@ export function findMathSpanAt(text: string, offset: number): MathSpan | null {
   let i = 0;
   while (i < text.length) {
     if (text[i] === '\\') {
+      const next = text[i + 1];
+      if (next === '[' || next === '(') {
+        const isBlock = next === '[';
+        const closeDelim = isBlock ? '\\]' : '\\)';
+        const start = i;
+        let j = i + 2;
+        let close = -1;
+        while (j < text.length - 1) {
+          if (text.startsWith(closeDelim, j)) {
+            let bs = 0;
+            let k = j;
+            while (k >= i + 2 && text[k] === '\\') {
+              bs++;
+              k--;
+            }
+            if (bs % 2 === 1) {
+              close = j;
+              break;
+            }
+          }
+          j++;
+        }
+        if (close >= 0) {
+          const end = close + 2;
+          spans.push({
+            from: start,
+            to: end,
+            body: text.slice(start + 2, close).trim(),
+            display: isBlock,
+          });
+          i = end;
+          continue;
+        }
+      }
       i += 2;
       continue;
     }

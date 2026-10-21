@@ -1,0 +1,40 @@
+# title: Table draft survives backdrop and background close; apply writes to the original note
+# engines: cm
+# timeout: 180
+open:$V\table-acceptance.md
+uclick:源码@RadioButton
+uclick:~HeaderAlpha
+key:ctrl+home
+key:ctrl+alt+t
+ms:1500
+uia:table.dialog|表格编辑器
+udump:table-open
+uclick:~HeaderAlpha@DataItem
+key:ctrl+a
+type:EditedHeader
+ms:400
+click:100,730
+uia:table.backdrop-keeps-draft|~EditedHeader
+uclick:~EditedHeader@DataItem
+key:ctrl+w
+ms:500
+uia:table.close-prompts|有未保存的修改
+key:ctrl+w
+ms:500
+uia:table.repeat-close-preserves-prompt|有未保存的修改
+fileeq:table.disk-unchanged|table-acceptance.md|| HeaderAlpha | HeaderBeta |\n| --- | --- |\n| CellOne | CellTwo |\n
+uclick:取消@Button
+ms:400
+uia:table.continue-preserves-draft|~EditedHeader
+uclick:~EditedHeader@DataItem
+key:esc
+ms:400
+uia:table.escape-prompts|有未保存的修改
+uclick:应用@Button
+ms:600
+key:ctrl+s
+ms:1000
+filehas:table.apply-original-note|table-acceptance.md|EditedHeader
+filehas:table.other-cells-preserved|table-acceptance.md|CellOne
+uia:table.background-tab-retained|~table-acceptance.md@TabItem
+shot:table-applied

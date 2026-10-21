@@ -18,6 +18,9 @@ mod workspace_index;
 
 #[path = "spellcheck.rs"]
 mod spellcheck;
+// LanguageTool grammar / style checking — local server, Premium or public API.
+#[path = "languagetool.rs"]
+mod languagetool;
 
 // #102 — AI key storage abstraction; declared before ai_proxy which uses it.
 #[path = "ai_keystore.rs"]
@@ -41,6 +44,9 @@ mod capture_endpoint;
 // (the binary's real invoke handler lives in this file, not lib.rs).
 #[path = "quick_capture.rs"]
 mod quick_capture;
+
+#[path = "window_labels.rs"]
+mod window_labels;
 
 // v4.0 — public REST API mirroring the agent_tools surface for non-MCP
 // clients. Declared in both lib.rs and runner.rs so the binary's compile
@@ -168,6 +174,8 @@ mod app_build;
 // App Store builds ask for a rating with Apple's own sheet.
 #[path = "store_review.rs"]
 mod store_review;
+#[path = "iap.rs"]
+mod iap;
 #[path = "ios_folder.rs"]
 mod ios_folder;
 // #295 — Windows portable mode (`data` folder next to the exe).
@@ -178,13 +186,15 @@ mod portable;
 #[cfg(target_os = "windows")]
 #[path = "win_chrome.rs"]
 mod win_chrome;
+#[cfg(target_os = "windows")]
+#[path = "win_memory.rs"]
+mod win_memory;
+
+#[path = "menu_spec.rs"]
+mod menu_spec;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-#[cfg(not(target_os = "windows"))]
-use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-#[cfg(target_os = "macos")]
-use tauri::menu::{AboutMetadata, PredefinedMenuItem};
 use tauri::{Emitter, Manager, RunEvent};
 
 /// Tell macOS AppKit to use the given language for native dialogs
@@ -259,438 +269,129 @@ fn is_app_url(url: &tauri::Url) -> bool {
     }
 }
 
-/// Set to true by `force_close_window` command after the frontend confirms close.
-static FORCE_CLOSE: AtomicBool = AtomicBool::new(false);
+/// Labels whose frontend has finished its close handling (unsaved buffers
+/// persisted, or the user answered the unsaved-changes prompt) — their next
+/// CloseRequested goes through. Per label: a single global flag let one
+/// window's confirmation wave through every other window's close, and stayed
+/// set for a main window re-created after a single-instance relaunch.
+static CLOSE_CONFIRMED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Frontend calls this after user confirms "Discard & Close".
+/// Frontend calls this once its close handling is done.
 #[tauri::command]
 fn force_close_window(window: tauri::Window) {
-    FORCE_CLOSE.store(true, Ordering::Relaxed);
+    if let Ok(mut confirmed) = CLOSE_CONFIRMED.lock() {
+        confirmed.push(window.label().to_string());
+    }
     window.close().ok();
 }
 
-/// Localized menu strings. Two languages for now: "en" and "zh".
-#[cfg(not(target_os = "windows"))]
-struct MenuStrings {
-    file: &'static str,
-    edit: &'static str,
-    view: &'static str,
-    help: &'static str,
-    new_md: &'static str,
-    new_txt: &'static str,
-    open_file: &'static str,
-    open_folder: &'static str,
-    import_docs: &'static str,
-    save: &'static str,
-    save_as: &'static str,
-    print_item: &'static str,
-    close_tab: &'static str,
-    new_window: &'static str,
-    open_external: &'static str,
-    toggle_theme: &'static str,
-    toggle_sidebar: &'static str,
-    toggle_outline: &'static str,
-    cycle_view: &'static str,
-    // v4.3.0 PR #74 — 3-axis zoom (UI / Editor / Preview).
-    ui_zoom_in: &'static str,
-    ui_zoom_out: &'static str,
-    ui_zoom_reset: &'static str,
-    editor_zoom_in: &'static str,
-    editor_zoom_out: &'static str,
-    editor_zoom_reset: &'static str,
-    preview_zoom_in: &'static str,
-    preview_zoom_out: &'static str,
-    preview_zoom_reset: &'static str,
-    palette: &'static str,
-    global_search: &'static str,
-    settings_menu: &'static str,
-    md_help: &'static str,
-    help_shortcuts: &'static str,
-    help_cli: &'static str,
-    zoom: &'static str,
-    find: &'static str,
-    about: &'static str,
-    /// Only the Linux menu builds an Exit item (#272), so this is dead on
-    /// macOS and Windows — where Quit lives in the app menu / Alt+F4.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    exit: &'static str,
-}
-
-#[cfg(not(target_os = "windows"))]
-fn strings_for(lang: &str) -> MenuStrings {
-    if lang == "zh" {
-        MenuStrings {
-            file: "文件",
-            edit: "编辑",
-            view: "视图",
-            help: "帮助",
-            new_md: "新建 Markdown",
-            new_txt: "新建纯文本",
-            open_file: "打开文件…",
-            open_folder: "打开文件夹…",
-            import_docs: "导入文档…",
-            save: "保存",
-            save_as: "另存为…",
-            print_item: "打印…",
-            close_tab: "关闭标签页",
-            new_window: "新建窗口",
-            open_external: "用外部编辑器打开",
-            toggle_theme: "切换主题",
-            toggle_sidebar: "切换文件树",
-            toggle_outline: "切换大纲",
-            cycle_view: "切换视图模式 (编辑/分栏/预览)",
-            ui_zoom_in: "整体界面：放大",
-            ui_zoom_out: "整体界面：缩小",
-            ui_zoom_reset: "整体界面：复位",
-            editor_zoom_in: "编辑器：放大字号",
-            editor_zoom_out: "编辑器：缩小字号",
-            editor_zoom_reset: "编辑器：复位字号",
-            preview_zoom_in: "预览：放大字号",
-            preview_zoom_out: "预览：缩小字号",
-            preview_zoom_reset: "预览：复位字号",
-            palette: "命令面板",
-            global_search: "在文件夹中搜索…",
-            settings_menu: "设置…",
-            md_help: "Markdown 速查",
-            help_shortcuts: "快捷键一览",
-            help_cli: "命令行 (CLI)",
-            zoom: "缩放",
-            find: "查找和替换…",
-            about: "关于 SoloMD",
-            exit: "退出",
-        }
-    } else {
-        MenuStrings {
-            file: "File",
-            edit: "Edit",
-            view: "View",
-            help: "Help",
-            new_md: "New Markdown",
-            new_txt: "New Plain Text",
-            open_file: "Open File…",
-            open_folder: "Open Folder…",
-            import_docs: "Import Documents…",
-            save: "Save",
-            save_as: "Save As…",
-            print_item: "Print…",
-            close_tab: "Close Tab",
-            new_window: "New Window",
-            open_external: "Open in External Editor",
-            toggle_theme: "Toggle Theme",
-            toggle_sidebar: "Toggle File Tree",
-            toggle_outline: "Toggle Outline",
-            cycle_view: "Cycle Edit/Split/Preview",
-            ui_zoom_in: "UI: Zoom In",
-            ui_zoom_out: "UI: Zoom Out",
-            ui_zoom_reset: "UI: Reset Zoom",
-            editor_zoom_in: "Editor: Zoom In",
-            editor_zoom_out: "Editor: Zoom Out",
-            editor_zoom_reset: "Editor: Reset Zoom",
-            preview_zoom_in: "Preview: Zoom In",
-            preview_zoom_out: "Preview: Zoom Out",
-            preview_zoom_reset: "Preview: Reset Zoom",
-            palette: "Command Palette",
-            global_search: "Search in Folder…",
-            settings_menu: "Settings…",
-            md_help: "Markdown Cheatsheet",
-            help_shortcuts: "Keyboard Shortcuts",
-            help_cli: "Command Line (CLI)",
-            zoom: "Zoom",
-            find: "Find and Replace…",
-            about: "About SoloMD",
-            exit: "Exit",
-        }
+/// #423 — Open the webview inspector (DevTools) so theme authors can inspect
+/// DOM structure and CSS variables when writing custom themes.
+#[tauri::command]
+fn open_devtools_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        window
+            .with_webview(|platform| unsafe {
+                let Ok(core) = platform.controller().CoreWebView2() else { return };
+                if let Ok(settings) = core.Settings() {
+                    let _ = settings.SetAreDevToolsEnabled(true);
+                }
+                let _ = core.OpenDevToolsWindow();
+            })
+            .map_err(|e| e.to_string())?;
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn build_app_menu<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    lang: &str,
-    // #180 — the user's effective shortcut per menu-item id. A missing entry
-    // keeps the built-in accelerator; an entry holding an empty string means
-    // the action was rebound or unbound, so the item must carry NO
-    // accelerator — otherwise macOS keeps firing the old chord from the menu
-    // and "changing" a shortcut would only ever add a second one.
-    accels: &std::collections::HashMap<String, String>,
-) -> tauri::Result<tauri::menu::Menu<R>> {
-    let s = strings_for(lang);
-    // Resolve an item's accelerator: user override, else the shipped default.
-    macro_rules! accel {
-        ($item:expr, $id:expr, $default:expr) => {{
-            match accels.get($id).map(String::as_str) {
-                Some("") => $item,
-                Some(custom) => $item.accelerator(custom),
-                None => $item.accelerator($default),
-            }
-        }};
-    }
-
-    let new_md = accel!(MenuItemBuilder::with_id("file.new", s.new_md), "file.new", "CmdOrCtrl+N")
-        .build(app)?;
-    let new_txt = accel!(MenuItemBuilder::with_id("file.newText", s.new_txt), "file.newText", "CmdOrCtrl+Alt+N")
-        .build(app)?;
-    let open_file = accel!(MenuItemBuilder::with_id("file.open", s.open_file), "file.open", "CmdOrCtrl+O")
-        .build(app)?;
-    let open_folder = MenuItemBuilder::with_id("file.openFolder", s.open_folder).build(app)?;
-    // Converting a Word/PDF/HTML file has been possible for versions, but only
-    // by opening one — there was no entry point that said "import", which is
-    // the word people look for.
-    let import_docs = accel!(
-        MenuItemBuilder::with_id("file.import", s.import_docs),
-        "file.import",
-        "CmdOrCtrl+Shift+L"
-    )
-    .build(app)?;
-    let save = accel!(MenuItemBuilder::with_id("file.save", s.save), "file.save", "CmdOrCtrl+S")
-        .build(app)?;
-    let save_as = accel!(MenuItemBuilder::with_id("file.saveAs", s.save_as), "file.saveAs", "CmdOrCtrl+Shift+S")
-        .build(app)?;
-    let print_item = accel!(MenuItemBuilder::with_id("file.print", s.print_item), "file.print", "CmdOrCtrl+P")
-        .build(app)?;
-    let close_tab = accel!(MenuItemBuilder::with_id("file.closeTab", s.close_tab), "file.closeTab", "CmdOrCtrl+W")
-        .build(app)?;
-    let new_window = accel!(MenuItemBuilder::with_id("window.new", s.new_window), "window.new", "CmdOrCtrl+Shift+N")
-        .build(app)?;
-    let open_external = accel!(MenuItemBuilder::with_id("file.openExternal", s.open_external), "file.openExternal", "CmdOrCtrl+Shift+E")
-        .build(app)?;
-    // Linux tiling WM has no window X button — needs discoverable Exit in native menu (Ctrl+Q).
-    #[cfg(target_os = "linux")]
-    let exit_item =
-        accel!(MenuItemBuilder::with_id("file.exit", s.exit), "file.exit", "Ctrl+Q").build(app)?;
-
-    // Settings are application-wide, not a view option: the macOS app menu
-    // holds them by HIG convention, File does everywhere else.
-    let settings_item = accel!(MenuItemBuilder::with_id("view.settings", s.settings_menu), "view.settings", "CmdOrCtrl+,")
-        .build(app)?;
-
-    #[cfg(target_os = "linux")]
-    let file_submenu = SubmenuBuilder::new(app, s.file)
-        .item(&new_md)
-        .item(&new_txt)
-        .separator()
-        .item(&open_file)
-        .item(&open_folder)
-        .item(&import_docs)
-        .separator()
-        .item(&save)
-        .item(&save_as)
-        .separator()
-        .item(&open_external)
-        .separator()
-        .item(&print_item)
-        .separator()
-        .item(&new_window)
-        .item(&close_tab)
-        .separator()
-        .item(&settings_item)
-        .separator()
-        .item(&exit_item)
-        .build()?;
-    #[cfg(not(target_os = "linux"))]
-    let file_submenu = SubmenuBuilder::new(app, s.file)
-        .item(&new_md)
-        .item(&new_txt)
-        .separator()
-        .item(&open_file)
-        .item(&open_folder)
-        .item(&import_docs)
-        .separator()
-        .item(&save)
-        .item(&save_as)
-        .separator()
-        .item(&open_external)
-        .separator()
-        .item(&print_item)
-        .separator()
-        .item(&new_window)
-        .item(&close_tab)
-        .build()?;
-
-    // No accelerator on purpose: a native menu accelerator wins over the
-    // webview, and ⌘F has to reach whichever find is focused (the editor's,
-    // the preview's, the settings search box).
-    let find_item = MenuItemBuilder::with_id("edit.find", s.find).build(app)?;
-    let edit_submenu = SubmenuBuilder::new(app, s.edit)
-        .undo()
-        .redo()
-        .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .separator()
-        .item(&find_item)
-        .build()?;
-
-    let toggle_theme = MenuItemBuilder::with_id("view.toggleTheme", s.toggle_theme).build(app)?;
-    let toggle_sidebar = accel!(MenuItemBuilder::with_id("view.toggleFileTree", s.toggle_sidebar), "view.toggleFileTree", "CmdOrCtrl+B")
-        .build(app)?;
-    let toggle_outline = accel!(MenuItemBuilder::with_id("view.toggleOutline", s.toggle_outline), "view.toggleOutline", "CmdOrCtrl+Shift+O")
-        .build(app)?;
-    let cycle_view = accel!(MenuItemBuilder::with_id("view.cycleView", s.cycle_view), "view.cycleView", "CmdOrCtrl+Shift+P")
-        .build(app)?;
-    // v4.3.0 PR #74 — three independent zoom axes wired through native
-    // menu accelerators (more reliable than JS keyboard handlers on macOS,
-    // which the WKWebView can sometimes intercept). Action ids are
-    // dispatched in App.vue's `dispatchMenuAction`.
-    let ui_zoom_in = accel!(MenuItemBuilder::with_id("view.zoomUiIn", s.ui_zoom_in), "view.zoomUiIn", "CmdOrCtrl+=")
-        .build(app)?;
-    let ui_zoom_out = accel!(MenuItemBuilder::with_id("view.zoomUiOut", s.ui_zoom_out), "view.zoomUiOut", "CmdOrCtrl+-")
-        .build(app)?;
-    let ui_zoom_reset = accel!(MenuItemBuilder::with_id("view.zoomUiReset", s.ui_zoom_reset), "view.zoomUiReset", "CmdOrCtrl+0")
-        .build(app)?;
-    let editor_zoom_in = accel!(MenuItemBuilder::with_id("view.zoomEditorIn", s.editor_zoom_in), "view.zoomEditorIn", "CmdOrCtrl+Shift+=")
-        .build(app)?;
-    let editor_zoom_out = accel!(MenuItemBuilder::with_id("view.zoomEditorOut", s.editor_zoom_out), "view.zoomEditorOut", "CmdOrCtrl+Shift+-")
-        .build(app)?;
-    let editor_zoom_reset = accel!(MenuItemBuilder::with_id("view.zoomEditorReset", s.editor_zoom_reset), "view.zoomEditorReset", "CmdOrCtrl+Shift+0")
-        .build(app)?;
-    let preview_zoom_in = accel!(MenuItemBuilder::with_id("view.zoomPreviewIn", s.preview_zoom_in), "view.zoomPreviewIn", "CmdOrCtrl+Control+=")
-        .build(app)?;
-    let preview_zoom_out = accel!(MenuItemBuilder::with_id("view.zoomPreviewOut", s.preview_zoom_out), "view.zoomPreviewOut", "CmdOrCtrl+Control+-")
-        .build(app)?;
-    let preview_zoom_reset = accel!(MenuItemBuilder::with_id("view.zoomPreviewReset", s.preview_zoom_reset), "view.zoomPreviewReset", "CmdOrCtrl+Control+0")
-        .build(app)?;
-    let palette = accel!(MenuItemBuilder::with_id("view.cmdPalette", s.palette), "view.cmdPalette", "CmdOrCtrl+Shift+K")
-        .build(app)?;
-    let global_search = accel!(MenuItemBuilder::with_id("search.global", s.global_search), "search.global", "CmdOrCtrl+Shift+F")
-        .build(app)?;
-
-    // Nine rows of one pattern took half the View menu.
-    let zoom_submenu = SubmenuBuilder::new(app, s.zoom)
-        .item(&ui_zoom_in)
-        .item(&ui_zoom_out)
-        .item(&ui_zoom_reset)
-        .separator()
-        .item(&editor_zoom_in)
-        .item(&editor_zoom_out)
-        .item(&editor_zoom_reset)
-        .separator()
-        .item(&preview_zoom_in)
-        .item(&preview_zoom_out)
-        .item(&preview_zoom_reset)
-        .build()?;
-    // Debug builds only. This app builds its own menu, which replaces Tauri's
-    // default one — and the stock "Toggle Developer Tools" (⌥⌘I) lives in that
-    // default menu. Without an entry point here there is no way to reach a
-    // console at all. Label is deliberately not in the i18n table: it is a
-    // debug affordance, not user-facing copy.
-    #[cfg(debug_assertions)]
-    let toggle_devtools = MenuItemBuilder::with_id("view.devtools", "Toggle Developer Tools")
-        .accelerator("CmdOrCtrl+Alt+I")
-        .build(app)?;
-
-    let view_builder = SubmenuBuilder::new(app, s.view)
-        .item(&toggle_theme)
-        .separator()
-        .item(&toggle_sidebar)
-        .item(&toggle_outline)
-        .item(&cycle_view)
-        .separator()
-        .item(&zoom_submenu)
-        .separator()
-        .item(&palette)
-        .item(&global_search);
-    #[cfg(debug_assertions)]
-    let view_builder = view_builder.separator().item(&toggle_devtools);
-    let view_submenu = view_builder.build()?;
-
-    let md_help = accel!(MenuItemBuilder::with_id("help.markdown", s.md_help), "help.markdown", "F1")
-        .build(app)?;
-    let about = MenuItemBuilder::with_id("help.about", s.about).build(app)?;
-
-    // F1 opens a three-tab panel; one row per tab.
-    let help_shortcuts = MenuItemBuilder::with_id("help.shortcuts", s.help_shortcuts).build(app)?;
-    let help_cli = MenuItemBuilder::with_id("help.cli", s.help_cli).build(app)?;
-    let help_submenu = SubmenuBuilder::new(app, s.help)
-        .item(&md_help)
-        .item(&help_shortcuts)
-        .item(&help_cli)
-        .separator()
-        .item(&about)
-        .build()?;
-
-    // macOS: the first submenu becomes the "App menu" (titled with the
-    // app's process name) and is where users go for About / Settings /
-    // Quit by HIG convention. Without this, ⌘Q does nothing and the
-    // last menu item visually becomes "Close Tab" (issue #31).
     #[cfg(target_os = "macos")]
     {
-        let app_about_meta = AboutMetadata {
-            name: Some("SoloMD".into()),
-            version: Some(env!("CARGO_PKG_VERSION").into()),
-            credits: Some("Made by 智通 / xiangdong li".into()),
-            authors: Some(vec!["xiangdong li".into()]),
-            comments: Some("Lightweight, cross-platform Markdown editor.".into()),
-            website: Some("https://solomd.app".into()),
-            website_label: Some("solomd.app".into()),
-            ..Default::default()
-        };
-        let app_submenu = SubmenuBuilder::new(app, "SoloMD")
-            .about(Some(app_about_meta))
-            .separator()
-            .item(&settings_item)
-            .separator()
-            .item(&PredefinedMenuItem::services(app, None)?)
-            .separator()
-            .item(&PredefinedMenuItem::hide(app, None)?)
-            .item(&PredefinedMenuItem::hide_others(app, None)?)
-            .item(&PredefinedMenuItem::show_all(app, None)?)
-            .separator()
-            .item(&PredefinedMenuItem::quit(app, None)?)
-            .build()?;
-
-        let window_submenu = SubmenuBuilder::new(app, if lang == "zh" { "窗口" } else { "Window" })
-            .item(&PredefinedMenuItem::minimize(app, None)?)
-            .item(&PredefinedMenuItem::maximize(app, None)?)
-            .separator()
-            .item(&PredefinedMenuItem::close_window(app, None)?)
-            .build()?;
-
-        return MenuBuilder::new(app)
-            .items(&[
-                &app_submenu,
-                &file_submenu,
-                &edit_submenu,
-                &view_submenu,
-                &window_submenu,
-                &help_submenu,
-            ])
-            .build();
+        if !app_build::IS_APP_STORE {
+            let _ = window.with_webview(|platform| unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::{AnyClass, AnyObject, Bool};
+                let wv = platform.inner() as *mut AnyObject;
+                if wv.is_null() {
+                    return;
+                }
+                let cfg: *mut AnyObject = msg_send![wv, configuration];
+                if !cfg.is_null() {
+                    let prefs: *mut AnyObject = msg_send![cfg, preferences];
+                    if !prefs.is_null() {
+                        if let Some(ns_num_cls) = AnyClass::get("NSNumber") {
+                            let yes: *mut AnyObject =
+                                msg_send![ns_num_cls, numberWithBool: Bool::YES];
+                            let key =
+                                objc2_foundation::NSString::from_str("developerExtrasEnabled");
+                            let _: () = msg_send![prefs, setValue: yes, forKey: &*key];
+                        }
+                    }
+                }
+                let inspector: *mut AnyObject = msg_send![wv, _inspector];
+                if !inspector.is_null() {
+                    let _: () = msg_send![inspector, show: wv];
+                }
+            });
+        }
     }
-
-    #[cfg(not(target_os = "macos"))]
-    MenuBuilder::new(app)
-        .items(&[&file_submenu, &edit_submenu, &view_submenu, &help_submenu])
-        .build()
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = window;
+    }
+    Ok(())
 }
 
-/// Frontend calls this when user changes language in Settings.
-/// Windows has no native menu bar (frameless unified title bar — the in-app
-/// menu re-renders reactively from the i18n store), so it's a no-op there.
-#[tauri::command]
-fn set_menu_language(app: tauri::AppHandle, lang: String) -> Result<(), String> {
-    set_menu_config(app, lang, std::collections::HashMap::new())
+/// True (and consumed) when `label`'s frontend already confirmed this close.
+fn take_close_confirmation(label: &str) -> bool {
+    let Ok(mut confirmed) = CLOSE_CONFIRMED.lock() else { return false };
+    match confirmed.iter().position(|l| l == label) {
+        Some(i) => {
+            confirmed.remove(i);
+            true
+        }
+        None => false,
+    }
 }
 
-/// #180 — rebuild the native menu with the user's shortcut overrides applied.
-/// `accels` maps a menu item id to a Tauri accelerator string, or to an empty
-/// string to strip the accelerator entirely (the action moved to a chord the
-/// webview owns, or the user unbound it).
+/// The main window, re-created from tauri.conf.json if it is gone.
+///
+/// Closing the main window used to leave the process running whenever another
+/// window survived it (the hidden quick-capture box, a second editor window
+/// whose close the user cancelled). A relaunch then reached that process
+/// through single-instance, which only knew how to re-show `main` — so nothing
+/// appeared and the app was unreachable until killed.
+#[cfg(desktop)]
+fn ensure_main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(win) = app.get_webview_window(window_labels::MAIN_LABEL) {
+        return Some(win);
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == window_labels::MAIN_LABEL)?
+        .clone();
+    let win = tauri::WebviewWindowBuilder::from_config(app, &config)
+        .and_then(|b| b.build())
+        .map_err(|e| eprintln!("[single-instance] could not re-create the main window: {e}"))
+        .ok()?;
+    #[cfg(target_os = "windows")]
+    win_chrome::install(&win, app);
+    Some(win)
+}
+
+/// bug/C1 — rebuild the native menu from the frontend's spec
+/// (`lib/app-menu.ts`): the same seven menus the Windows title-bar menubar
+/// renders, labels in the UI language, accelerators = the bindings in effect.
+/// Windows has no native menu bar (frameless unified title bar), so it is a
+/// no-op there.
 #[tauri::command]
-fn set_menu_config(
-    app: tauri::AppHandle,
-    lang: String,
-    accels: std::collections::HashMap<String, String>,
-) -> Result<(), String> {
+fn set_menu_spec(app: tauri::AppHandle, menus: Vec<menu_spec::TopMenu>) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
-        let menu = build_app_menu(&app, &lang, &accels).map_err(|e| e.to_string())?;
+        let menu = menu_spec::build_menu(&app, &menus).map_err(|e| e.to_string())?;
         app.set_menu(menu).map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "windows")]
-    let _ = (app, lang, accels);
+    let _ = (app, menus);
     Ok(())
 }
 
@@ -830,6 +531,30 @@ pub fn run_with(initial_file: Option<String>) {
 
     let builder = tauri::Builder::default();
 
+    // 张工 4.14.8 report #5 — WebView2 answers its own browser shortcuts when
+    // the page doesn't: Ctrl+J opened the Edge downloads page over the editor,
+    // F5 / Ctrl+R reload the app and throw away whatever isn't saved yet,
+    // Ctrl+H / Ctrl+U / Ctrl+Shift+O open browser pages that make no sense
+    // here. AreBrowserAcceleratorKeysEnabled=false turns those off and nothing
+    // else: editing keys (copy, paste, undo, select all) and the app's own
+    // shortcuts keep working, and zoom is a separate setting. Release builds
+    // only, so dev builds keep F5 and the devtools shortcuts.
+    #[cfg(all(windows, not(debug_assertions)))]
+    let builder = builder.on_page_load(|webview, payload| {
+        if payload.event() != tauri::webview::PageLoadEvent::Started {
+            return;
+        }
+        let _ = webview.with_webview(|platform| unsafe {
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+            use windows_core::Interface;
+            let Ok(core) = platform.controller().CoreWebView2() else { return };
+            let Ok(settings) = core.Settings() else { return };
+            if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
+                let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(false);
+            }
+        });
+    });
+
     // #86/#87(1) — single-instance must register BEFORE any other plugin so
     // its handler hooks into the OS' "another instance launching" signal
     // before the rest of the app starts initialising. The second launch
@@ -840,16 +565,35 @@ pub fn run_with(initial_file: Option<String>) {
     let builder = builder.plugin(tauri_plugin_single_instance::init(
         |app: &tauri::AppHandle, argv: Vec<String>, _cwd: String| {
             use tauri::Emitter;
-            if let Some(win) = app.get_webview_window("main") {
+            let files: Vec<String> = argv
+                .iter()
+                .skip(1)
+                .filter(|a| !a.is_empty() && !a.starts_with('-'))
+                .cloned()
+                .collect();
+            if let Some(win) = app.get_webview_window(window_labels::MAIN_LABEL) {
                 let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
-            }
-            for arg in argv.iter().skip(1) {
-                if !arg.is_empty() && !arg.starts_with('-') {
-                    let _ = app.emit("solomd://opened-file", arg.clone());
+                for f in files {
+                    let _ = app.emit("solomd://opened-file", f);
                 }
+                return;
             }
+            // No main window: build a fresh one. Its frontend is not listening
+            // yet, so file arguments wait in PendingOpen, which it drains on
+            // mount. Built off this thread — on Windows the callback runs
+            // inside the event loop, which the builder has to wait on.
+            if let Some(state) = app.try_state::<PendingOpen>() {
+                state.0.lock().unwrap().extend(files);
+            }
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if let Some(win) = ensure_main_window(&app) {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            });
         },
     ));
 
@@ -930,6 +674,7 @@ pub fn run_with(initial_file: Option<String>) {
             commands::fs_create_dir,
             commands::fs_delete,
             commands::fs_dir_exists,
+            commands::webview_runtime_version,
             commands::fs_rename,
             commands::fs_move,
             commands::fs_list_dirs,
@@ -938,8 +683,7 @@ pub fn run_with(initial_file: Option<String>) {
             search::search_in_dir,
             drain_pending_opens,
             force_close_window,
-            set_menu_language,
-            set_menu_config,
+            set_menu_spec,
             set_max_button_rect,
             save_language_preference,
             set_default::set_as_default_markdown_editor,
@@ -964,6 +708,13 @@ pub fn run_with(initial_file: Option<String>) {
             spellcheck::spellcheck_load_user_dict,
             spellcheck::spellcheck_list_dicts,
             spellcheck::spellcheck_dicts_dir,
+            languagetool::languagetool_check,
+            languagetool::languagetool_detect,
+            languagetool::languagetool_set_api_key,
+            languagetool::languagetool_has_api_key,
+            languagetool::languagetool_clear_api_key,
+            languagetool::languagetool_words_add,
+            languagetool::languagetool_words_list,
             ai_proxy::ai_set_key,
             ai_proxy::ai_has_key,
             ai_proxy::ai_clear_key,
@@ -1078,9 +829,16 @@ pub fn run_with(initial_file: Option<String>) {
             // about-dialog build info (was lib.rs-only too).
             app_build::app_build_info,
             store_review::request_store_review,
+            iap::iap_get_state,
+            iap::iap_fetch_products,
+            iap::iap_purchase,
+            iap::iap_restore,
             ios_folder::ios_pick_folder,
+            ios_folder::macos_bookmark_folder,
             ios_folder::ios_restore_folder,
+            ios_folder::ios_set_appearance,
             ios_folder::ios_scoped_files,
+            open_devtools_window,
             recipe_runner::recipes_list,
             recipe_runner::recipes_get,
             recipe_runner::recipes_save,
@@ -1150,11 +908,21 @@ pub fn run_with(initial_file: Option<String>) {
 
             // Build initial menu in English — the frontend will call
             // `set_menu_language` on mount to apply the user's saved preference.
+            // #428 — Reopen the last bookmarked workspace folder on macOS ahead
+            // of the frontend's initial `list_dir` call so `~/Documents` and
+            // other user-selected folders keep their security-scoped access.
+            #[cfg(target_os = "macos")]
+            {
+                let _ = ios_folder::ios_restore_folder(app.handle().clone());
+            }
+
+            // A minimal startup menu (app menu + Edit) — the frontend sends
+            // the full, localized one (`set_menu_spec`) as soon as it mounts.
             // Windows: no native menu — the frameless window renders its own
-            // File/Edit/View/Help menubar inside the unified toolbar row.
+            // menubar inside the unified toolbar row from the same spec.
             #[cfg(not(target_os = "windows"))]
             {
-                let menu = build_app_menu(app.handle(), "en", &std::collections::HashMap::new())?;
+                let menu = menu_spec::build_menu(app.handle(), &menu_spec::startup_spec())?;
                 app.set_menu(menu)?;
             }
 
@@ -1262,28 +1030,61 @@ pub fn run_with(initial_file: Option<String>) {
             }
 
             // ---- Window close: intercept and ask frontend ----
-            // Only the main window gets the unsaved-tabs check. Auxiliary
-            // windows (slideshow, "open file in new window" spawns labelled
-            // `solomd-window-N` — #103) close directly: their frontend
-            // (App.vue's onCloseRequested for aux labels) removes them from
-            // the shared windows registry so they don't resurrect next launch.
-            // Routing them through the main window's listener would instead
-            // shut down the editor.
+            // Every window that holds editable documents — main, "New Window"
+            // and "open in new window" — hands its close to its own frontend
+            // first (App.vue's close-requested listener): main persists its
+            // buffers for session restore; a second window asks about unsaved
+            // tabs, since nothing restores it. Second windows used to close
+            // straight away and silently drop their edits. The payload is the
+            // label, so only the window being closed reacts — the event used
+            // to be broadcast, and every window force-closed itself with main.
+            // Slideshow and quick capture have nothing to lose and close as is.
             RunEvent::WindowEvent {
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 label,
                 ..
             } => {
-                if label != "main" {
-                    return; // let the auxiliary window close itself
+                if !window_labels::is_editor_window(label) {
+                    return;
                 }
-                if FORCE_CLOSE.load(Ordering::Relaxed) {
+                if take_close_confirmation(label) {
                     // Frontend confirmed — let the close proceed.
                     return;
                 }
-                // Prevent the close and ask the frontend to check unsaved tabs.
                 api.prevent_close();
-                let _ = app_handle.emit("solomd://close-requested", ());
+                let _ = app_handle.emit("solomd://close-requested", label.clone());
+            }
+
+            // ---- Main window destroyed: the app is quitting ----
+            // Closing the main window (✕, Ctrl+Q / Exit) means quit. Windows
+            // that only make sense next to it go now — the hidden quick-capture
+            // box used to keep the process alive with no way back in. Other
+            // editor windows are asked to close through the same unsaved-
+            // changes path; one the user keeps open keeps the app running, and
+            // a relaunch re-creates the main window (single-instance above).
+            // Once nothing is left, Tauri exits on its own.
+            RunEvent::WindowEvent {
+                event: tauri::WindowEvent::Destroyed,
+                label,
+                ..
+            } if label == window_labels::MAIN_LABEL => {
+                for (other, win) in app_handle.webview_windows() {
+                    if window_labels::closes_with_main(&other) {
+                        let _ = win.destroy();
+                    } else if window_labels::is_editor_window(&other) {
+                        let _ = app_handle.emit("solomd://close-requested", other.clone());
+                    }
+                }
+            }
+
+            // ---- Minimize: let WebView2 trim the renderer (Windows) ----
+            #[cfg(target_os = "windows")]
+            RunEvent::WindowEvent {
+                event: tauri::WindowEvent::Resized(_),
+                label,
+                ..
+            } => {
+                win_memory::on_resized(app_handle, label);
             }
 
             // ---- Auxiliary window destroyed ----

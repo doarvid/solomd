@@ -1,0 +1,9 @@
+Formulas are no longer cut off at the bottom in preview, split view and exports.
+
+Wide tables wrap inside the page in PDF, print, HTML and image export.
+
+New commands: raise or lower a heading level, turn a heading back into a paragraph, select word, select line, reopen a closed tab.
+
+The toolbar is tidier: New, Open, Export, Insert and the view modes are now menus.
+
+Thank you to our tester 张工, whose careful reports led to many of these fixes.

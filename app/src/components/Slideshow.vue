@@ -1,12 +1,22 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { renderMarkdown } from '../lib/markdown';
+import { loadRenderDeps } from '../lib/render-deps';
+import { themeFamily } from '../lib/themes';
+import type { Theme } from '../types';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import Reveal from 'reveal.js';
 import 'reveal.js/reveal.css';
 
 const STORAGE_KEY = 'solomd:slideshow:content';
 const TITLE_KEY = 'solomd:slideshow:title';
+const THEME_KEY = 'solomd:slideshow:theme';
+const SCALE_KEY = 'solomd:slideshow:scale';
+const SETTINGS_KEY = 'solomd:settings';
+
+const SCALE_MIN = 60;
+const SCALE_MAX = 180;
+const SCALE_STEP = 10;
 
 // ---------------------------------------------------------------------------
 // v3.5: full reveal.js migration. The previous slideshow was a hand-rolled
@@ -30,6 +40,81 @@ const total = ref(0);
 const idx = ref(0);
 const showHelp = ref(false);
 const title = ref('');
+
+function readInitialThemeAndLang(): { theme: 'light' | 'dark'; isZh: boolean } {
+  let appTheme: 'light' | 'dark' = 'dark';
+  let isZh = false;
+  try {
+    const rawSettings = localStorage.getItem(SETTINGS_KEY);
+    if (rawSettings) {
+      const parsed = JSON.parse(rawSettings) as { theme?: Theme; language?: string };
+      if (parsed.theme) appTheme = themeFamily(parsed.theme);
+      if (parsed.language === 'zh') isZh = true;
+    } else if (typeof navigator !== 'undefined' && /^zh/i.test(navigator.language || '')) {
+      isZh = true;
+    }
+    const savedSlideTheme = localStorage.getItem(THEME_KEY);
+    if (savedSlideTheme === 'light' || savedSlideTheme === 'dark') {
+      return { theme: savedSlideTheme, isZh };
+    }
+  } catch {}
+  return { theme: appTheme, isZh };
+}
+
+function readInitialScale(): number {
+  try {
+    const raw = Number(localStorage.getItem(SCALE_KEY));
+    if (Number.isFinite(raw) && raw >= SCALE_MIN && raw <= SCALE_MAX) {
+      return Math.round(raw / SCALE_STEP) * SCALE_STEP;
+    }
+  } catch {}
+  return 100;
+}
+
+const init = readInitialThemeAndLang();
+const slideTheme = ref<'light' | 'dark'>(init.theme);
+const isZh = ref(init.isZh);
+const fontScale = ref<number>(readInitialScale());
+
+const slideStyle = computed(() => ({
+  '--slide-scale': String(fontScale.value / 100),
+}));
+
+function toggleSlideTheme() {
+  slideTheme.value = slideTheme.value === 'dark' ? 'light' : 'dark';
+  try {
+    localStorage.setItem(THEME_KEY, slideTheme.value);
+  } catch {}
+}
+
+function setFontScale(next: number) {
+  const clamped = Math.max(SCALE_MIN, Math.min(SCALE_MAX, Math.round(next / SCALE_STEP) * SCALE_STEP));
+  fontScale.value = clamped;
+  try {
+    localStorage.setItem(SCALE_KEY, String(clamped));
+  } catch {}
+  requestAnimationFrame(() => {
+    try { deck?.layout(); } catch {}
+  });
+}
+
+function zoomIn() {
+  setFontScale(fontScale.value + SCALE_STEP);
+}
+
+function zoomOut() {
+  setFontScale(fontScale.value - SCALE_STEP);
+}
+
+function zoomReset() {
+  setFontScale(100);
+}
+
+watch(slideTheme, () => {
+  requestAnimationFrame(() => {
+    try { deck?.layout(); } catch {}
+  });
+});
 
 type RevealDeck = InstanceType<typeof Reveal>;
 let deck: RevealDeck | null = null;
@@ -225,11 +310,23 @@ async function exitShow() {
 
 function onKey(e: KeyboardEvent) {
   // Reveal handles arrow keys / space / page-up/down natively. We only
-  // need our own escape-hatch shortcuts: F (fullscreen), Esc (exit),
-  // ? (help overlay).
-  if (e.key === 'f' || e.key === 'F') {
+  // need our own escape-hatch shortcuts: F (fullscreen), T (theme),
+  // +/-/0 (font size), Esc (exit), ? (help overlay).
+  if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     toggleFullscreen();
+  } else if ((e.key === 't' || e.key === 'T') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    toggleSlideTheme();
+  } else if (e.key === '+' || e.key === '=') {
+    e.preventDefault();
+    zoomIn();
+  } else if (e.key === '-' || e.key === '_') {
+    e.preventDefault();
+    zoomOut();
+  } else if (e.key === '0') {
+    e.preventDefault();
+    zoomReset();
   } else if (e.key === '?') {
     e.preventDefault();
     showHelp.value = !showHelp.value;
@@ -249,14 +346,23 @@ onMounted(async () => {
     source = localStorage.getItem(STORAGE_KEY) || '';
     title.value = localStorage.getItem(TITLE_KEY) || 'Slideshow';
   } catch {}
-  // Strip front matter (first --- ... --- block) — front-matter is config,
-  // not slide-1 content.
-  source = source.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
+  // Optional front-matter `theme: light | dark` override before stripping front matter.
+  const fmMatch = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(source);
+  if (fmMatch) {
+    const themeMatch = /^\s*theme\s*:\s*(light|dark)\s*$/im.exec(fmMatch[1]);
+    if (themeMatch) {
+      slideTheme.value = themeMatch[1].toLowerCase() as 'light' | 'dark';
+    }
+    source = source.slice(fmMatch[0].length);
+  }
   document.title = `${title.value} — SoloMD Slideshow`;
 
   // Build the DOM once into the .slides container, then init Reveal on
   // the wrapper. Reveal expects the structure to be present at init time.
   if (slidesRef.value) {
+    // Math and code colours are lazy chunks (render-deps.ts); the deck is
+    // rendered once, so wait for them rather than present placeholders.
+    await loadRenderDeps().catch(() => {});
     buildDeck(source, slidesRef.value);
   }
 
@@ -303,30 +409,77 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="containerRef" class="solomd-slideshow reveal">
+  <div
+    ref="containerRef"
+    class="solomd-slideshow reveal"
+    :class="`solomd-slideshow--${slideTheme}`"
+    :style="slideStyle"
+  >
     <div ref="slidesRef" class="slides"></div>
     <div class="slide__hud" @click.stop>
       <span class="slide__pos">{{ idx + 1 }} / {{ total }}</span>
-      <span class="slide__hint">F fullscreen · ? help · Esc exit</span>
+      <div class="slide__controls">
+        <button
+          type="button"
+          class="slide__btn"
+          :title="isZh ? '切换白底黑字 / 黑底白字 (T)' : 'Toggle Light / Dark theme (T)'"
+          @click="toggleSlideTheme"
+        >
+          {{ slideTheme === 'dark' ? (isZh ? '☀ 白底' : '☀ Light') : (isZh ? '☾ 黑底' : '☾ Dark') }}
+        </button>
+        <div class="slide__zoom" role="group" :aria-label="isZh ? '字号缩放' : 'Font zoom'">
+          <button
+            type="button"
+            class="slide__btn slide__btn--icon"
+            :disabled="fontScale <= SCALE_MIN"
+            :title="isZh ? '缩小字号 (-)' : 'Decrease font size (-)'"
+            @click="zoomOut"
+          >−</button>
+          <button
+            type="button"
+            class="slide__btn slide__btn--pct"
+            :title="isZh ? '重置字号 (0)' : 'Reset font size (0)'"
+            @click="zoomReset"
+          >{{ fontScale }}%</button>
+          <button
+            type="button"
+            class="slide__btn slide__btn--icon"
+            :disabled="fontScale >= SCALE_MAX"
+            :title="isZh ? '放大字号 (+)' : 'Increase font size (+)'"
+            @click="zoomIn"
+          >+</button>
+        </div>
+      </div>
+      <span class="slide__hint">
+        {{ isZh ? 'T 主题 · +/- 字号 · F 全屏 · ? 帮助 · Esc 退出' : 'T theme · +/- zoom · F fullscreen · ? help · Esc exit' }}
+      </span>
     </div>
     <div v-if="showHelp" class="slide__help" @click.stop="showHelp = false">
       <div class="slide__help-card">
-        <h2>Slideshow Shortcuts</h2>
+        <h2>{{ isZh ? '幻灯片快捷键' : 'Slideshow Shortcuts' }}</h2>
         <table>
           <tbody>
-            <tr><td>Next slide</td><td>→ ↓ Space PageDown</td></tr>
-            <tr><td>Previous slide</td><td>← ↑ PageUp</td></tr>
-            <tr><td>First / last slide</td><td>Home / End</td></tr>
-            <tr><td>Toggle fullscreen</td><td>F</td></tr>
-            <tr><td>Show / hide this help</td><td>?</td></tr>
-            <tr><td>Exit</td><td>Esc</td></tr>
-            <tr><td>Vertical sub-slides</td><td>Use <code>--</code> separator</td></tr>
+            <tr><td>{{ isZh ? '下一页' : 'Next slide' }}</td><td>→ ↓ Space PageDown</td></tr>
+            <tr><td>{{ isZh ? '上一页' : 'Previous slide' }}</td><td>← ↑ PageUp</td></tr>
+            <tr><td>{{ isZh ? '首页 / 末页' : 'First / last slide' }}</td><td>Home / End</td></tr>
+            <tr><td>{{ isZh ? '切换白底黑字 / 黑底白字' : 'Toggle Light / Dark theme' }}</td><td>T</td></tr>
+            <tr><td>{{ isZh ? '字号放大 / 缩小 / 重置' : 'Font zoom in / out / reset' }}</td><td>+ / - / 0</td></tr>
+            <tr><td>{{ isZh ? '切换全屏' : 'Toggle fullscreen' }}</td><td>F</td></tr>
+            <tr><td>{{ isZh ? '显示 / 隐藏帮助' : 'Show / hide this help' }}</td><td>?</td></tr>
+            <tr><td>{{ isZh ? '退出演示' : 'Exit' }}</td><td>Esc</td></tr>
+            <tr><td>{{ isZh ? '垂直子页' : 'Vertical sub-slides' }}</td><td>{{ isZh ? '使用 ' : 'Use ' }}<code>--</code>{{ isZh ? ' 分隔' : ' separator' }}</td></tr>
           </tbody>
         </table>
         <p class="slide__help-foot">
-          Slides split by <code>---</code> (horizontal) or <code>--</code>
-          (vertical). Add a background with
-          <code>&lt;!-- bg: ./image.jpg --&gt;</code> at the top of any slide.
+          <template v-if="isZh">
+            使用 <code>---</code>（水平翻页）或 <code>--</code>（垂直子页）分隔幻灯片。可在任意页顶部添加
+            <code>&lt;!-- bg: ./image.jpg --&gt;</code> 设置背景。
+          </template>
+          <template v-else>
+            Slides split by <code>---</code> (horizontal) or <code>--</code>
+            (vertical). Add a background with
+            <code>&lt;!-- bg: ./image.jpg --&gt;</code> at the top of any slide.
+          </template>
         </p>
       </div>
     </div>
@@ -335,26 +488,61 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .solomd-slideshow {
+  --slide-scale: 1;
+  --slide-bg: #1a1a1a;
+  --slide-fg: #f0f0f0;
+  --slide-muted: #cccccc;
+  --slide-code-bg: rgba(255, 255, 255, 0.1);
+  --slide-pre-bg: rgba(0, 0, 0, 0.4);
+  --slide-border: rgba(255, 255, 255, 0.2);
+  --slide-hud-fg: rgba(255, 255, 255, 0.55);
+  --slide-hud-strong: rgba(255, 255, 255, 0.85);
+  --slide-btn-bg: rgba(255, 255, 255, 0.08);
+  --slide-btn-hover: rgba(255, 255, 255, 0.16);
+  --slide-accent: #ff9f40;
   position: fixed;
   inset: 0;
-  background: #1a1a1a;
-  color: #f0f0f0;
+  background: var(--slide-bg);
+  color: var(--slide-fg);
   overflow: hidden;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+.solomd-slideshow--light {
+  --slide-bg: #ffffff;
+  --slide-fg: #1f1e1c;
+  --slide-muted: #5e5b55;
+  --slide-code-bg: rgba(31, 30, 28, 0.07);
+  --slide-pre-bg: #f4f3f0;
+  --slide-border: rgba(31, 30, 28, 0.15);
+  --slide-hud-fg: rgba(31, 30, 28, 0.55);
+  --slide-hud-strong: rgba(31, 30, 28, 0.85);
+  --slide-btn-bg: rgba(31, 30, 28, 0.06);
+  --slide-btn-hover: rgba(31, 30, 28, 0.12);
+  --slide-accent: #b4561b;
 }
 /*
  * Reveal injects its own classes (.reveal, .slides). We override visuals
- * to match the previous SoloMD slideshow look-and-feel — dark canvas,
- * larger headings, accent-orange links — instead of pulling in any of
- * reveal's bundled themes (which would double the CSS payload).
+ * to match the SoloMD slideshow look-and-feel — dark or light canvas,
+ * scalable font size, accent-orange links — without pulling in reveal's
+ * bundled themes.
  */
 .solomd-slideshow :deep(.slides) {
   text-align: left !important;
 }
 .solomd-slideshow :deep(.slides section) {
-  font-size: clamp(20px, 2.4vw, 32px);
+  font-size: calc(clamp(20px, 2.4vw, 32px) * var(--slide-scale, 1));
   line-height: 1.55;
   padding: 40px 60px;
   text-align: left;
+  color: var(--slide-fg);
+}
+.solomd-slideshow :deep(h1),
+.solomd-slideshow :deep(h2),
+.solomd-slideshow :deep(h3),
+.solomd-slideshow :deep(h4),
+.solomd-slideshow :deep(h5),
+.solomd-slideshow :deep(h6) {
+  color: var(--slide-fg);
 }
 .solomd-slideshow :deep(h1) {
   font-size: 2.4em;
@@ -383,13 +571,15 @@ onBeforeUnmount(() => {
 }
 .solomd-slideshow :deep(li) { margin: 0.25em 0; }
 .solomd-slideshow :deep(code) {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--slide-code-bg);
+  color: var(--slide-fg);
   padding: 0.1em 0.35em;
   border-radius: 4px;
   font-size: 0.85em;
 }
 .solomd-slideshow :deep(pre) {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--slide-pre-bg);
+  color: var(--slide-fg);
   padding: 16px 20px;
   border-radius: 8px;
   overflow-x: auto;
@@ -403,9 +593,9 @@ onBeforeUnmount(() => {
   display: block;
 }
 .solomd-slideshow :deep(blockquote) {
-  border-left: 4px solid #ff9f40;
+  border-left: 4px solid var(--slide-accent);
   padding-left: 16px;
-  color: #ccc;
+  color: var(--slide-muted);
   font-style: italic;
 }
 .solomd-slideshow :deep(table) {
@@ -415,7 +605,7 @@ onBeforeUnmount(() => {
 }
 .solomd-slideshow :deep(th),
 .solomd-slideshow :deep(td) {
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid var(--slide-border);
   padding: 8px 14px;
 }
 .solomd-slideshow :deep(img) {
@@ -423,30 +613,69 @@ onBeforeUnmount(() => {
   height: auto;
   border-radius: 6px;
 }
-.solomd-slideshow :deep(a) { color: #ff9f40; }
-.solomd-slideshow :deep(hr) { border-color: rgba(255, 255, 255, 0.2); }
+.solomd-slideshow :deep(a) { color: var(--slide-accent); }
+.solomd-slideshow :deep(hr) { border-color: var(--slide-border); }
 .slide__hud {
   position: fixed;
   bottom: 16px;
   right: 24px;
   display: flex;
-  gap: 16px;
+  gap: 12px;
   align-items: center;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--slide-hud-fg);
   font-family: ui-monospace, Menlo, monospace;
-  pointer-events: none;
   z-index: 100;
 }
 .slide__pos {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   font-size: 14px;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--slide-hud-strong);
+  pointer-events: none;
+}
+.slide__controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.slide__zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.slide__btn {
+  appearance: none;
+  border: 1px solid var(--slide-border);
+  background: var(--slide-btn-bg);
+  color: var(--slide-hud-strong);
+  font: 11px/1 ui-monospace, Menlo, monospace;
+  padding: 4px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+.slide__btn:hover:not(:disabled) {
+  background: var(--slide-btn-hover);
+}
+.slide__btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.slide__btn--icon {
+  padding: 4px 6px;
+  min-width: 22px;
+  text-align: center;
+}
+.slide__btn--pct {
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: center;
 }
 .slide__hint {
   display: inline;
   font-size: 11px;
+  pointer-events: none;
 }
 .slide__help {
   position: fixed;
@@ -458,16 +687,19 @@ onBeforeUnmount(() => {
   z-index: 200;
 }
 .slide__help-card {
-  background: #2a2a2a;
+  background: var(--slide-bg);
+  color: var(--slide-fg);
+  border: 1px solid var(--slide-border);
   padding: 32px 40px;
   border-radius: 12px;
   max-width: 560px;
   font-size: 15px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
 }
 .slide__help-card h2 {
   margin: 0 0 18px;
   font-size: 18px;
-  color: #ff9f40;
+  color: var(--slide-accent);
 }
 .slide__help-card table {
   width: 100%;
@@ -478,7 +710,7 @@ onBeforeUnmount(() => {
   vertical-align: top;
 }
 .slide__help-card td:first-child {
-  color: #aaa;
+  color: var(--slide-muted);
   width: 50%;
 }
 .slide__help-card td:last-child {
@@ -488,13 +720,13 @@ onBeforeUnmount(() => {
 .slide__help-foot {
   margin: 18px 0 0;
   font-size: 12px;
-  color: #888;
-  border-top: 1px solid #444;
+  color: var(--slide-muted);
+  border-top: 1px solid var(--slide-border);
   padding-top: 14px;
   line-height: 1.55;
 }
 .slide__help-foot code {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--slide-code-bg);
   padding: 1px 6px;
   border-radius: 3px;
 }

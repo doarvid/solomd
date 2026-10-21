@@ -1,7 +1,11 @@
 import { createApp, defineAsyncComponent } from 'vue';
 import { createPinia } from 'pinia';
 import App from './App.vue';
+import { followHtmlLang } from './i18n';
 import { reanchorIosContainerPaths } from './lib/ios-container';
+import { isMobile, isWindowsDesktop } from './lib/platform';
+import { installNativeMenuGuard } from './lib/native-menu-guard';
+import { preloadRenderDeps } from './lib/render-deps';
 import './styles/cjk-font.css';
 import './styles/main.css';
 import './styles/hljs-theme.css';
@@ -23,12 +27,44 @@ const rootComponent = isSlideshow
   : isQuickCapture
     ? defineAsyncComponent(() => import('./components/QuickCapture.vue'))
     : App;
+// Dev-only: ?imetrace loads dev/ime-trace.js (IME event tracer for the
+// Windows VM tests). Stripped from production builds by the DEV guard.
+if (import.meta.env.DEV && /[?&]imetrace\b/.test(location.search)) {
+  const s = document.createElement('script');
+  s.src = '/dev/ime-trace.js';
+  document.head.appendChild(s);
+}
+
 const app = createApp(rootComponent);
 app.use(createPinia());
+followHtmlLang();
+// No browser Back / Reload / Print menu on app chrome (lib/native-menu-guard).
+installNativeMenuGuard({ mobile: isMobile(), dev: import.meta.env.DEV });
+
+// Windows: the editor engine follows the WebView2 version (platform.ts
+// resolveWindowsEditorEngine), and Editor.vue decides it once at load, so the
+// version must be known before mount.
+async function readWebviewVersion(): Promise<void> {
+  if (!isWindowsDesktop()) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  const v = await invoke<string | null>('webview_runtime_version');
+  if (v) (window as unknown as { __SOLOMD_WEBVIEW_VERSION__?: string }).__SOLOMD_WEBVIEW_VERSION__ = v;
+}
 
 // iOS: point stored paths at the current app container before any store reads
-// them (lib/ios-container). Bounded, so a slow path API never blocks launch.
+// them (lib/ios-container). Both are bounded, so a slow API never blocks
+// launch — an unknown WebView2 version just means the native textarea.
 void Promise.race([
-  reanchorIosContainerPaths().catch(() => {}),
+  Promise.all([
+    reanchorIosContainerPaths().catch(() => {}),
+    readWebviewVersion().catch(() => {}),
+  ]),
   new Promise((r) => setTimeout(r, 1500)),
-]).then(() => app.mount('#app'));
+]).then(() => {
+  app.mount('#app');
+  // KaTeX + highlight.js are their own chunks (lib/render-deps.ts): fetch and
+  // compile them once the first frame is up, so they are almost always ready
+  // before a formula or code fence is on screen. The capture box never
+  // renders markdown; the slideshow awaits them itself.
+  if (rootComponent === App) preloadRenderDeps();
+});

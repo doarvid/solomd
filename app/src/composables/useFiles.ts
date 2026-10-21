@@ -1,9 +1,12 @@
+import { samePath, segmentsBelow } from '../lib/path-key';
+import { requestRevealInTree } from './useFileTreeReveal';
 import { inject } from 'vue';
+import { windowChromeOptions } from '../lib/window-chrome-options';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { documentDir, desktopDir, homeDir, join } from '@tauri-apps/api/path';
-import { isIOS, isAndroid, isWindowsDesktop } from '../lib/platform';
+import { isIOS, isAndroid, isMacOS } from '../lib/platform';
 import { isNarrowViewport } from './useViewport';
 import { useTabsStore } from '../stores/tabs';
 import { useWorkspaceStore } from '../stores/workspace';
@@ -19,6 +22,7 @@ import { isSafPath, fromSafPath, safRead, safWrite, safLaunchPicker } from '../l
 import { shouldSaveTab, shouldPromptOnClose } from '../lib/browser-tab-guards';
 import { baseNameOf, fileNameOf, claimImportName, joinInFolder } from '../lib/import-plan';
 import { newFileDirFor, treeSelection } from '../lib/new-file-target';
+import { noteOwnWrite } from '../lib/external-change';
 
 // Save dialogs only — opening uses no filter so any file is selectable.
 // (rfd treats `'*'` literally as the extension `*`, not as wildcard, so we
@@ -71,7 +75,7 @@ export function useFiles() {
         title: 'SoloMD',
         width: 1000,
         height: 700,
-        decorations: !isWindowsDesktop(),
+        ...windowChromeOptions(),
       });
       windowsStore.register(label, { path, folder: workspace.currentFolder });
       return label;
@@ -83,10 +87,35 @@ export function useFiles() {
 
   async function newFile() {
     tabs.newTab();
+    window.dispatchEvent(new CustomEvent('solomd:file-opened', { detail: {} }));
+  }
+
+  /**
+   * B4 — reopen the most recently closed tab (Typora ⌘⇧T). A saved file is
+   * re-read from disk; an unsaved note that was discarded comes back with its
+   * text as a new, unsaved tab. A file that is already open again is just
+   * focused, and the next record down is not consumed for it.
+   */
+  async function reopenClosedTab(): Promise<boolean> {
+    const rec = tabs.popClosedTab();
+    if (!rec) {
+      toasts.info(t('toast.nothingToReopen'));
+      return false;
+    }
+    if (rec.filePath) {
+      const open = tabs.tabs.find((x) => samePath(x.filePath, rec.filePath));
+      if (open) tabs.activate(open.id);
+      else await openPath(rec.filePath, { bypassNewWindow: true });
+      return true;
+    }
+    const tab = tabs.newTab({ fileName: rec.fileName, language: rec.language });
+    tabs.setContent(tab.id, rec.content);
+    return true;
   }
 
   async function newTextFile() {
     tabs.newTab({ fileName: 'Untitled.txt', language: 'plaintext' });
+    window.dispatchEvent(new CustomEvent('solomd:file-opened', { detail: {} }));
   }
 
   async function openFile() {
@@ -159,10 +188,13 @@ export function useFiles() {
       });
       openImageOverlay({ source: img, title: fileName, strings: overlayStrings() });
       workspace.pushRecent(path);
-      toasts.success(`Opened ${fileName}`);
+      // 5.0 §8 — the phone shell moves to its editor screen on this (opening a
+      // note that is already the active tab changes no store state).
+      window.dispatchEvent(new CustomEvent('solomd:file-opened', { detail: { path } }));
+      toasts.success(t('toast.openedFile', { name: fileName }));
     } catch (e) {
       console.error('open image failed', e);
-      toasts.error(`Failed to open image: ${e}`);
+      toasts.error(t('toast.openFailed', { error: String(e) }));
     }
   }
 
@@ -225,7 +257,7 @@ export function useFiles() {
         path = await importContentUri(path);
       } catch (e) {
         console.error('content:// import failed', e);
-        toasts.error(`Failed to open: ${e}`);
+        toasts.error(t('toast.openFailed', { error: String(e) }));
         return;
       }
     }
@@ -321,12 +353,26 @@ export function useFiles() {
       // already current). That was the real "double-click opens nothing" bug.
       // Switching first means `openFromDisk` below adds the tab into the
       // already-settled workspace, so it survives and becomes active.
-      if (settings.revealInFileTreeOnOpen && !isSaf) {
-        const parent = path.replace(/[\\/][^\\/]+$/, '');
-        if (parent && parent !== path) {
-          workspace.setFolder(parent);
-          if (!settings.showFileTree) settings.toggleFileTree();
+      // Reveal the file in the file tree when the setting is on (#402).
+      // If the file is opened from within the tree itself (`opts.fromTree`),
+      // the row was already selected and clicked; never re-reveal or re-root.
+      // If the file is already inside the active workspace, keep the root
+      // untouched and ask the tree to expand down to the row.
+      // Only when the file is genuinely OUTSIDE the open workspace do we point
+      // the tree at its parent folder, before adding the tab.
+      if (settings.revealInFileTreeOnOpen && !isSaf && !opts.fromTree) {
+        const root = workspace.currentFolder;
+        const inside = !!root && segmentsBelow(root, path) !== null;
+        if (!inside) {
+          const parent = path.replace(/[\\/][^\\/]+$/, '');
+          if (parent && parent !== path) {
+            // 张工 4.14.8 report #3: this used to also re-open a tree the user
+            // had hidden, on every file open. Switching the folder is the
+            // setting's job; whether the tree is shown is the user's.
+            workspace.setFolder(parent);
+          }
         }
+        requestRevealInTree(path);
       }
 
       tabs.openFromDisk({
@@ -337,16 +383,20 @@ export function useFiles() {
         hadBom: result.had_bom,
       });
       workspace.pushRecent(path);
+      // 5.0 phone shell: opening a note shows the editor — also when it is the
+      // tab that is already active (tapping the note you just backed out of),
+      // which changes no store state for App.vue to notice.
+      window.dispatchEvent(new CustomEvent('solomd:file-opened', { detail: { path } }));
       // #148 / #168 — on a phone the tree is a drawer over the editor, so
       // close it once a file opens: picking a file means you want to read it.
       // Keyed off viewport width (not the UA) so a narrow desktop window
       // behaves the same way the layout does.
       if (isNarrowViewport() && settings.showFileTree) settings.toggleFileTree();
       const fileName = fileNameOf(path);
-      toasts.success(`Opened ${fileName}`);
+      toasts.success(t('toast.openedFile', { name: fileName }));
     } catch (e) {
       console.error('open failed', e);
-      toasts.error(`Failed to open file: ${e}`);
+      toasts.error(t('toast.openFailed', { error: String(e) }));
     }
   }
 
@@ -378,7 +428,7 @@ export function useFiles() {
         await openWithSystemDefault(path);
       } catch (e) {
         console.error('openWithSystemDefault failed', e);
-        toasts.error(`Failed to open: ${e}`);
+        toasts.error(t('toast.openFailed', { error: String(e) }));
       }
       return;
     }
@@ -400,7 +450,7 @@ export function useFiles() {
       tabs.activate(prevId);
       return;
     }
-    const tid = toasts.info(`Converting ${fileName} to Markdown…`, 0);
+    const tid = toasts.info(t('toast.convertingFile', { name: fileName }), 0);
     try {
       const markdown = await invoke<string>('convert_file_to_markdown', { path });
       toasts.dismiss(tid);
@@ -414,7 +464,7 @@ export function useFiles() {
         tab.language = 'markdown';
         convertedTabs.set(path, tab.id);
       }
-      toasts.success(`Converted ${fileName} → Markdown`);
+      toasts.success(t('toast.convertedFile', { name: fileName }));
     } catch (e) {
       toasts.dismiss(tid);
       const msg = String(e);
@@ -425,7 +475,7 @@ export function useFiles() {
           8000,
         );
       } else {
-        toasts.error(`Conversion failed: ${msg}`);
+        toasts.error(t('toast.conversionFailedError', { error: msg }));
       }
     }
   }
@@ -689,6 +739,9 @@ export function useFiles() {
       defaultPath: await pickerStartDir(),
     });
     if (!selected || typeof selected !== 'string') return;
+    if (isMacOS()) {
+      await invoke('macos_bookmark_folder', { path: selected }).catch(() => {});
+    }
     workspace.setFolder(selected);
     if (!settings.showFileTree) settings.toggleFileTree();
   }
@@ -813,6 +866,9 @@ export function useFiles() {
         // ContentResolver route as the original save.
         await writeContentUri(path, payload);
       } else {
+        // Recorded first: the watcher event for this write can arrive before
+        // markSaved below, and must not read as an outside change.
+        noteOwnWrite(path, payload);
         await invoke('write_file', {
           path,
           content: payload,
@@ -835,13 +891,13 @@ export function useFiles() {
           const fname = path.split(/[\\/]/).pop() ?? path;
           toasts.success(t('iosFolder.savedAs', { name: fname }));
         } else {
-          toasts.success(`Saved ${tab.fileName}`);
+          toasts.success(t('toast.savedFile', { name: tab.fileName }));
         }
       }
       return true;
     } catch (e) {
       console.error('save failed', e);
-      toasts.error(`Failed to save: ${e}`);
+      toasts.error(t('toast.saveFailed', { error: String(e) }));
       return false;
     }
   }
@@ -884,9 +940,10 @@ export function useFiles() {
         await writeContentUri(path, payload);
         tabs.markSaved(tab.id, path);
         const fileName = contentUriName(path);
-        toasts.success(`Saved as ${fileName}`);
+        toasts.success(t('toast.savedAs', { name: fileName }));
         return true;
       }
+      noteOwnWrite(path, payload);
       await invoke('write_file', {
         path,
         content: payload,
@@ -900,11 +957,11 @@ export function useFiles() {
         new CustomEvent('solomd:saved', { detail: { filePath: path } }),
       );
       const fileName = path.split(/[\\/]/).pop() ?? path;
-      toasts.success(isIOS() ? `Saved to On My iPhone › SoloMD › ${fileName}` : `Saved as ${fileName}`);
+      toasts.success(isIOS() ? t('toast.savedToIos', { name: fileName }) : t('toast.savedAs', { name: fileName }));
       return true;
     } catch (e) {
       console.error('save-as failed', e);
-      toasts.error(`Failed to save: ${e}`);
+      toasts.error(t('toast.saveFailed', { error: String(e) }));
       return false;
     }
   }
@@ -927,6 +984,9 @@ export function useFiles() {
   // failed background save isn't swallowed.
   async function autoSaveDirtyTabs(): Promise<void> {
     if (!settings.autoSaveOnBlur) return;
+    // The editor reaches tab.content ~350 ms late; without this flush a blur
+    // right after typing saved the file minus its last keystrokes.
+    window.dispatchEvent(new Event('solomd:flush-content-sync'));
     for (const tab of tabs.tabs) {
       if (tab.filePath && tabs.isDirty(tab.id)) {
         await saveTab(tab, { silent: true });
@@ -990,6 +1050,7 @@ export function useFiles() {
     saveTab,
     autoSaveDirtyTabs,
     closeTabSafe,
+    reopenClosedTab,
     spawnAuxWindow,
   };
 }

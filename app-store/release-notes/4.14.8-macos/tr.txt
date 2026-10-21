@@ -1,0 +1,11 @@
+Menüler Dosya, Düzen, Paragraf, Biçim, Gezin, Görünüm ve Yardım olarak yeniden düzenlendi — her özelliğin bir menü öğesi var ve menüler gerçekten kullandığınız kısayolu gösteriyor.
+
+Araç çubuğu tek satıra sığıyor: Yeni, Aç, Dışa aktar, Ekle, AI ve görünüm modları artık menü.
+
+Yeni “Typora / Word” kısayol hazır ayarı ve herkes için yeni komutlar: başlık düzeyini yükselt veya düşür, başlığı paragrafa çevir, kelime veya satır seç, kelime sil, kapatılan sekmeyi yeniden aç, F8 odak modu, F9 daktilo modu.
+
+Bölünmüş görünümde ayırıcıyı sürükleyerek düzenleyici ile önizlemeyi yeniden boyutlandırabilirsiniz.
+
+Düzeltmeler: formüllerin altı artık kesilmiyor; geniş tablolar PDF ve yazdırmada kaydırılıyor; Vim normal modunda Enter satır eklemek yerine bir satır aşağı iniyor; seçimin içine tıklamak seçimi kaldırıyor.
+
+Dikkatli raporlarıyla bu değişikliklerin çoğuna öncülük eden testçimiz 张工'a teşekkürler.

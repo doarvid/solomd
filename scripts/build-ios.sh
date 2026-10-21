@@ -55,12 +55,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# A pin given on the command line wins over the one in .env.local: main
+# (4.14.x, no UIScene) must build with Xcode 26, the 5.0 line with Xcode 27.
+_IOS_DEVELOPER_DIR_ARG="${IOS_DEVELOPER_DIR:-}"
 if [ -f .env.local ]; then
   set -a
   # shellcheck disable=SC1091
   source .env.local
   set +a
 fi
+[ -n "$_IOS_DEVELOPER_DIR_ARG" ] && IOS_DEVELOPER_DIR="$_IOS_DEVELOPER_DIR_ARG"
 
 : "${IOS_SIGNING_PROFILE_NAME:?Set IOS_SIGNING_PROFILE_NAME — name of the iOS Distribution profile}"
 : "${APPLE_TEAM_ID:?Set APPLE_TEAM_ID — the ten-character team identifier}"
@@ -104,6 +108,33 @@ fi
 # build would have shipped without signing config or file associations.
 echo "==> Applying the iOS project overlay"
 python3 scripts/lib/ios_project_overlay.py "$PROJECT_YML" app/src-tauri/ios-project-overlay.yml
+
+# #425 — Ensure AccentColor.colorset (#E07B39) exists in the gitignored
+# gen/apple/Assets.xcassets directory so iOS/iPadOS system controls and the
+# hardware keyboard candidate bar use SoloMD's warm accent color.
+mkdir -p app/src-tauri/gen/apple/Assets.xcassets/AccentColor.colorset
+cat > app/src-tauri/gen/apple/Assets.xcassets/AccentColor.colorset/Contents.json <<'EOF'
+{
+  "colors" : [
+    {
+      "color" : {
+        "color-space" : "srgb",
+        "components" : {
+          "alpha" : "1.000",
+          "blue" : "0.224",
+          "green" : "0.482",
+          "red" : "0.878"
+        }
+      },
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+EOF
 
 echo "==> Patching ExportOptions.plist for app-store-connect + Manual"
 cat > "$EXPORT_PLIST" <<EOF
@@ -203,14 +234,18 @@ echo ""
 # nothing about it looks wrong until it is launched on iOS 27.
 SDK_NAME="$(unzip -p "$IPA" 'Payload/*.app/Info.plist' | plutil -extract DTSDKName raw -o - - 2>/dev/null || true)"
 echo "==> Linked SDK: ${SDK_NAME:-unknown}"
+# Since Tauri 2.12 the app runs on the scene lifecycle (the overlay declares a
+# UIApplicationSceneManifest), and a newer SDK is fine. What must never ship
+# again is a newer-SDK build WITHOUT the manifest — check the artifact for it.
+HAS_SCENES=$(unzip -p "$IPA" 'Payload/*.app/Info.plist' | plutil -extract UIApplicationSceneManifest xml1 -o - - >/dev/null 2>&1 && echo yes || echo no)
+echo "==> UIScene manifest: $HAS_SCENES"
 case "$SDK_NAME" in
   iphoneos26.*) ;;
   *)
-    if [ -z "${IOS_ALLOW_NEW_SDK:-}" ]; then
-      echo "ERROR: $IPA is linked against '${SDK_NAME:-unknown}', not iphoneos26.x." >&2
-      echo "       Until the app adopts the UIScene lifecycle it will crash at launch on" >&2
-      echo "       iOS 27 when built with a newer SDK. Set IOS_DEVELOPER_DIR to an Xcode 26," >&2
-      echo "       or IOS_ALLOW_NEW_SDK=1 once UIScene support has landed and been verified." >&2
+    if [ "$HAS_SCENES" != yes ] && [ -z "${IOS_ALLOW_NEW_SDK:-}" ]; then
+      echo "ERROR: $IPA is linked against '${SDK_NAME:-unknown}' but declares no" >&2
+      echo "       UIApplicationSceneManifest: it would crash at launch on iOS 27" >&2
+      echo "       (4.13.3's rejection). Check app/src-tauri/ios-project-overlay.yml." >&2
       exit 1
     fi
     ;;

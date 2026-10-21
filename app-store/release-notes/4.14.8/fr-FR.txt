@@ -1,0 +1,9 @@
+Les formules ne sont plus coupées en bas dans l’aperçu, la vue partagée et les exports.
+
+Les tableaux larges passent à la ligne dans la page en export PDF, impression, HTML et image.
+
+Nouvelles commandes : monter ou descendre le niveau d’un titre, retransformer un titre en paragraphe, sélectionner le mot, sélectionner la ligne, rouvrir un onglet fermé.
+
+Barre d’outils allégée : Nouveau, Ouvrir, Exporter, Insérer et les modes d’affichage sont désormais des menus.
+
+Merci à notre testeur 张工, dont les rapports minutieux sont à l’origine de beaucoup de ces corrections.

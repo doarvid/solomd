@@ -1,10 +1,48 @@
 {
-  "note": "Supporters, added with their consent. The website (homepage, /thanks, /promote), the README (scripts/update-sponsors-readme.py, incl. the All Contributors table) and the app's About dialog all read this file. sponsors: name, since (YYYY-MM), optional github (username, for the README avatar) and url. promoters: name, since, platform, url (the piece itself), optional ref (their ?ref= code), github, featured + quote (shown on the homepage).",
+  "note": "Supporters, added with their consent. The website (homepage, /thanks, /promote), the README (scripts/update-sponsors-readme.py, incl. the All Contributors table) and the app's About dialog all read this file. sponsors: name, since (YYYY-MM), optional github (username, for the README avatar) and url. promoters: name, since, platform, url (the piece itself), optional ref (their ?ref= code), github, featured + quote (shown on the homepage). testers: name, since, contribution {en, zh} — people who test SoloMD carefully and send detailed bug reports and analysis; optional github.",
   "sponsors": [
     {
       "name": "tyysoft(太阳雨)",
-      "since": "2026-09"
+      "since": "2026-09",
+      "github": "tyysoft"
     }
   ],
-  "promoters": []
+  "promoters": [
+    {
+      "name": "Garfield",
+      "since": "2026-10",
+      "platform": "X (Twitter)",
+      "url": "https://x.com/Garfield_OxO/status/2110654220894343301",
+      "ref": "Garfield",
+      "github": "PioneerSunOvO"
+    },
+    {
+      "name": "lcfactorization",
+      "since": "2026-10",
+      "platform": "CSDN",
+      "url": "https://blog.csdn.net/stereohomology/article/details/167864282",
+      "github": "lcfactorization",
+      "featured": true,
+      "quote": "SoloMD已完全替代Typora等、且更优雅！"
+    }
+  ],
+  "testers": [
+    {
+      "name": "张工",
+      "since": "2026-10",
+      "contribution": {
+        "en": "Systematic testing of the Windows editors, shortcuts, menus and toolbar, with detailed bug reports and analysis behind many fixes in 4.14.6–5.0.2.",
+        "zh": "系统地测试了 Windows 编辑器、快捷键、菜单和工具栏，提交了大量详细的问题报告和分析，4.14.6–5.0.2 版本的许多修复都来自他的测试。"
+      }
+    },
+    {
+      "name": "tyysoft(太阳雨)",
+      "github": "tyysoft",
+      "since": "2026-10",
+      "contribution": {
+        "en": "Deep testing and detailed user experience feedback on file tree navigation, workspace handling, table editor, and shortcuts for 4.14.x through 5.0.2.",
+        "zh": "深度测试了文件树导航、工作区管理、表格编辑器及快捷键交互，为 4.14.x 到 5.0.2 提交了大量详尽的问题报告与改进建议。"
+      }
+    }
+  ]
 }

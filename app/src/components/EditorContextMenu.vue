@@ -2,6 +2,10 @@
 /**
  * Right-click menu for the editor (#210): Cut / Copy / Paste / Select All.
  *
+ * #376 — on a misspelled word the menu leads with up to five spelling
+ * suggestions (or a disabled "No suggestions" line), as the WebView2 menu it
+ * replaced did. The host looks the word up and passes `spell`.
+ *
  * The editor used to rely on the webview's own context menu. On Windows that
  * menu came up without Cut/Copy for a selection the user had just made (drag
  * or Ctrl+A), in both Edit and Live Edit, so mouse users could select text but
@@ -14,7 +18,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from '../i18n';
-import { isMacOS } from '../lib/platform';
+import { usesCommandKey } from '../lib/platform';
 import { useOverlayLayer } from '../lib/overlay-presence';
 
 // The host renders this with v-if, so being mounted means the menu is open.
@@ -24,25 +28,49 @@ useOverlayLayer();
 
 export type EditorMenuAction = 'copyImage' | 'cut' | 'copy' | 'paste' | 'selectAll';
 
+/** A misspelled word under the pointer (#376). `canAdd`: offer "Add to
+ *  dictionary" — only where our own checker draws the underline. */
+export interface EditorMenuSpell {
+  word: string;
+  suggestions: string[];
+  canAdd: boolean;
+  /** LanguageTool: the explanation shown above the suggestions. */
+  message?: string;
+  /** LanguageTool: offer "Ignore" and "Disable rule". */
+  canIgnore?: boolean;
+  /** LanguageTool: a match covering several words gets one "Add" per word. */
+  addWords?: string[];
+}
+
 // `hasImage`: the right-click landed on a rendered image (#362) — offer
 // "Copy image" on top of the text items.
-const props = defineProps<{ x: number; y: number; hasSelection: boolean; hasImage?: boolean }>();
+const props = defineProps<{
+  x: number;
+  y: number;
+  hasSelection: boolean;
+  hasImage?: boolean;
+  spell?: EditorMenuSpell | null;
+}>();
 const emit = defineEmits<{
   (e: 'action', id: EditorMenuAction): void;
+  (e: 'replace', word: string): void;
+  (e: 'add-word', word: string): void;
+  (e: 'lt-ignore'): void;
+  (e: 'lt-disable-rule'): void;
   (e: 'close'): void;
 }>();
 
 const { t } = useI18n();
 const root = ref<HTMLElement | null>(null);
 const pos = ref({ left: props.x, top: props.y });
-const mod = isMacOS() ? '⌘' : 'Ctrl+';
+const mod = usesCommandKey() ? '⌘' : 'Ctrl+';
 
 type Item = { id: EditorMenuAction; label: string; key: string; disabled: boolean; sep?: boolean };
 const items = computed<Item[]>(() => [
   ...(props.hasImage
     ? [{ id: 'copyImage' as const, label: t('overlay.copyImage'), key: '', disabled: false }]
     : []),
-  { id: 'cut' as const, label: t('menubar.cut'), key: `${mod}X`, disabled: !props.hasSelection, sep: !!props.hasImage },
+  { id: 'cut' as const, label: t('menubar.cut'), key: `${mod}X`, disabled: !props.hasSelection, sep: !!props.hasImage || !!props.spell },
   { id: 'copy' as const, label: t('menubar.copy'), key: `${mod}C`, disabled: !props.hasSelection },
   { id: 'paste' as const, label: t('menubar.paste'), key: `${mod}V`, disabled: false },
   { id: 'selectAll' as const, label: t('menubar.selectAll'), key: `${mod}A`, disabled: false, sep: true },
@@ -104,6 +132,80 @@ onBeforeUnmount(() => {
     :style="{ left: pos.left + 'px', top: pos.top + 'px' }"
     @contextmenu.prevent
   >
+    <template v-if="props.spell">
+      <div v-if="props.spell.message" class="editor-ctx__message">{{ props.spell.message }}</div>
+      <button
+        v-for="s in props.spell.suggestions"
+        :key="'sugg-' + s"
+        type="button"
+        role="menuitem"
+        class="editor-ctx__item editor-ctx__item--suggestion"
+        data-action="suggestion"
+        @mousedown.prevent
+        @click="emit('replace', s)"
+      >
+        <span class="editor-ctx__label">{{ s === '' ? t('languagetool.remove') : s }}</span>
+      </button>
+      <button
+        v-if="props.spell.suggestions.length === 0"
+        type="button"
+        role="menuitem"
+        class="editor-ctx__item"
+        data-action="noSuggestions"
+        disabled
+        aria-disabled="true"
+        @mousedown.prevent
+      >
+        <span class="editor-ctx__label">{{ t('spellcheck.noSuggestions') }}</span>
+      </button>
+      <template v-if="props.spell.canAdd && props.spell.addWords && props.spell.addWords.length > 1">
+        <button
+          v-for="w in props.spell.addWords"
+          :key="'add-' + w"
+          type="button"
+          role="menuitem"
+          class="editor-ctx__item"
+          data-action="addToDict"
+          @mousedown.prevent
+          @click="emit('add-word', w)"
+        >
+          <span class="editor-ctx__label">{{ t('languagetool.addWord', { word: w }) }}</span>
+        </button>
+      </template>
+      <button
+        v-else-if="props.spell.canAdd"
+        type="button"
+        role="menuitem"
+        class="editor-ctx__item"
+        data-action="addToDict"
+        @mousedown.prevent
+        @click="emit('add-word', props.spell.word)"
+      >
+        <span class="editor-ctx__label">{{ t('spellcheck.addToDict') }}</span>
+      </button>
+      <template v-if="props.spell.canIgnore">
+        <button
+          type="button"
+          role="menuitem"
+          class="editor-ctx__item"
+          data-action="ltIgnore"
+          @mousedown.prevent
+          @click="emit('lt-ignore')"
+        >
+          <span class="editor-ctx__label">{{ t('languagetool.ignore') }}</span>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          class="editor-ctx__item"
+          data-action="ltDisableRule"
+          @mousedown.prevent
+          @click="emit('lt-disable-rule')"
+        >
+          <span class="editor-ctx__label">{{ t('languagetool.disableRule') }}</span>
+        </button>
+      </template>
+    </template>
     <template v-for="item in items" :key="item.id">
       <div v-if="item.sep" class="editor-ctx__sep" />
       <button
@@ -153,6 +255,17 @@ onBeforeUnmount(() => {
 }
 .editor-ctx__item:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.editor-ctx__item--suggestion {
+  font-weight: 600;
+}
+.editor-ctx__message {
+  max-width: 300px;
+  padding: 4px 10px 6px;
+  color: var(--text-muted, var(--text));
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: text;
 }
 .editor-ctx__item:disabled {
   color: var(--text-faint);

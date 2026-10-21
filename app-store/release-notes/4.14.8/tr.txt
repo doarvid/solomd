@@ -1,0 +1,9 @@
+Formüllerin alt kısmı önizlemede, bölünmüş görünümde ve dışa aktarmada artık kesilmiyor.
+
+Geniş tablolar PDF, yazdırma, HTML ve görsel dışa aktarmada sayfa içinde kaydırılıyor.
+
+Yeni komutlar: başlık düzeyini yükselt veya düşür, başlığı normal paragrafa çevir, kelime seç, satır seç, kapatılan sekmeyi yeniden aç.
+
+Toparlanmış araç çubuğu: Yeni, Aç, Dışa aktar, Ekle ve görünüm modları artık menü.
+
+Dikkatli raporlarıyla bu düzeltmelerin çoğuna öncülük eden testçimiz 张工'a teşekkürler.

@@ -1,0 +1,15 @@
+# title: Live rendering preserves URL-valued labels and hides link destinations
+# engines: cm
+# timeout: 150
+open:$V\url-label.md
+uclick:实时@RadioButton
+uclick:~Caret parking.
+key:end
+ms:1000
+uia:link.url-label-visible|https://example.com
+uia:link.plain-label-visible|PlainLabel
+nouia:link.destination-hidden|https://target.invalid
+nouia:link.other-destination-hidden|https://other.invalid
+fileeq:link.source-unchanged|url-label.md|# Link labels\n\n[https://example.com](https://target.invalid)\n\n[PlainLabel](https://other.invalid)\n\nCaret parking.\n
+shot:url-label
+udump:url-label

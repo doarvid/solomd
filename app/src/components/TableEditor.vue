@@ -10,7 +10,7 @@
  * Nothing reaches the document until Apply — the session's `apply` closure is
  * the only write path, and Cancel simply drops the working copy.
  */
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   parseTable,
   serializeTable,
@@ -27,6 +27,7 @@ import {
   type TableModel,
 } from '../lib/markdown-table';
 import { useI18n } from '../i18n';
+import { DsModal, DsButton } from '../ui';
 
 const props = defineProps<{ source: string }>();
 const emit = defineEmits<{
@@ -37,6 +38,16 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const model = ref<TableModel>(parseTable(props.source) ?? emptyTable());
+const initialTable = ref(serializeTable(model.value));
+const closeConfirm = ref(false);
+const dirty = computed(() => serializeTable(model.value) !== initialTable.value);
+
+function requestClose() {
+  if (dirty.value) closeConfirm.value = true;
+  else emit('close');
+}
+onMounted(() => window.addEventListener('solomd:table-close-request', requestClose));
+onBeforeUnmount(() => window.removeEventListener('solomd:table-close-request', requestClose));
 /** Which column the row/column buttons act on. -1 while the caret is in the
  *  header, which is still a column — the row index is what differs. */
 const focused = ref<{ row: number; col: number }>({ row: -1, col: 0 });
@@ -46,6 +57,8 @@ watch(
   () => props.source,
   (next) => {
     model.value = parseTable(next) ?? emptyTable();
+    initialTable.value = serializeTable(model.value);
+    closeConfirm.value = false;
     focused.value = { row: -1, col: 0 };
   },
 );
@@ -170,13 +183,15 @@ function apply() {
 
 /**
  * Tab moves to the next cell rather than out of the dialog, which is what a
- * grid is expected to do; Escape cancels. Enter inside a cell is swallowed
+ * grid is expected to do; Escape / close-tab request a guarded close. Enter inside a cell is swallowed
  * because a newline would split the row across two table lines.
  */
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
+  if (closeConfirm.value || e.isComposing) return;
+  if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'w')) {
     e.preventDefault();
-    emit('close');
+    e.stopPropagation();
+    requestClose();
     return;
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -196,12 +211,12 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="tbl__backdrop" @click.self="emit('close')" @keydown="onKeydown">
-    <div class="tbl" role="dialog" aria-modal="true">
+  <div class="tbl__backdrop" @keydown="onKeydown">
+    <div class="tbl" role="dialog" aria-modal="true" :inert="closeConfirm">
       <header class="tbl__head">
         <span class="tbl__title">{{ t('tableEditor.heading') }}</span>
         <span class="tbl__size">{{ colCount }} × {{ model.rows.length }}</span>
-        <button class="tbl__x" :title="t('tableEditor.cancel')" @click="emit('close')">×</button>
+        <button class="tbl__x" :title="t('tableEditor.cancel')" @click="requestClose">×</button>
       </header>
 
       <div class="tbl__toolbar">
@@ -282,11 +297,26 @@ function onKeydown(e: KeyboardEvent) {
 
       <footer class="tbl__foot">
         <span class="tbl__hint">{{ t('tableEditor.hint') }}</span>
-        <button class="tbl__btn" @click="emit('close')">{{ t('tableEditor.cancel') }}</button>
+        <button class="tbl__btn" @click="requestClose">{{ t('tableEditor.cancel') }}</button>
         <button class="tbl__btn tbl__btn--primary" @click="apply">{{ t('tableEditor.apply') }}</button>
       </footer>
     </div>
   </div>
+  <DsModal
+    v-model="closeConfirm"
+    class="tbl__close-confirm"
+    style="z-index: 2200"
+    :title="t('unsaved.title')"
+    width="400px"
+    :close-on-backdrop="false"
+  >
+    <p>{{ t('unsaved.message', { file: t('tableEditor.heading') }) }}</p>
+    <template #footer>
+      <DsButton data-table-close="cancel" variant="secondary" data-autofocus @click="closeConfirm = false">{{ t('unsaved.cancel') }}</DsButton>
+      <DsButton data-table-close="discard" variant="danger" @click="emit('close')">{{ t('unsaved.dontSave') }}</DsButton>
+      <DsButton data-table-close="apply" variant="primary" @click="apply">{{ t('tableEditor.apply') }}</DsButton>
+    </template>
+  </DsModal>
 </template>
 
 <style scoped>

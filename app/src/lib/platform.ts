@@ -61,6 +61,15 @@ export function isMacOS(): boolean {
   return /Macintosh|Mac OS X/.test(ua);
 }
 
+/**
+ * True where shortcuts are spelled with ⌘ — macOS and iOS/iPadOS (an iPad
+ * with a keyboard uses ⌘ too). For shortcut *labels*; `isMacOS()` stays the
+ * macOS-desktop-only check for window chrome.
+ */
+export function usesCommandKey(): boolean {
+  return isMacOS() || isIOS();
+}
+
 export function isMobile(): boolean {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
@@ -83,8 +92,31 @@ export function isWindowsDesktop(): boolean {
   return /Windows NT/.test(navigator.userAgent || '');
 }
 
+/**
+ * i18n key for "show this file in the system file manager". The stock
+ * strings name the Finder, which is wrong off macOS: Windows says Explorer,
+ * Linux a generic file manager. `macKey` is the caller's existing key.
+ */
+export function revealLabelKey(macKey: string): string {
+  if (isWindowsDesktop()) return 'explorer.revealExplorer';
+  if (isMacOS() || isMobile()) return macKey;
+  return 'explorer.revealFileManager';
+}
+
 export function forceWinChromePreview(): boolean {
   return typeof location !== 'undefined' && location.search.includes('forceWinChrome');
+}
+
+/**
+ * `?forceKeyboardBar` — dev-only QA hook (same idea as `?forcePlain` /
+ * `?forceWinChrome`) that mounts the touch formatting bar (KeyboardBar.vue)
+ * in a desktop browser and treats the software keyboard as open, so the bar
+ * can be driven without a phone. Compiled out of production builds.
+ */
+export function forceKeyboardBarPreview(): boolean {
+  // `?.` — node's test runner has no import.meta.env.
+  const dev = !!import.meta.env?.DEV;
+  return dev && typeof location !== 'undefined' && location.search.includes('forceKeyboardBar');
 }
 
 /** Windows desktop editor detection, including the forcePlain QA hook. */
@@ -95,23 +127,62 @@ export function isWindowsEditorRuntime(): boolean {
   );
 }
 
-/** Which editor Windows uses: the native textarea or CodeMirror (#328, #344). */
-export type WindowsEditorEngine = 'native' | 'codemirror';
+/** Which editor Windows uses: the native textarea, CodeMirror (#328, #344),
+ *  or `auto` — CodeMirror on WebView2 154+, the textarea below that. */
+export type WindowsEditorEngine = 'auto' | 'native' | 'codemirror';
 
 /**
- * Windows falls back to the native textarea for reliable CJK IME input, but
- * Vim is a CodeMirror extension and therefore requires the CodeMirror editor.
- * The user can also pick CodeMirror outright (Settings → Editor engine) for
- * syntax highlighting and the non-jumping live edit, without Vim keys.
- * Keep this decision pure so the Windows hand-off can be regression tested
- * without booting a platform WebView.
+ * First WebView2 major version on which CodeMirror is the default on Windows.
+ * The native textarea exists because CodeMirror dropped or doubled characters
+ * under IMEs in WebView2 (WebView2Feedback#5625), a Chromium-side defect that
+ * is gone in 154. Below it the textarea stays the safe default.
+ *
+ * Evidence (Win11-ARM VM, WebView2 154.0.4258.53, real keystrokes through the
+ * IME): Microsoft Pinyin clean (2026-10-05); Sogou Pinyin 14/14 clean on
+ * 2026-10-06 — steady state, typing 3 s after launch, and right after a cold
+ * boot, incl. inserting mid-paragraph. Sogou drops seen on 10-05 (4/5 runs)
+ * could not be reproduced the next day on either that build or a newer one.
+ */
+export const CODEMIRROR_SAFE_WEBVIEW2_MAJOR = 154;
+
+/** The webview version main.ts read at startup (Windows only), or null. */
+export function currentWebviewVersion(): string | null {
+  if (typeof window === 'undefined') return null;
+  const v = (window as unknown as { __SOLOMD_WEBVIEW_VERSION__?: unknown }).__SOLOMD_WEBVIEW_VERSION__;
+  return typeof v === 'string' && v ? v : null;
+}
+
+/** What `auto` means for this webview: CodeMirror from WebView2 154 on,
+ *  otherwise (older, or the version could not be read) the native textarea. */
+export function resolveWindowsEditorEngine(
+  engine: WindowsEditorEngine,
+  webviewVersion: string | null = currentWebviewVersion(),
+): 'native' | 'codemirror' {
+  if (engine !== 'auto') return engine;
+  const major = Number.parseInt((webviewVersion ?? '').split('.')[0], 10);
+  return Number.isFinite(major) && major >= CODEMIRROR_SAFE_WEBVIEW2_MAJOR ? 'codemirror' : 'native';
+}
+
+/**
+ * Windows may use the native textarea for reliable CJK IME input on older
+ * WebView2, but Vim is a CodeMirror extension and therefore requires the
+ * CodeMirror editor. The user can also pick an engine outright (Settings →
+ * Editor engine). Keep this decision pure so the Windows hand-off can be
+ * regression tested without booting a platform WebView.
  */
 export function shouldUsePlainWindowsEditor(
   windowsRuntime: boolean,
   vimMode: boolean,
-  engine: WindowsEditorEngine = 'native',
+  engine: WindowsEditorEngine = 'auto',
+  webviewVersion: string | null = currentWebviewVersion(),
 ): boolean {
-  return windowsRuntime && !vimMode && engine !== 'codemirror';
+  // DEV-only QA hook, the counterpart of `?forcePlain`: a plain browser on
+  // Windows has no WebView2 version to read, so `auto` would always pick the
+  // textarea there. `?forceCodeMirror` lets the IME harness test CodeMirror.
+  if (import.meta.env?.DEV && typeof location !== 'undefined' && location.search.includes('forceCodeMirror')) {
+    return false;
+  }
+  return windowsRuntime && !vimMode && resolveWindowsEditorEngine(engine, webviewVersion) === 'native';
 }
 
 /**

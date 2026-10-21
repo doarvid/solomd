@@ -1,0 +1,11 @@
+Menu uporządkowane jako Plik, Edycja, Akapit, Format, Nawigacja, Widok i Pomoc — każda funkcja ma pozycję w menu, a menu pokazują skrót, którego faktycznie używasz.
+
+Pasek narzędzi mieści się w jednym wierszu: Nowy, Otwórz, Eksportuj, Wstaw, AI i tryby widoku są teraz menu.
+
+Nowy zestaw skrótów „Typora / Word” oraz nowe polecenia dla wszystkich: podnieś lub obniż poziom nagłówka, zamień nagłówek w akapit, zaznacz słowo lub wiersz, usuń słowo, przywróć zamkniętą kartę, F8 tryb skupienia, F9 tryb maszyny do pisania.
+
+W widoku dzielonym możesz przeciągnąć separator, aby zmienić rozmiar edytora i podglądu.
+
+Poprawki: wzory nie są już ucinane od dołu; szerokie tabele zawijają się w PDF i druku; Enter w trybie normalnym Vim przechodzi wiersz niżej zamiast wstawiać nowy; kliknięcie w zaznaczenie je anuluje.
+
+Dziękujemy naszemu testerowi 张工 — wiele z tych zmian wynika z jego dokładnych zgłoszeń.

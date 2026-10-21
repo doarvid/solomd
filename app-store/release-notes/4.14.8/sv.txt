@@ -1,0 +1,9 @@
+Formler klipps inte längre av nedtill i förhandsvisning, delad vy och export.
+
+Breda tabeller radbryts inom sidan vid export till PDF, utskrift, HTML och bild.
+
+Nya kommandon: höj eller sänk rubriknivå, gör en rubrik till stycke igen, markera ord, markera rad, öppna en stängd flik igen.
+
+Städat verktygsfält: Ny, Öppna, Exportera, Infoga och vyerna är nu menyer.
+
+Tack till vår testare 张工, vars noggranna rapporter ledde till många av dessa rättelser.
