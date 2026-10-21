@@ -32,11 +32,6 @@ use super::capture_store::{normalize_url, safe_filename};
 const ROOT_KEYS: [&str; 3] = ["bookmark_bar", "other", "synced"];
 const MANAGED_MARKER: &str = "solomd_managed";
 const MANAGED_FOLDER: &str = "SoloMD";
-/// Stamped on the managed root once its children carry mirror markers. Roots
-/// without it are from the marker-less builds; their unmarked nodes are old
-/// mirrors, not user input.
-const SCHEMA_MARKER: &str = "solomd_schema";
-const SCHEMA_VERSION: &str = "2";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -308,24 +303,13 @@ fn plan_from_docs(docs: &[Value]) -> Vec<BookmarkPlanEntry> {
     let mut seen: HashSet<String> = HashSet::new();
     for doc in docs {
         if let Some(root) = find_managed_root(doc) {
-            // Legacy roots (written before mirror markers existed) can hold a
-            // mix of marked and unmarked nodes; every unmarked one is an old
-            // mirror, not something the user just added. The next write pass
-            // rebuilds the subtree and stamps the schema.
-            if !is_schema_current(root) {
-                continue;
-            }
+            // Unmarked URL nodes are the user's bookmarks — including ones
+            // dragged in from older browsers, whose `date_added` can be years
+            // old. Only nodes we wrote carry `solomd_mirror`.
             collect_user_plan(root, &mut Vec::new(), &mut out, &mut seen);
         }
     }
     out
-}
-
-fn is_schema_current(node: &Value) -> bool {
-    node.get("meta_info")
-        .and_then(|m| m.get(SCHEMA_MARKER))
-        .and_then(|v| v.as_str())
-        == Some(SCHEMA_VERSION)
 }
 
 fn find_managed_root(doc: &Value) -> Option<&Value> {
@@ -540,11 +524,6 @@ fn insert_desired(
 /// from notes win, so once the page becomes a note the user node disappears
 /// naturally.
 fn merge_user_nodes(desired: &mut DesiredFolder, managed: &Value) {
-    // A root without the schema stamp predates mirror markers: its unmarked
-    // nodes are the old mirror, not user picks. Rewrite it from notes only.
-    if !is_schema_current(managed) {
-        return;
-    }
     let mut seen = collect_desired_urls(desired);
     merge_user_nodes_into(desired, managed, &mut Vec::new(), &mut seen);
     sort_desired(desired);
@@ -638,10 +617,8 @@ fn apply_to_file(path: &Path, desired: &DesiredFolder) -> Result<Option<(usize, 
     }
 
     if let Some(index) = managed_index {
-        let schema_current = is_schema_current(&children[index]);
-        // Keep user-added bookmarks until their page has become a note — but
-        // only on a schema-current root. On a legacy root every unmarked node
-        // is an old mirror and must be rebuilt, not preserved.
+        // Unmarked nodes are the user's bookmarks. They are kept until their
+        // page has become a note, then the marked mirror takes over.
         let mut aligned = desired.clone();
         merge_user_nodes(&mut aligned, &children[index]);
         let desired_value = Value::Array(desired_children(&aligned, &mut next_id));
@@ -650,16 +627,13 @@ fn apply_to_file(path: &Path, desired: &DesiredFolder) -> Result<Option<(usize, 
             .get("children")
             .cloned()
             .unwrap_or_else(|| Value::Array(vec![]));
-        if schema_current && canonical(&existing) == canonical(&desired_value) {
+        if canonical(&existing) == canonical(&desired_value) {
             return Ok(None);
         }
         let old_urls = collect_urls(&existing);
         let new_urls = collect_desired_urls(&aligned);
         let added = new_urls.difference(&old_urls).count();
         let removed = old_urls.difference(&new_urls).count();
-        if let Some(meta) = children[index].get_mut("meta_info").and_then(|m| m.as_object_mut()) {
-            meta.insert(SCHEMA_MARKER.to_string(), json!(SCHEMA_VERSION));
-        }
         children[index]["children"] = desired_value;
         write_doc(path, &mut doc)?;
         return Ok(Some((added, removed)));
@@ -675,11 +649,10 @@ fn apply_to_file(path: &Path, desired: &DesiredFolder) -> Result<Option<(usize, 
         "guid": new_guid(&mut next_id),
         "date_added": chrome_timestamp(),
         "date_modified": chrome_timestamp(),
-        "meta_info": { "solomd_managed": "1", "solomd_schema": "2" },
+        "meta_info": { "solomd_managed": "1" },
     });
     // Keep the marker stable even if json! ordering changes.
     node["meta_info"][MANAGED_MARKER] = json!("1");
-    node["meta_info"][SCHEMA_MARKER] = json!(SCHEMA_VERSION);
     children.push(node);
     let added = collect_desired_urls(desired).len();
     write_doc(path, &mut doc)?;
@@ -992,7 +965,7 @@ mod tests {
             .push(json!({
                 "type": "folder",
                 "name": "SoloMD",
-                "meta_info": { "solomd_managed": "1", "solomd_schema": "2" },
+                "meta_info": { "solomd_managed": "1" },
                 "children": [
                     { "type": "url", "name": "User", "url": "https://user.example/", "id": "9" },
                     { "type": "url", "name": "Mirror", "url": "https://mirror.example/", "id": "10",
@@ -1018,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_ignores_legacy_managed_subtree_without_markers() {
+    fn plan_reads_unmarked_nodes_as_user_bookmarks() {
         let mut doc = fixture();
         doc["roots"]["bookmark_bar"]["children"]
             .as_array_mut()
@@ -1028,34 +1001,16 @@ mod tests {
                 "name": "SoloMD",
                 "meta_info": { "solomd_managed": "1" },
                 "children": [
-                    { "type": "url", "name": "Old mirror 1", "url": "https://a.example/", "id": "9" },
-                    { "type": "url", "name": "Old mirror 2", "url": "https://b.example/", "id": "10" }
-                ]
-            }));
-        // No `solomd_mirror` anywhere → written by an older build, not user input.
-        assert!(plan_from_docs(&[doc]).is_empty());
-    }
-
-    #[test]
-    fn plan_ignores_mixed_legacy_subtree_without_schema() {
-        // The broken intermediate build produced marked + unmarked nodes in the
-        // same root. Without the schema stamp, none of the unmarked ones are
-        // trustworthy as user picks.
-        let mut doc = fixture();
-        doc["roots"]["bookmark_bar"]["children"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "type": "folder",
-                "name": "SoloMD",
-                "meta_info": { "solomd_managed": "1" },
-                "children": [
-                    { "type": "url", "name": "Mirror", "url": "https://mirror.example/", "id": "9",
+                    { "type": "url", "name": "User 1", "url": "https://a.example/", "id": "9" },
+                    { "type": "url", "name": "Mirror", "url": "https://mirror.example/", "id": "10",
                       "meta_info": { "solomd_mirror": "1" } },
-                    { "type": "url", "name": "Old mirror", "url": "https://old.example/", "id": "10" }
+                    { "type": "url", "name": "User 2", "url": "https://b.example/", "id": "11" }
                 ]
             }));
-        assert!(plan_from_docs(&[doc]).is_empty());
+        let plan = plan_from_docs(&[doc]);
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].normalized_url, "https://a.example");
+        assert_eq!(plan[1].normalized_url, "https://b.example");
     }
 
     #[test]
@@ -1262,7 +1217,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_rewrites_legacy_unmarked_subtree_with_markers() {
+    fn apply_preserves_unmarked_nodes_without_any_schema_stamp() {
         let dir = tempfile::tempdir().unwrap();
         let mut doc = fixture();
         doc["roots"]["bookmark_bar"]["children"]
@@ -1293,19 +1248,26 @@ mod tests {
         let urls = collect_urls(managed);
         assert!(urls.contains("https://fresh.example"));
         assert!(
-            !urls.contains("https://stale.example"),
-            "legacy unmarked nodes must not be preserved as user picks"
+            urls.contains("https://stale.example"),
+            "unmarked nodes are user bookmarks and must survive a write"
         );
-        let fresh = managed["children"][0]["children"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["url"] == "https://fresh.example/")
-            .unwrap();
-        assert_eq!(fresh["meta_info"]["solomd_mirror"], "1");
+        fn find_url<'a>(node: &'a Value, url: &str) -> Option<&'a Value> {
+            if node["type"] == "url" && node["url"] == url {
+                return Some(node);
+            }
+            node["children"]
+                .as_array()?
+                .iter()
+                .find_map(|c| find_url(c, url))
+        }
         assert_eq!(
-            managed["meta_info"]["solomd_schema"], "2",
-            "legacy root must be stamped so unmarked nodes are trusted again"
+            find_url(managed, "https://fresh.example/").unwrap()["meta_info"]["solomd_mirror"],
+            "1"
+        );
+        assert!(
+            find_url(managed, "https://stale.example/").unwrap()["meta_info"]["solomd_mirror"]
+                .is_null(),
+            "user bookmark must stay unmarked so it gets captured"
         );
     }
 

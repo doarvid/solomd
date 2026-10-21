@@ -20,6 +20,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { useSettingsStore } from './settings';
 import { useWorkspaceStore } from './workspace';
 import { useWorkspaceIndexStore } from './workspaceIndex';
+import { useToastsStore } from './toasts';
+import { useI18n } from '../i18n';
 import { isMobile } from '../lib/platform';
 
 export interface BookmarkSourceInfo {
@@ -132,24 +134,45 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
     },
 
     async syncNow() {
-      await this.maybeSync(true);
+      const ran = await this.maybeSync(true);
+      if (!ran) return;
+      const { t } = useI18n();
+      const toasts = useToastsStore();
+      if (this.lastError) {
+        toasts.error(this.lastError);
+        return;
+      }
+      const nothing =
+        this.captured === 0 &&
+        this.failed === 0 &&
+        (this.writeReport?.written_profiles.length ?? 0) === 0 &&
+        (this.writeReport?.skipped_profiles.length ?? 0) === 0;
+      toasts.info(
+        nothing
+          ? t('settings.bookmarkSync.manualNothing')
+          : t('settings.bookmarkSync.manualResult', {
+              captured: this.captured,
+              skipped: this.skipped,
+              failed: this.failed,
+            }),
+      );
     },
 
-    async maybeSync(force = false) {
+    async maybeSync(force = false): Promise<boolean> {
       const settings = useSettingsStore();
       const workspace = useWorkspaceStore();
 
-      if (!settings.bookmarkSyncEnabled) return;
-      if (isMobile()) return;
-      if (this.running) return;
+      if (!settings.bookmarkSyncEnabled) return false;
+      if (isMobile()) return false;
+      if (this.running) return false;
       const root = workspace.currentFolder;
-      if (!root || root.startsWith('saf:')) return;
+      if (!root || root.startsWith('saf:')) return false;
       // Both directions read the workspace index. Wait for it instead of
       // searching the vault file-by-file; the next 60s tick retries.
-      if (!useWorkspaceIndexStore().ready) return;
+      if (!useWorkspaceIndexStore().ready) return false;
 
       const intervalMs = Math.max(1, settings.bookmarkSyncIntervalMinutes) * 60_000;
-      if (!force && Date.now() - lastAttemptAt < intervalMs) return;
+      if (!force && Date.now() - lastAttemptAt < intervalMs) return false;
       lastAttemptAt = Date.now();
 
       this.running = true;
@@ -172,6 +195,7 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
         this.currentTitle = '';
         this.running = false;
       }
+      return true;
     },
 
     async readDirection(root: string, force: boolean) {
@@ -199,7 +223,6 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
         return; // don't advance the fingerprint — retry next round
       }
 
-      this.total = plan.length;
       // One global set from the workspace index — no per-folder file scans.
       // `captured_url` is the normalized frontmatter `url:` written by the
       // capture pipeline.
@@ -208,34 +231,53 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
       for (const note of index.entries) {
         if (note.captured_url) captured.add(note.captured_url);
       }
+      const todo = plan.filter((e) => !captured.has(e.normalized_url));
+      this.skipped = plan.length - todo.length;
+      this.total = todo.length;
+
       let fatal = false;
-
-      for (const entry of plan) {
-        if (captured.has(entry.normalized_url)) {
-          this.skipped += 1;
+      let cursor = 0;
+      // ponytail: fixed 4-way pool. Bump it if sites tolerate more; the
+      // per-host politeness of the existing capture path is unchanged.
+      const worker = async () => {
+        while (true) {
+          const i = cursor++;
+          if (i >= todo.length) return;
+          const entry = todo[i];
+          const dir = joinDir(root, entry.folder);
+          this.currentTitle = entry.title;
+          try {
+            const outcome = await invoke<{ error: string | null }>('capture_fetch_page', {
+              dir,
+              url: entry.url,
+              fallbackTitle: entry.title,
+              sourceTitle: null,
+            });
+            if (outcome.error) this.failed += 1;
+            else this.captured += 1;
+            // The stub note still carries `url:`, so don't retry a failed page
+            // forever. Same behavior as the manual capture panel.
+            captured.add(entry.normalized_url);
+          } catch {
+            this.failed += 1;
+            fatal = true;
+          }
           this.done += 1;
-          continue;
         }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(4, todo.length) }, () => worker()),
+      );
 
-        const dir = joinDir(root, entry.folder);
-        this.currentTitle = entry.title;
+      // Make the newly captured notes visible to the write pass in the same
+      // round, so their bookmarks are kept instead of looking "user-added".
+      if (this.captured > 0) {
         try {
-          const outcome = await invoke<{ error: string | null }>('capture_fetch_page', {
-            dir,
-            url: entry.url,
-            fallbackTitle: entry.title,
-            sourceTitle: null,
-          });
-          if (outcome.error) this.failed += 1;
-          else this.captured += 1;
-          // The stub note still carries `url:`, so don't retry a failed page
-          // forever. Same behavior as the manual capture panel.
-          captured.add(entry.normalized_url);
+          await invoke('workspace_index_rescan');
+          await index.refresh();
         } catch {
-          this.failed += 1;
-          fatal = true;
+          // Next round will catch up via the watcher.
         }
-        this.done += 1;
       }
 
       if (!fatal) {

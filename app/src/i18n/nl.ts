@@ -413,6 +413,9 @@ export const nl: I18n = {
       managedWarning:
         'SoloMD/ is fully managed: note links are maintained automatically, while bookmarks you add there are kept until their page becomes a note.',
       noWorkspace: 'Open a workspace folder to sync.',
+      manualNothing: 'Bookmark sync: nothing new',
+      manualResult:
+        'Bookmark sync: {captured} captured · {skipped} already present · {failed} failed',
     },
     codeBlockWrap: 'Lange regels in codeblokken laten teruglopen',
     codeBlockWrapHint: 'Laat coderegels breder dan het blok teruglopen in plaats van een horizontale schuifbalk te tonen. PDF/afdrukken loopt altijd terug.',

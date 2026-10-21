@@ -415,6 +415,9 @@ export const pt: I18n = {
       managedWarning:
         'SoloMD/ is fully managed: note links are maintained automatically, while bookmarks you add there are kept until their page becomes a note.',
       noWorkspace: 'Open a workspace folder to sync.',
+      manualNothing: 'Bookmark sync: nothing new',
+      manualResult:
+        'Bookmark sync: {captured} captured · {skipped} already present · {failed} failed',
     },
     codeBlockWrap: 'Quebrar linhas longas em blocos de código',
     codeBlockWrapHint: 'Quebra linhas de código mais largas que o bloco em vez de mostrar uma barra de rolagem horizontal. PDF/impressão sempre quebra.',

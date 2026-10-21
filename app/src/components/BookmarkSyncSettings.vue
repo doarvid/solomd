@@ -146,7 +146,10 @@ const writeSummary = computed(() => {
         <span class="bsync__muted">{{ statusLine }}</span>
       </div>
 
-      <p v-if="sync.running && sync.total > 0" class="bsync__hint">
+      <p
+        v-if="(sync.running || sync.lastRunAt) && (sync.captured + sync.skipped + sync.failed > 0)"
+        class="bsync__hint"
+      >
         {{
           t('settings.bookmarkSync.progress', {
             captured: sync.captured,

@@ -415,6 +415,8 @@ export const zh: I18n = {
       managedWarning:
         'SoloMD 目录由应用管理：笔记外链会自动维护，你手动添加进去的书签会保留到对应页面变成笔记为止。',
       noWorkspace: '先打开一个工作区文件夹再同步。',
+      manualNothing: '书签同步：没有新内容',
+      manualResult: '书签同步：采集 {captured} · 已存在 {skipped} · 失败 {failed}',
     },
     codeBlockWrap: '代码块内自动换行',
     codeBlockWrapHint: '超出代码块宽度的长行自动折行显示,不再出现横向滚动条。PDF/打印始终自动换行。',

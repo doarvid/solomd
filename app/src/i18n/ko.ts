@@ -413,6 +413,9 @@ export const ko: I18n = {
       managedWarning:
         'SoloMD/ is fully managed: note links are maintained automatically, while bookmarks you add there are kept until their page becomes a note.',
       noWorkspace: 'Open a workspace folder to sync.',
+      manualNothing: 'Bookmark sync: nothing new',
+      manualResult:
+        'Bookmark sync: {captured} captured · {skipped} already present · {failed} failed',
     },
     codeBlockWrap: '코드 블록의 긴 줄 바꿈',
     codeBlockWrapHint: '블록 너비를 넘는 코드 줄을 가로 스크롤 대신 줄 바꿈으로 표시합니다. PDF/인쇄는 항상 줄 바꿈됩니다.',

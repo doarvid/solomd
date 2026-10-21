@@ -413,6 +413,9 @@ export const fr: I18n = {
       managedWarning:
         'SoloMD/ is fully managed: note links are maintained automatically, while bookmarks you add there are kept until their page becomes a note.',
       noWorkspace: 'Open a workspace folder to sync.',
+      manualNothing: 'Bookmark sync: nothing new',
+      manualResult:
+        'Bookmark sync: {captured} captured · {skipped} already present · {failed} failed',
     },
     codeBlockWrap: 'Retour à la ligne dans les blocs de code',
     codeBlockWrapHint: "Replie les lignes de code plus larges que le bloc au lieu d'afficher une barre de défilement horizontale. PDF/impression replie toujours.",

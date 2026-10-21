@@ -413,6 +413,9 @@ export const ru: I18n = {
       managedWarning:
         'SoloMD/ is fully managed: note links are maintained automatically, while bookmarks you add there are kept until their page becomes a note.',
       noWorkspace: 'Open a workspace folder to sync.',
+      manualNothing: 'Bookmark sync: nothing new',
+      manualResult:
+        'Bookmark sync: {captured} captured · {skipped} already present · {failed} failed',
     },
     codeBlockWrap: 'Переносить длинные строки в блоках кода',
     codeBlockWrapHint: 'Переносит строки кода шире блока вместо горизонтальной прокрутки. В PDF и при печати перенос включён всегда.',

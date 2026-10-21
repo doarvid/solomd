@@ -413,6 +413,9 @@ export const ja: I18n = {
       managedWarning:
         'SoloMD/ is fully managed: note links are maintained automatically, while bookmarks you add there are kept until their page becomes a note.',
       noWorkspace: 'Open a workspace folder to sync.',
+      manualNothing: 'Bookmark sync: nothing new',
+      manualResult:
+        'Bookmark sync: {captured} captured · {skipped} already present · {failed} failed',
     },
     codeBlockWrap: 'コードブロック内で長い行を折り返す',
     codeBlockWrapHint: 'ブロック幅を超えるコード行を横スクロールではなく折り返して表示します。PDF/印刷では常に折り返します。',
