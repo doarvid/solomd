@@ -18,6 +18,7 @@ import { useToastsStore } from './toasts';
 import { useSettingsStore } from './settings';
 import { useI18n } from '../i18n';
 import { diffBrowserTabs, type TabLike } from '../lib/browser-lifecycle.ts';
+import { lastTurn } from '../lib/last-turn.ts';
 
 export interface CaptureLink {
   href: string;
@@ -345,7 +346,7 @@ export const useBrowserStore = defineStore('browser', {
      * 兜底）。两者都空就什么都不做 —— 与其写一个空文件，不如让用户
      * 知道没抓到。
      */
-    async saveConversation(tabId: string) {
+    async saveConversation(tabId: string, lastTurnOnly = false) {
       const tab = useTabsStore().tabs.find((t) => t.id === tabId);
       const payload = this.pending[tabId];
       if (!tab?.captureDir) {
@@ -359,7 +360,10 @@ export const useBrowserStore = defineStore('browser', {
         return;
       }
 
-      const body = (payload.markdown || payload.text || '').trim();
+      // 只切**结构化 markdown**。退化到 DOM `text` 时不动它 —— 那串
+      // innerText 里出现一行 `# xxx` 纯属巧合，按它切就是静默截断。
+      const raw = payload.markdown || payload.text || '';
+      const body = (lastTurnOnly && payload.markdown ? lastTurn(raw) : raw).trim();
       if (!body) {
         this.notice = tr('browser.errEmpty');
         useToastsStore().error(this.notice);

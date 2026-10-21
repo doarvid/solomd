@@ -70,8 +70,15 @@ async function capture() {
  * 先采集，再保存。没采过就提示，而不是写一个空文件。
  */
 async function save() {
-  await browser.saveConversation(props.tab.id);
+  await browser.saveConversation(props.tab.id, lastTurnOnly.value);
 }
+
+/**
+ * 只存最后一轮。长对话里想归档的常常只是最后那个回答，前面几十轮是噪音。
+ * 放组件内 ref 不进 settings：这是个跟着当前 tab 走的临时选择，不值得为它
+ * 在 settings 里加一份持久化样板。
+ */
+const lastTurnOnly = ref(false);
 
 /**
  * 这是 DeepSeek 对话页吗？
@@ -154,6 +161,10 @@ async function capturePage() {
     >
       {{ t('browser.capturePage') }}
     </DsButton>
+    <label v-if="isChatPage" class="browser-toolbar__opt">
+      <input type="checkbox" v-model="lastTurnOnly" />
+      <span>{{ t('browser.saveLastOnly') }}</span>
+    </label>
     <DsButton
       v-if="isChatPage"
       class="browser-toolbar__btn"
@@ -185,6 +196,16 @@ async function capturePage() {
 }
 .browser-toolbar__btn {
   flex: 0 0 auto;
+}
+.browser-toolbar__opt {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
 }
 /* 采集/保存的结果就地显示在工具栏上 —— 侧栏面板可能根本没打开，
    只把提示放在那里等于没有提示。 */
