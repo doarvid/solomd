@@ -1953,6 +1953,19 @@ const showSearchPane = computed(() => searchOpen.value);
 // #168 — phone shell: one flag drives the CSS and the behaviour.
 const { isNarrow } = useViewport();
 
+/** 非法存储值按底部处理（load() 也会归一化，这里是双保险）。 */
+const agentDock = computed<'right' | 'bottom'>(() =>
+  settings.agentDock === 'right' ? 'right' : 'bottom',
+);
+/** 面板是否真的渲染在底部：小屏一律不启用。 */
+const agentBottomVisible = computed(
+  () => showAgentPane.value && agentDock.value === 'bottom' && !isNarrow.value,
+);
+/** 面板是否参与右侧栏的面板栈。 */
+const agentInRightSidebar = computed(
+  () => showAgentPane.value && !agentBottomVisible.value,
+);
+
 // 5.0 §8 — phone shell: home (笔记) / search / editor as full-screen views.
 const phone = usePhoneStore();
 // 5.0 §7 — iPad portrait: the sidebar floats over the text and steps aside
@@ -2080,7 +2093,7 @@ const rightSidebarHasRenderablePane = computed(
     showTypesPane.value ||
     showHistoryPane.value ||
     showInspectorPane.value ||
-    showAgentPane.value ||
+    agentInRightSidebar.value ||
     showRelatedLinksPane.value,
 );
 
@@ -2165,7 +2178,11 @@ const visibleRsPanes = computed(() => {
     if (!ordered.includes(id)) ordered.push(id);
   }
   return ordered
-    .filter((id) => all[id as keyof typeof all])
+    .filter(
+      (id) =>
+        all[id as keyof typeof all] &&
+        (id !== 'agent' || agentInRightSidebar.value),
+    )
     .map((id) => ({ id: id as 'search' | 'outline' | 'backlinks' | 'relationships' | 'tags' | 'tasks' | 'neighborhood' | 'types' | 'history' | 'inspector' | 'agent' | 'relatedLinks' }));
 });
 
@@ -2263,7 +2280,7 @@ function paneStyle(id: string) {
 // User resizes above the auto-bump are honored.
 const sideSidebarStyle = computed(() => {
   const w =
-    showAgentPane.value && settings.sideSidebarWidth <= 260
+    agentInRightSidebar.value && settings.sideSidebarWidth <= 260
       ? 440
       : settings.sideSidebarWidth;
   return { width: `${w}px`, flexBasis: `${w}px` };
@@ -2475,13 +2492,25 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
             </div>
           </template>
         </aside>
-        <div class="content">
-          <BasesView v-if="basesOpen" />
-          <InboxView v-else-if="inboxViewOpen" />
-          <TypeLensView v-else-if="typeLensOpen" :type-name="typeLensName" />
-          <ViewNoteList v-else-if="viewPaneVisible" />
-          <TileRoot v-else :node="tiles.root" @cursor="onCursor" @selection="onSelection" />
-          <StatsPill v-if="!basesOpen && !inboxViewOpen && !typeLensOpen && !viewPaneVisible" :line="cursorLine" :col="cursorCol" :selection-text="selectionText" />
+        <div class="content-col">
+          <div class="content">
+            <BasesView v-if="basesOpen" />
+            <InboxView v-else-if="inboxViewOpen" />
+            <TypeLensView v-else-if="typeLensOpen" :type-name="typeLensName" />
+            <ViewNoteList v-else-if="viewPaneVisible" />
+            <TileRoot v-else :node="tiles.root" @cursor="onCursor" @selection="onSelection" />
+            <StatsPill v-if="!basesOpen && !inboxViewOpen && !typeLensOpen && !viewPaneVisible" :line="cursorLine" :col="cursorCol" :selection-text="selectionText" />
+          </div>
+          <div
+            v-if="agentBottomVisible"
+            class="agent-dock"
+            :style="{ height: settings.agentDockHeight + 'px' }"
+          >
+            <AgentPanel
+              @open-settings="(section?: string) => openSettingsAt(section ?? 'integrations')"
+              @close="settings.toggleAgentPanel()"
+            />
+          </div>
         </div>
         <aside
           v-if="showRightSidebar && settings.outlineSide !== 'left'"
@@ -3110,5 +3139,31 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
   min-width: 0;
   overflow: hidden;
   position: relative;
+}
+.content-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.agent-dock {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 160px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  border-top: var(--bd-hair);
+  background: var(--bg);
+}
+.agent-dock > .agent-panel {
+  flex: 1;
+  min-height: 0;
+}
+/* 窄屏：内层 .content 仍是 flex 项，外层容器占满宽度。 */
+.app--narrow .content-col {
+  flex: 1 1 100%;
+  min-width: 0;
 }
 </style>
