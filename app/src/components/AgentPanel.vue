@@ -299,8 +299,7 @@ async function sendCli(prompt: string) {
       },
     });
   } catch (err) {
-    agent.isStreaming = false;
-    agent.currentRunId = null;
+    agent.abortTurn();
     errorMsg.value = String(err);
     const last = agent.messages[agent.messages.length - 1];
     if (last && last.role === 'assistant' && last.content === '') {
@@ -321,9 +320,7 @@ async function stop() {
   } catch {
     /* best-effort */
   }
-  agent.isStreaming = false;
-  agent.currentRunId = null;
-  agent.cliStatus = null;
+  agent.abortTurn();
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -484,9 +481,7 @@ onMounted(async () => {
     'solomd://claude-error',
     (e) => {
       if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
-      agent.isStreaming = false;
-      agent.currentRunId = null;
-      agent.cliStatus = null;
+      agent.abortTurn();
       const last = agent.messages[agent.messages.length - 1];
       if (last && last.role === 'assistant' && last.content === '') {
         agent.messages.pop();

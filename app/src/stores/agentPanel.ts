@@ -164,5 +164,18 @@ export const useAgentPanelStore = defineStore('agentPanel', {
       this.source = source;
       this.clearSession();
     },
+    /**
+     * End the current turn after a failure or a Stop. A FIRST turn that
+     * fails still wrote its transcript, so keeping its id would make every
+     * retry fail with "Session ID is already in use" — drop it instead and
+     * let the next send mint a fresh one. After a completed turn the session
+     * is resumable, so the id stays.
+     */
+    abortTurn() {
+      if (!this.cliStarted) this.cliSessionId = null;
+      this.currentRunId = null;
+      this.isStreaming = false;
+      this.cliStatus = null;
+    },
   },
 });

@@ -61,11 +61,54 @@ struct ErrorPayload {
     error: String,
 }
 
-type ChildHandle = Arc<tokio::sync::Mutex<tokio::process::Child>>;
+/// Per-run cancellation signal. The child is owned by `run_stream`, never
+/// shared behind a lock: a cancel only notifies, so it can never block on a
+/// process that has closed stdout but not exited.
+type RunSignal = Arc<tokio::sync::Notify>;
 
-fn runs() -> &'static Mutex<HashMap<String, ChildHandle>> {
-    static RUNS: OnceLock<Mutex<HashMap<String, ChildHandle>>> = OnceLock::new();
+fn runs() -> &'static Mutex<HashMap<String, RunSignal>> {
+    static RUNS: OnceLock<Mutex<HashMap<String, RunSignal>>> = OnceLock::new();
     RUNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a run and return its signal. A cancel that arrived before this
+/// point left a flag in `cancelled`; `notify_one` stores a permit, so the
+/// run sees it even though nobody was waiting when cancel was called.
+fn register_run(request_id: &str) -> RunSignal {
+    let signal: RunSignal = Arc::new(tokio::sync::Notify::new());
+    if let Ok(mut map) = runs().lock() {
+        map.insert(request_id.to_string(), signal.clone());
+    }
+    let early = cancelled()
+        .lock()
+        .map(|set| set.contains(request_id))
+        .unwrap_or(false);
+    if early {
+        signal.notify_one();
+    }
+    signal
+}
+
+/// Wait for `child`, but kill it as soon as `signal` fires.
+async fn wait_or_kill(
+    child: &mut tokio::process::Child,
+    signal: &tokio::sync::Notify,
+) -> std::io::Result<std::process::ExitStatus> {
+    let exited = {
+        let wait = child.wait();
+        tokio::pin!(wait);
+        tokio::select! {
+            r = &mut wait => Some(r),
+            _ = signal.notified() => None,
+        }
+    };
+    match exited {
+        Some(r) => r,
+        None => {
+            let _ = child.start_kill();
+            child.wait().await
+        }
+    }
 }
 
 fn cancelled() -> &'static Mutex<HashSet<String>> {
@@ -212,14 +255,11 @@ pub async fn claude_chat(app: AppHandle, request: ClaudeChatRequest) -> Result<(
         buf
     });
 
-    let handle: ChildHandle = Arc::new(tokio::sync::Mutex::new(child));
-    if let Ok(mut map) = runs().lock() {
-        map.insert(request.request_id.clone(), handle.clone());
-    }
+    let signal = register_run(&request.request_id);
 
     let app_for_run = app.clone();
     tokio::spawn(async move {
-        run_stream(app_for_run, request, handle, stdout, stderr_task).await;
+        run_stream(app_for_run, request, child, signal, stdout, stderr_task).await;
     });
 
     Ok(())
@@ -228,7 +268,8 @@ pub async fn claude_chat(app: AppHandle, request: ClaudeChatRequest) -> Result<(
 async fn run_stream(
     app: AppHandle,
     request: ClaudeChatRequest,
-    child: ChildHandle,
+    mut child: tokio::process::Child,
+    signal: RunSignal,
     stdout: tokio::process::ChildStdout,
     stderr_task: tokio::task::JoinHandle<String>,
 ) {
@@ -267,10 +308,7 @@ async fn run_stream(
         }
     }
 
-    let status = {
-        let mut guard = child.lock().await;
-        guard.wait().await
-    };
+    let status = wait_or_kill(&mut child, &signal).await;
     if let Ok(mut map) = runs().lock() {
         map.remove(&rid);
     }
@@ -315,13 +353,12 @@ pub async fn claude_cancel(request_id: String) -> Result<(), String> {
     if let Ok(mut set) = cancelled().lock() {
         set.insert(request_id.clone());
     }
-    let handle = runs()
+    let signal = runs()
         .lock()
         .ok()
         .and_then(|map| map.get(&request_id).cloned());
-    if let Some(handle) = handle {
-        let mut guard = handle.lock().await;
-        let _ = guard.start_kill();
+    if let Some(signal) = signal {
+        signal.notify_one();
     }
     Ok(())
 }
@@ -392,6 +429,7 @@ pub fn parse_stream_line(line: &str) -> Vec<CliEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn parses_text_delta() {
@@ -425,5 +463,45 @@ mod tests {
         assert!(parse_stream_line(r#"{"type":"system","subtype":"init"}"#).is_empty());
         assert!(parse_stream_line("not json").is_empty());
         assert!(parse_stream_line("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_before_register_is_not_lost() {
+        let id = "test-cancel-before-register";
+        claude_cancel(id.to_string()).await.unwrap();
+        let signal = register_run(id);
+        let notified = tokio::time::timeout(Duration::from_millis(200), signal.notified()).await;
+        assert!(
+            notified.is_ok(),
+            "a cancel that arrived before registration must still fire"
+        );
+        if let Ok(mut set) = cancelled().lock() {
+            set.remove(id);
+        }
+        if let Ok(mut map) = runs().lock() {
+            map.remove(id);
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_or_kill_kills_a_stuck_child() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let signal = Arc::new(tokio::sync::Notify::new());
+        let notifier = signal.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            notifier.notify_one();
+        });
+
+        let started = std::time::Instant::now();
+        let status = wait_or_kill(&mut child, &signal).await.unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!status.success());
     }
 }
