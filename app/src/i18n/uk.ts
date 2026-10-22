@@ -355,6 +355,7 @@ export const uk: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Агент',
     deleteTitle: 'Видалити',
     deleteFileMsg: 'Видалити «{name}»?',
     deleteFolderMsg: 'Видалити теку «{name}» разом з усім її вмістом?',
@@ -2017,6 +2018,11 @@ export const uk: I18n = {
 
   // v4.0 pillar 1: Inline Agent Panel
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Папка: {path}',
     heading: 'Агент',
     empty: {
       noFolder: 'Відкрийте теку, щоб поспілкуватися зі своїм сховищем.',

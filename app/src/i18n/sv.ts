@@ -355,6 +355,7 @@ export const sv: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Agent',
     deleteTitle: 'Radera',
     deleteFileMsg: 'Radera ”{name}”?',
     deleteFolderMsg: 'Radera mappen ”{name}” och allt i den?',
@@ -2017,6 +2018,11 @@ export const sv: I18n = {
 
   // v4.0 pillar 1: Inline Agent Panel
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Mapp: {path}',
     heading: 'Agent',
     empty: {
       noFolder: 'Öppna en mapp för att chatta med ditt valv.',

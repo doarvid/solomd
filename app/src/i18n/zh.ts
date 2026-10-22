@@ -357,6 +357,7 @@ export const zh: I18n = {
     heading: '文件树',
     knowledgeSearch: '知识检索',
     browserSearch: '浏览器搜索',
+    agent: '智能体',
     revealHidden: '没能在文件树里显示出这个文件 —— 它不在当前工作区里，或者被文件树的过滤条件挡住了。',
     loading: '正在加载…',
     truncated: '+ 还有 10,000+ 项 —— 文件夹太大了',
@@ -2004,6 +2005,11 @@ export const zh: I18n = {
   // v4.0 pillar 1: Inline Agent Panel
   agent: {
     heading: '智能体',
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: '目录：{path}',
     empty: {
       noFolder: '请先打开一个文件夹，再开始与笔记库对话。',
       noAi: '请先在设置里配置一个 AI 服务商。',

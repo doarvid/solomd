@@ -355,6 +355,7 @@ export const it: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Agente',
     deleteTitle: 'Elimina',
     deleteFileMsg: 'Eliminare «{name}»?',
     deleteFolderMsg: 'Eliminare la cartella «{name}» e tutto il suo contenuto?',
@@ -2000,6 +2001,11 @@ export const it: I18n = {
     refresh: 'Aggiorna',
   },
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Cartella: {path}',
     heading: 'Agent',
     empty: {
       noFolder: 'Apri una cartella per chattare con il tuo vault.',

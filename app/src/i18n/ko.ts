@@ -355,6 +355,7 @@ export const ko: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: '에이전트',
     deleteTitle: '삭제',
     deleteFileMsg: '“{name}”을(를) 삭제할까요?',
     deleteFolderMsg: '폴더 “{name}”와 그 안의 모든 항목을 삭제할까요?',
@@ -2000,6 +2001,11 @@ export const ko: I18n = {
     refresh: '새로고침',
   },
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: '폴더: {path}',
     heading: 'Agent',
     empty: {
       noFolder: 'vault와 채팅하려면 폴더를 여세요.',

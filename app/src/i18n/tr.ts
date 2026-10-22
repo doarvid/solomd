@@ -355,6 +355,7 @@ export const tr: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Ajan',
     deleteTitle: 'Sil',
     deleteFileMsg: '“{name}” silinsin mi?',
     deleteFolderMsg: '“{name}” klasörü ve içindekiler silinsin mi?',
@@ -2017,6 +2018,11 @@ export const tr: I18n = {
 
   // v4.0 pillar 1: Inline Agent Panel
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Klasör: {path}',
     heading: 'Aracı',
     empty: {
       noFolder: 'Vault\'unuzla sohbet etmek için bir klasör açın.',

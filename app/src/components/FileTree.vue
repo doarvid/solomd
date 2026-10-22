@@ -13,6 +13,8 @@ import { useGithubSyncStore } from '../stores/githubSync';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTabsStore } from '../stores/tabs';
 import { useBrowserStore } from '../stores/browser';
+import { useAgentPanelStore } from '../stores/agentPanel';
+import { IS_APP_STORE_BUILD } from '../lib/app-build';
 import { useOverlayPresenceOf } from '../lib/overlay-presence';
 import { useI18n } from '../i18n';
 import { isIOS, isMobile, revealLabelKey, usesCommandKey } from '../lib/platform';
@@ -123,6 +125,7 @@ const tabs = useTabsStore();
 const { t } = useI18n();
 const pendingDeletes = usePendingDeletes();
 const browser = useBrowserStore();
+const agentPanel = useAgentPanelStore();
 
 const root = ref<Node | null>(null);
 
@@ -160,6 +163,17 @@ function openFolderBrowser(node: Node) {
     refsDir: node.path,
     title: t('explorer.browserSearch'),
   });
+  closeCtx();
+}
+
+/** 右键目录 → Agent：把 CLI 作用域设到该目录并打开右侧面板。 */
+function openAgent(node: Node) {
+  agentPanel.openForFolder(node.path);
+  if (!settings.showAgentPanel) {
+    settings.toggleAgentPanel();
+  } else {
+    settings.ensureRightSidebarVisible();
+  }
   closeCtx();
 }
 
@@ -2240,6 +2254,16 @@ onBeforeUnmount(() => {
         @click="openFolderBrowser(ctx.node)"
       >
         🌐 {{ t('explorer.browserSearch') }}
+      </button>
+      <!-- Agent — opens the right-side agent panel scoped to this folder, with
+           the local Claude Code CLI as the backend. Desktop only: no CLI on
+           mobile, and the App Store build strips the AI surface. -->
+      <button
+        v-if="ctx.node?.is_dir && !isMobile() && !IS_APP_STORE_BUILD"
+        class="ftree__ctx-item"
+        @click="openAgent(ctx.node)"
+      >
+        🤖 {{ t('explorer.agent') }}
       </button>
       <!-- Only between the "new file / folder" section (folders) and the rest:
            on a file the menu would otherwise open with an empty divider. -->

@@ -355,6 +355,7 @@ export const pl: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Agent',
     deleteTitle: 'Usuń',
     deleteFileMsg: 'Usunąć „{name}”?',
     deleteFolderMsg: 'Usunąć folder „{name}” wraz z całą zawartością?',
@@ -2017,6 +2018,11 @@ export const pl: I18n = {
 
   // v4.0 pillar 1: Inline Agent Panel
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Folder: {path}',
     heading: 'Agent',
     empty: {
       noFolder: 'Otwórz folder, aby rozmawiać ze swoim skarbcem.',

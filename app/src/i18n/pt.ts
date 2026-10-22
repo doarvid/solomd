@@ -357,6 +357,7 @@ export const pt: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Agente',
     deleteTitle: 'Excluir',
     deleteFileMsg: 'Excluir “{name}”?',
     deleteFolderMsg: 'Excluir a pasta “{name}” e tudo dentro dela?',
@@ -2002,6 +2003,11 @@ export const pt: I18n = {
     refresh: 'Atualizar',
   },
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Pasta: {path}',
     heading: 'Agente',
     empty: {
       noFolder: 'Abra uma pasta para conversar com seu vault.',

@@ -355,6 +355,7 @@ export const fr: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Agent',
     deleteTitle: 'Supprimer',
     deleteFileMsg: 'Supprimer « {name} » ?',
     deleteFolderMsg: 'Supprimer le dossier « {name} » et tout son contenu ?',
@@ -2000,6 +2001,11 @@ export const fr: I18n = {
     refresh: 'Actualiser',
   },
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Dossier : {path}',
     heading: 'Agent',
     empty: {
       noFolder: 'Ouvrir un dossier pour discuter avec votre vault.',

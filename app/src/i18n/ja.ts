@@ -355,6 +355,7 @@ export const ja: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'エージェント',
     deleteTitle: '削除',
     deleteFileMsg: '「{name}」を削除しますか？',
     deleteFolderMsg: 'フォルダ「{name}」と中身をすべて削除しますか？',
@@ -2000,6 +2001,11 @@ export const ja: I18n = {
     refresh: '更新',
   },
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'フォルダ：{path}',
     heading: 'Agent',
     empty: {
       noFolder: 'vault とチャットするにはフォルダを開いてください。',

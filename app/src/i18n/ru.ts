@@ -355,6 +355,7 @@ export const ru: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Агент',
     heading: 'Проводник',
     revealHidden: 'Не удалось показать файл в дереве: он вне открытой рабочей папки или скрыт фильтром.',
     loading: 'Загрузка…',
@@ -1992,6 +1993,11 @@ export const ru: I18n = {
     refresh: 'Обновить',
   },
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Папка: {path}',
     heading: 'Агент',
     empty: {
       noFolder: 'Откройте папку, чтобы общаться со своим хранилищем.',

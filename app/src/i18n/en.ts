@@ -359,6 +359,7 @@ export const en = {
     heading: 'Explorer',
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Agent',
     revealHidden: 'Could not show this file in the tree — it is outside the open workspace, or hidden by a tree filter.',
     loading: 'Loading…',
     truncated: '+ 10,000+ more —— folder is huge',
@@ -2031,6 +2032,11 @@ export const en = {
   // v4.0 pillar 1: Inline Agent Panel
   agent: {
     heading: 'Agent',
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Folder: {path}',
     empty: {
       noFolder: 'Open a folder to chat with your vault.',
       noAi: 'Configure an AI provider to start chatting.',

@@ -355,6 +355,7 @@ export const nl: I18n = {
   explorer: {
     knowledgeSearch: 'Knowledge search',
     browserSearch: 'Browser search',
+    agent: 'Agent',
     deleteTitle: 'Verwijderen',
     deleteFileMsg: '“{name}” verwijderen?',
     deleteFolderMsg: 'Map “{name}” en alles erin verwijderen?',
@@ -2017,6 +2018,11 @@ export const nl: I18n = {
 
   // v4.0 pillar 1: Inline Agent Panel
   agent: {
+    source: {
+      api: 'API',
+      cli: 'Claude CLI',
+    },
+    cliFolder: 'Map: {path}',
     heading: 'Agent',
     empty: {
       noFolder: 'Open een map om met je vault te chatten.',
