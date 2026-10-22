@@ -2006,6 +2006,9 @@ export const es: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Carpeta: {path}',
+    dockToRight: 'Dock right',
+    dockToBottom: 'Dock bottom',
+    dragDock: 'Drag to move this panel',
     heading: 'Agente',
     empty: {
       noFolder: 'Abre una carpeta para chatear con tu vault.',

@@ -2023,6 +2023,9 @@ export const pl: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Folder: {path}',
+    dockToRight: 'Dock right',
+    dockToBottom: 'Dock bottom',
+    dragDock: 'Drag to move this panel',
     heading: 'Agent',
     empty: {
       noFolder: 'Otwórz folder, aby rozmawiać ze swoim skarbcem.',

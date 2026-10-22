@@ -2006,6 +2006,9 @@ export const ko: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: '폴더: {path}',
+    dockToRight: 'Dock right',
+    dockToBottom: 'Dock bottom',
+    dragDock: 'Drag to move this panel',
     heading: 'Agent',
     empty: {
       noFolder: 'vault와 채팅하려면 폴더를 여세요.',

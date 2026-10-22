@@ -2006,6 +2006,9 @@ export const ja: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: 'フォルダ：{path}',
+    dockToRight: 'Dock right',
+    dockToBottom: 'Dock bottom',
+    dragDock: 'Drag to move this panel',
     heading: 'Agent',
     empty: {
       noFolder: 'vault とチャットするにはフォルダを開いてください。',

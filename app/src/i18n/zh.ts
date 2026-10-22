@@ -2010,6 +2010,9 @@ export const zh: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: '目录：{path}',
+    dockToRight: '停靠到右侧',
+    dockToBottom: '停靠到底部',
+    dragDock: '拖动可移动面板',
     empty: {
       noFolder: '请先打开一个文件夹，再开始与笔记库对话。',
       noAi: '请先在设置里配置一个 AI 服务商。',

@@ -2023,6 +2023,9 @@ export const tr: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Klasör: {path}',
+    dockToRight: 'Dock right',
+    dockToBottom: 'Dock bottom',
+    dragDock: 'Drag to move this panel',
     heading: 'Aracı',
     empty: {
       noFolder: 'Vault\'unuzla sohbet etmek için bir klasör açın.',

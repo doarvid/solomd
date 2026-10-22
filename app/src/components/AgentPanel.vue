@@ -29,6 +29,7 @@ import Icons from './Icons.vue';
 const emit = defineEmits<{
   (e: 'open-settings', section?: string): void;
   (e: 'close'): void;
+  (e: 'dock-drag', event: PointerEvent): void;
 }>();
 
 const workspace = useWorkspaceStore();
@@ -323,6 +324,13 @@ async function stop() {
   agent.abortTurn();
 }
 
+/** 头部是停靠拖动抓手；里面的按钮有自己的点击行为，不参与拖动。 */
+function onHeaderPointerDown(e: PointerEvent) {
+  const target = e.target as HTMLElement | null;
+  if (target?.closest('button, input, textarea, a, select')) return;
+  emit('dock-drag', e);
+}
+
 function onKeydown(e: KeyboardEvent) {
   // CJK / IME guard: while the user is mid-composition (e.g. typing
   // pinyin then pressing Enter to commit a candidate), `e.isComposing`
@@ -574,7 +582,11 @@ watch(stateKey, (k) => {
 
 <template>
   <div class="agent-panel rp">
-    <header class="rp-head agent-panel__head">
+    <header
+      class="rp-head agent-panel__head agent-panel__head--draggable"
+      :title="t('agent.dragDock')"
+      @pointerdown="onHeaderPointerDown"
+    >
       <span class="rp-title agent-panel__title">{{ t('agent.heading') }}</span>
       <span class="agent-panel__beta">Beta</span>
       <div class="agent-panel__source">
@@ -785,6 +797,15 @@ watch(stateKey, (k) => {
 </template>
 
 <style scoped>
+.agent-panel__head--draggable {
+  cursor: grab;
+}
+.agent-panel__head--draggable:active {
+  cursor: grabbing;
+}
+.agent-panel__head--draggable button {
+  cursor: pointer;
+}
 .agent-panel__title {
   flex: 0 1 auto;
 }

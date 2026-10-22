@@ -1998,6 +1998,9 @@ export const ru: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Папка: {path}',
+    dockToRight: 'Dock right',
+    dockToBottom: 'Dock bottom',
+    dragDock: 'Drag to move this panel',
     heading: 'Агент',
     empty: {
       noFolder: 'Откройте папку, чтобы общаться со своим хранилищем.',

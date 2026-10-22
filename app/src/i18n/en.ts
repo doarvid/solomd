@@ -2037,6 +2037,9 @@ export const en = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Folder: {path}',
+    dockToRight: 'Dock right',
+    dockToBottom: 'Dock bottom',
+    dragDock: 'Drag to move this panel',
     empty: {
       noFolder: 'Open a folder to chat with your vault.',
       noAi: 'Configure an AI provider to start chatting.',
