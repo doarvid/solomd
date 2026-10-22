@@ -1615,6 +1615,12 @@ export const pl: I18n = {
     total: 'Razem',
     empty: 'Brak zarejestrowanych uruchomień — wypróbuj czat w panelu albo uruchom przepis.',
   },
+  preview: {
+    tooLargeTitle: 'Duży dokument',
+    tooLargeBody:
+      'Ten dokument ma {size}. Wyrenderowanie go tutaj zablokuje okno na kilka sekund. Przełącz na edycję na żywo lub widok dzielony albo wymuś renderowanie.',
+    renderAnyway: 'Renderuj mimo to',
+  },
   reading: {
     exit: 'Wyjdź z trybu czytania',
     toEdit: "Przełącz na tryb edycji",

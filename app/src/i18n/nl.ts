@@ -1615,6 +1615,12 @@ export const nl: I18n = {
     total: 'Totaal',
     empty: 'Nog geen uitvoeringen geregistreerd — probeer een paneelchat of voer een recept uit.',
   },
+  preview: {
+    tooLargeTitle: 'Groot document',
+    tooLargeBody:
+      'Dit document is {size}. Het hier renderen zou het venster enkele seconden laten vastlopen. Schakel over naar live bewerken of gedeelde weergave, of render toch.',
+    renderAnyway: 'Toch renderen',
+  },
   reading: {
     exit: 'Leesmodus verlaten',
     toEdit: "Naar bewerkmodus",

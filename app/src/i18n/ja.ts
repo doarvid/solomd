@@ -1612,6 +1612,12 @@ export const ja: I18n = {
     total: '合計',
     empty: 'まだ記録がありません — パネルチャットを試すか Recipe を実行してみてください。',
   },
+  preview: {
+    tooLargeTitle: '大きなドキュメント',
+    tooLargeBody:
+      'このドキュメントは {size} あります。ここで全体をレンダリングすると数秒間ウィンドウが固まります。ライブ編集または分割表示に切り替えるか、強制的にレンダリングしてください。',
+    renderAnyway: '強制的にレンダリング',
+  },
   reading: {
     exit: '読書モードを終了',
     toEdit: "編集モードに切り替え",

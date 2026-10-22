@@ -177,7 +177,38 @@ let mermaidIdSeq = 0;
 
 const renderDepsVersion = useRenderDepsVersion();
 
+/**
+ * `renderMarkdown()` runs markdown-it + highlight.js + DOMPurify over the
+ * WHOLE document synchronously. Measured cost is ~1.3–2.8 s per megabyte
+ * (prose vs. code-heavy), so a few-MB note freezes the window for many
+ * seconds when reading mode opens it. Above this limit we show an opt-in
+ * notice instead; the editor (liveEdit / split) renders incrementally and
+ * stays responsive for the same file.
+ *
+ * ponytail: fixed char-count cut-off. If the renderer ever moves to a worker
+ * or a chunked renderer this guard can go.
+ */
+const LARGE_DOC_CHARS = 500_000;
+const forceLargeRender = ref(false);
+const tooLargeToRender = computed(
+  () => (props.source?.length ?? 0) > LARGE_DOC_CHARS && !forceLargeRender.value,
+);
+// Opening a different document re-arms the guard.
+watch(
+  () => props.tabId,
+  () => {
+    forceLargeRender.value = false;
+  },
+);
+const sourceSizeLabel = computed(() => {
+  const n = props.source?.length ?? 0;
+  return n >= 1024 * 1024
+    ? `${(n / 1024 / 1024).toFixed(1)} MB`
+    : `${Math.round(n / 1024)} KB`;
+});
+
 const html = computed(() => {
+  if (tooLargeToRender.value) return '';
   // #141 — establish a reactive dep on the hard-breaks toggle so flipping the
   // setting re-renders immediately (renderMarkdown reads the md singleton's
   // option, which isn't reactive by itself).
@@ -450,6 +481,10 @@ watch(html, async () => {
   // A re-render (incl. our own math write-back) invalidates popup geometry.
   mathEdit.value = null;
   await nextTick();
+  // The article only enters the DOM once the large-document guard is lifted
+  // (or was never active), so a preview rendered after "Render anyway" must
+  // attach its listeners here rather than only in onMounted.
+  attachHostListeners();
   processPlantuml();
   await processMermaid();
   await processWhiteboards();
@@ -489,17 +524,25 @@ function handleLinkClick(e: MouseEvent) {
   openRenderedLink(anchor, e, props.filePath);
 }
 
+function attachHostListeners() {
+  const el = host.value;
+  if (!el) return;
+  // addEventListener de-dupes identical (type, listener) pairs, so calling
+  // this again after a forced render is safe.
+  el.addEventListener('click', handleLinkClick);
+  el.addEventListener('click', onTaskCheckboxClick);
+  el.addEventListener('dblclick', onPreviewDblClick);
+}
+
 onMounted(async () => {
   await nextTick();
+  attachHostListeners();
   processPlantuml();
   await processMermaid();
   await processWhiteboards();
   attachImageOverlayHandlers();
   attachCodeCopyButtons();
   enableTaskCheckboxes();
-  host.value?.addEventListener('click', handleLinkClick);
-  host.value?.addEventListener('click', onTaskCheckboxClick);
-  host.value?.addEventListener('dblclick', onPreviewDblClick);
 });
 
 onBeforeUnmount(() => {
@@ -633,7 +676,17 @@ defineExpose({ scrollToLine, openSearch });
       :container="host"
       @close="searchOpen = false"
     />
+    <div v-if="tooLargeToRender" class="preview-too-large">
+      <p class="preview-too-large__title">{{ t('preview.tooLargeTitle') }}</p>
+      <p class="preview-too-large__body">
+        {{ t('preview.tooLargeBody', { size: sourceSizeLabel }) }}
+      </p>
+      <button type="button" class="preview-too-large__btn" @click="forceLargeRender = true">
+        {{ t('preview.renderAnyway') }}
+      </button>
+    </div>
     <article
+      v-else
       ref="host"
       class="preview-content"
       :class="{
@@ -695,6 +748,38 @@ defineExpose({ scrollToLine, openSearch });
   overflow: auto;
   background: var(--bg);
   border-left: 1px solid var(--border);
+}
+/* Shown instead of a synchronous full-document render — see LARGE_DOC_CHARS. */
+.preview-too-large {
+  max-width: var(--preview-max-width, 680px);
+  margin: 15vh auto 0;
+  padding: 0 32px;
+  text-align: center;
+  color: var(--text-2);
+}
+.preview-too-large__title {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+.preview-too-large__body {
+  margin: 0 auto 18px;
+  max-width: 52ch;
+  line-height: 1.6;
+}
+.preview-too-large__btn {
+  padding: 7px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.preview-too-large__btn:hover {
+  border-color: var(--accent);
+  color: var(--accent-text);
 }
 :where(.preview-content) {
   /* v4.10 #165 — column width is user-tunable (previewMaxWidth setting sets

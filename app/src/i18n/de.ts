@@ -1612,6 +1612,12 @@ export const de: I18n = {
     total: 'Gesamt',
     empty: 'Noch keine Läufe erfasst — versuchen Sie einen Panel-Chat oder führen Sie ein Recipe aus.',
   },
+  preview: {
+    tooLargeTitle: 'Großes Dokument',
+    tooLargeBody:
+      'Dieses Dokument ist {size} groß. Beim Rendern würde das Fenster mehrere Sekunden einfrieren. Wechsle zum Live-Editor oder zur geteilten Ansicht — oder rendere trotzdem.',
+    renderAnyway: 'Trotzdem rendern',
+  },
   reading: {
     exit: 'Lesemodus verlassen',
     toEdit: "Zum Bearbeitungsmodus wechseln",

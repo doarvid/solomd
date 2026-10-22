@@ -1627,6 +1627,12 @@ export const en = {
     total: 'Total',
     empty: 'No runs recorded yet — try a Panel chat or run a Recipe.',
   },
+  preview: {
+    tooLargeTitle: 'Large document',
+    tooLargeBody:
+      'This document is {size}. Rendering it here would freeze the window for several seconds. Switch to live edit or split view to read it, or render it anyway.',
+    renderAnyway: 'Render anyway',
+  },
   reading: {
     exit: 'Exit reading mode',
     toEdit: "Switch to edit mode",

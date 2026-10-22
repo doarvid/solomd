@@ -1615,6 +1615,12 @@ export const tr: I18n = {
     total: 'Toplam',
     empty: 'Henüz çalıştırma kaydı yok — Panel sohbeti deneyin veya bir Tarif çalıştırın.',
   },
+  preview: {
+    tooLargeTitle: 'Büyük belge',
+    tooLargeBody:
+      'Bu belge {size}. Burada oluşturmak pencereyi birkaç saniye dondurabilir. Canlı düzenlemeye veya bölünmüş görünüme geçin ya da yine de oluşturun.',
+    renderAnyway: 'Yine de oluştur',
+  },
   reading: {
     exit: 'Okuma modundan çık',
     toEdit: "Düzenleme moduna geç",

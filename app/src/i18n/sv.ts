@@ -1615,6 +1615,12 @@ export const sv: I18n = {
     total: 'Totalt',
     empty: 'Inga körningar registrerade ännu — testa en panelchatt eller kör ett recept.',
   },
+  preview: {
+    tooLargeTitle: 'Stort dokument',
+    tooLargeBody:
+      'Det här dokumentet är {size}. Att rendera det här skulle frysa fönstret i flera sekunder. Byt till live-redigering eller delad vy, eller rendera ändå.',
+    renderAnyway: 'Rendera ändå',
+  },
   reading: {
     exit: 'Avsluta läsläge',
     toEdit: "Växla till redigeringsläge",

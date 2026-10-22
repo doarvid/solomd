@@ -1609,6 +1609,12 @@ export const zh: I18n = {
     total: '合计',
     empty: '尚无运行记录——试试 Panel 聊天或运行一个 Agent 任务。',
   },
+  preview: {
+    tooLargeTitle: '文档较大',
+    tooLargeBody:
+      '这份文档有 {size}，在这里完整渲染会卡住窗口数秒。请切换到实时编辑或分屏模式查看，也可以强行渲染。',
+    renderAnyway: '仍然渲染',
+  },
   reading: {
     exit: '退出阅读模式',
     toEdit: "切换到编辑模式",

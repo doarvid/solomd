@@ -1612,6 +1612,12 @@ export const ko: I18n = {
     total: '합계',
     empty: '아직 기록이 없습니다 — 패널 채팅을 시도하거나 Recipe를 실행해 보세요.',
   },
+  preview: {
+    tooLargeTitle: '큰 문서',
+    tooLargeBody:
+      '이 문서는 {size}입니다. 여기서 전체를 렌더링하면 몇 초 동안 창이 멈춥니다. 라이브 편집 또는 분할 보기로 전환하거나 그래도 렌더링하세요.',
+    renderAnyway: '그래도 렌더링',
+  },
   reading: {
     exit: '읽기 모드 종료',
     toEdit: "편집 모드로 전환",

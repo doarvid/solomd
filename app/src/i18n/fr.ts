@@ -1612,6 +1612,12 @@ export const fr: I18n = {
     total: 'Total',
     empty: 'Aucune exécution enregistrée — essayer un chat panneau ou exécuter une recipe.',
   },
+  preview: {
+    tooLargeTitle: 'Document volumineux',
+    tooLargeBody:
+      "Ce document fait {size}. Le rendre ici bloquerait la fenêtre pendant plusieurs secondes. Passez en édition live ou en vue partagée pour le lire, ou forcez le rendu.",
+    renderAnyway: 'Forcer le rendu',
+  },
   reading: {
     exit: 'Quitter le mode lecture',
     toEdit: "Passer en mode édition",
