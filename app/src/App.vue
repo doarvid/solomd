@@ -2231,10 +2231,73 @@ function startPaneReorder(e: PointerEvent, id: string) {
   document.addEventListener('pointerup', onUp);
 }
 
+// --- Agent panel docking -------------------------------------------------
+const dockDragging = ref(false);
+const dockDropZone = ref<'right' | 'bottom' | null>(null);
+
+/** 头部拖动：显示两个落点区，松手时切换停靠。 */
+function startAgentDockDrag(ev: PointerEvent) {
+  if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+  ev.preventDefault();
+  dockDragging.value = true;
+  dockDropZone.value = null;
+  const zoneAt = (x: number, y: number) =>
+    (document.elementFromPoint(x, y) as HTMLElement | null)
+      ?.closest('[data-agent-dock-zone]')
+      ?.getAttribute('data-agent-dock-zone');
+  const onMove = (m: PointerEvent) => {
+    const z = zoneAt(m.clientX, m.clientY);
+    dockDropZone.value = z === 'right' || z === 'bottom' ? z : null;
+  };
+  const onUp = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.body.style.userSelect = '';
+    const target = dockDropZone.value;
+    dockDragging.value = false;
+    dockDropZone.value = null;
+    if (target) settings.setAgentDock(target);
+  };
+  document.body.style.userSelect = 'none';
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
+/** 底部停靠的上边缘：向上拖变高。 */
+function onAgentDockResize(ev: PointerEvent) {
+  ev.preventDefault();
+  const startY = ev.clientY;
+  const startH = settings.agentDockHeight;
+  const onMove = (m: PointerEvent) => {
+    const next = startH - (m.clientY - startY);
+    const cap = Math.round(window.innerHeight * 0.7);
+    settings.setAgentDockHeight(Math.min(next, cap));
+  };
+  const onUp = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  };
+  document.body.style.cursor = 'ns-resize';
+  document.body.style.userSelect = 'none';
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
 // Sidebar visibility / pane composition changes the editor's available
 // width. CodeMirror's ResizeObserver may lag for a frame, so dispatch
 // solomd:relayout on the next paint and let Editor.vue requestMeasure().
 watch(visibleRsPanes, () => {
+  nextTick(() => {
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent('solomd:relayout'));
+    });
+  });
+});
+
+// 停靠位置或高度变化会改变编辑器可用高度，让 CodeMirror 重新测量。
+watch([agentBottomVisible, () => settings.agentDockHeight], () => {
   nextTick(() => {
     requestAnimationFrame(() => {
       window.dispatchEvent(new CustomEvent('solomd:relayout'));
@@ -2429,6 +2492,22 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       />
       <TelemetryBanner />
       <div class="workspace">
+        <div v-if="dockDragging" class="agent-dock-zones">
+          <div
+            class="agent-dock-zone agent-dock-zone--right"
+            :class="{ 'is-active': dockDropZone === 'right' }"
+            data-agent-dock-zone="right"
+          >
+            {{ t('agent.dockToRight') }}
+          </div>
+          <div
+            class="agent-dock-zone agent-dock-zone--bottom"
+            :class="{ 'is-active': dockDropZone === 'bottom' }"
+            data-agent-dock-zone="bottom"
+          >
+            {{ t('agent.dockToBottom') }}
+          </div>
+        </div>
         <aside
           v-if="showRightSidebar && settings.outlineSide === 'left'"
           class="side-sidebar side-sidebar--left"
@@ -2486,6 +2565,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
               />
               <AgentPanel
                 v-if="p.id === 'agent'"
+                @dock-drag="startAgentDockDrag"
                 @open-settings="(section?: string) => openSettingsAt(section ?? 'integrations')"
                 @close="ctxToggle(() => settings.toggleAgentPanel())"
               />
@@ -2506,7 +2586,9 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
             class="agent-dock"
             :style="{ height: settings.agentDockHeight + 'px' }"
           >
+            <div class="agent-dock__resize" @pointerdown="onAgentDockResize" />
             <AgentPanel
+              @dock-drag="startAgentDockDrag"
               @open-settings="(section?: string) => openSettingsAt(section ?? 'integrations')"
               @close="settings.toggleAgentPanel()"
             />
@@ -2569,6 +2651,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
               />
               <AgentPanel
                 v-if="p.id === 'agent'"
+                @dock-drag="startAgentDockDrag"
                 @open-settings="(section?: string) => openSettingsAt(section ?? 'integrations')"
                 @close="ctxToggle(() => settings.toggleAgentPanel())"
               />
@@ -3160,6 +3243,50 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
 .agent-dock > .agent-panel {
   flex: 1;
   min-height: 0;
+}
+.agent-dock__resize {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: ns-resize;
+  z-index: 10;
+}
+.agent-dock__resize:hover {
+  background: var(--accent);
+  opacity: 0.35;
+}
+.agent-dock-zones {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+}
+.agent-dock-zone {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-2);
+  font-size: 12px;
+  border-radius: 8px;
+}
+.agent-dock-zone--right {
+  top: 8px;
+  right: 8px;
+  bottom: 8px;
+  width: 240px;
+}
+.agent-dock-zone--bottom {
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  height: 35%;
+}
+.agent-dock-zone.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 /* 窄屏：内层 .content 仍是 flex 项，外层容器占满宽度。 */
 .app--narrow .content-col {
