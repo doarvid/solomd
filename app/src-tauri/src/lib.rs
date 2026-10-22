@@ -76,6 +76,8 @@ pub mod saf_android;
 // panel runner and the recipe runner attach to it.
 pub mod agent_run;
 pub mod agent_tools;
+// Folder Agent — spawn the local Claude Code CLI and stream its output.
+pub mod claude_cli;
 // v4.0 — provider pricing table for cost estimates written into
 // agent-runs/<id>/meta.json.cost_usd_estimate.
 pub mod pricing;
