@@ -207,6 +207,10 @@ interface Settings {
   showTypesPanel: boolean;
   // v4.0 pillar 1: Inline Agent Panel — chat-with-vault sidebar.
   showAgentPanel: boolean;
+  /** Agent 面板停靠位：'bottom' = 编辑器下方（默认），'right' = 右侧栏。 */
+  agentDock: 'right' | 'bottom';
+  /** 底部停靠高度（px）。 */
+  agentDockHeight: number;
   /** 关联链接面板（内嵌浏览器的采集结果）。 */
   showRelatedLinks: boolean;
   // v4.0 release migration marker: set on first launch after upgrading
@@ -718,6 +722,8 @@ function defaults(): Settings {
     showNeighborhood: false,
     showTypesPanel: false,
     showAgentPanel: true,
+    agentDock: 'bottom',
+    agentDockHeight: 320,
     showRelatedLinks: false,
     // True for fresh installs (defaults are already v4.0). Existing
     // localStorage blobs from v3.6.x / v4-beta won't have this key, so
@@ -881,6 +887,13 @@ function load(): Settings {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<Settings>;
       const merged: Settings = { ...defaults(), ...parsed };
+      // 停靠值来自旧版本或被篡改的 blob：未知停靠位一律按底部，
+      // 高度夹到渲染器能用的范围。
+      if (merged.agentDock !== 'right') merged.agentDock = 'bottom';
+      const dockH = Number(merged.agentDockHeight);
+      merged.agentDockHeight = Number.isFinite(dockH)
+        ? Math.max(160, Math.min(2000, Math.round(dockH)))
+        : 320;
       // v4.15 — bookmark folder selection was removed: the managed SoloMD/
       // folder is now the only sync surface. Drop the stale key so it does
       // not keep getting written back to localStorage.
@@ -1415,7 +1428,19 @@ export const useSettingsStore = defineStore('settings', {
     },
     toggleAgentPanel() {
       this.showAgentPanel = !this.showAgentPanel;
-      if (this.showAgentPanel) this.ensureRightSidebarVisible();
+      // 停靠底部时不需要把右侧栏拉出来。
+      if (this.showAgentPanel && this.agentDock === 'right') {
+        this.ensureRightSidebarVisible();
+      }
+      this.persist();
+    },
+    setAgentDock(dock: 'right' | 'bottom') {
+      this.agentDock = dock === 'right' ? 'right' : 'bottom';
+      this.persist();
+    },
+    /** 存储层粗夹取；窗口 70% 上限由拖拽与 CSS 负责。 */
+    setAgentDockHeight(px: number) {
+      this.agentDockHeight = Math.max(160, Math.min(2000, Math.round(px)));
       this.persist();
     },
     toggleRelatedLinks() {
