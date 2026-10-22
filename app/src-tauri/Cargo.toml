@@ -95,7 +95,7 @@ walkdir = "2.5.0"
 #  pure-frontend POST to solomd.app/api/track so the plugin is gone, but
 #  the runtime entry in main.rs and these features stay — they're still
 #  needed for the rest of the app's async work.)
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process"] }
 
 # File-to-Markdown conversion (built-in, no Python needed)
 htmd = "0.5"
