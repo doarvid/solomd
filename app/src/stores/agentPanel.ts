@@ -50,6 +50,16 @@ interface AgentPanelState {
    *  `solomd://ai-run-started` fires so the UI can deep-link to
    *  `<workspace>/.solomd/agent-runs/<runId>/run.md`. */
   currentPersistRunId: string | null;
+  /** Which backend answers this panel. */
+  source: 'api' | 'claude-cli';
+  /** Folder the CLI runs in; set by the file-tree context menu. */
+  cliFolder: string | null;
+  /** UUID shared by every turn of one CLI conversation. */
+  cliSessionId: string | null;
+  /** True once at least one CLI turn finished — switches to `--resume`. */
+  cliStarted: boolean;
+  /** Human-readable tool activity ("Read notes/a.md"), cleared on done. */
+  cliStatus: string | null;
 }
 
 function newId(): string {
@@ -65,6 +75,11 @@ export const useAgentPanelStore = defineStore('agentPanel', {
     isStreaming: false,
     currentRunId: null,
     currentPersistRunId: null,
+    source: 'api',
+    cliFolder: null,
+    cliSessionId: null,
+    cliStarted: false,
+    cliStatus: null,
   }),
   actions: {
     addMessage(msg: Omit<AgentMessage, 'id' | 'createdAt'>): AgentMessage {
@@ -126,11 +141,28 @@ export const useAgentPanelStore = defineStore('agentPanel', {
         }
       }
     },
-    clear() {
+    clearSession() {
       this.messages = [];
       this.currentRunId = null;
       this.currentPersistRunId = null;
       this.isStreaming = false;
+      this.cliSessionId = null;
+      this.cliStarted = false;
+      this.cliStatus = null;
+    },
+    clear() {
+      this.clearSession();
+    },
+    /** File tree → Agent: scope the CLI to a folder and start a new chat. */
+    openForFolder(path: string) {
+      this.source = 'claude-cli';
+      this.cliFolder = path;
+      this.clearSession();
+    },
+    setSource(source: 'api' | 'claude-cli') {
+      if (this.source === source) return;
+      this.source = source;
+      this.clearSession();
     },
   },
 });
