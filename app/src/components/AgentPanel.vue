@@ -20,6 +20,7 @@ import { useWorkspaceIndexStore } from '../stores/workspaceIndex';
 import { useAgentPanelStore } from '../stores/agentPanel';
 import { providerById, type ProviderId } from '../lib/ai-providers';
 import { parseWithWikilinks, chipLabel } from '../lib/wikilinks';
+import { isMobile } from '../lib/platform';
 import { useFiles } from '../composables/useFiles';
 import { useI18n } from '../i18n';
 import '../styles/panels.css';
@@ -117,8 +118,18 @@ function buildActiveNoteContext(): string {
   return `Active note content (${path}):\n\`\`\`markdown\n${truncated}\n\`\`\``;
 }
 
-const hasFolder = computed(() => !!workspace.currentFolder);
-const aiConfigured = computed(() => settings.aiEnabled);
+const isCli = computed(() => agent.source === 'claude-cli');
+
+/** Last path segment, for the header chip. */
+const cliFolderLabel = computed(() => {
+  const p = agent.cliFolder || '';
+  return p.split(/[\\/]/).filter(Boolean).pop() || p;
+});
+
+const hasFolder = computed(() =>
+  isCli.value ? !!agent.cliFolder : !!workspace.currentFolder,
+);
+const aiConfigured = computed(() => isCli.value || settings.aiEnabled);
 
 type StateKey = 'no-folder' | 'no-ai' | 'ready';
 const stateKey = computed<StateKey>(() => {
@@ -192,6 +203,11 @@ async function send() {
   draft.value = '';
   autoscroll();
 
+  if (isCli.value) {
+    await sendCli(prompt);
+    return;
+  }
+
   const cfg = providerById(settings.aiProvider as ProviderId);
   const apiFormat = cfg?.apiFormat || 'openai';
   const model = settings.aiModel || cfg?.defaultModel || '';
@@ -255,17 +271,59 @@ async function send() {
   }
 }
 
+async function sendCli(prompt: string) {
+  const cwd = agent.cliFolder;
+  if (!cwd) return;
+  const requestId =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  if (!agent.cliSessionId) {
+    agent.cliSessionId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+  agent.currentRunId = requestId;
+  agent.isStreaming = true;
+  agent.cliStatus = null;
+  try {
+    await invoke('claude_chat', {
+      request: {
+        request_id: requestId,
+        prompt,
+        cwd,
+        session_id: agent.cliSessionId,
+        resume: agent.cliStarted,
+        allow_write: settings.agentAllowWrite,
+      },
+    });
+  } catch (err) {
+    agent.isStreaming = false;
+    agent.currentRunId = null;
+    errorMsg.value = String(err);
+    const last = agent.messages[agent.messages.length - 1];
+    if (last && last.role === 'assistant' && last.content === '') {
+      agent.messages.pop();
+    }
+  }
+}
+
 async function stop() {
   const id = agent.currentRunId;
-  if (id) {
-    try {
+  if (!id) return;
+  try {
+    if (isCli.value) {
+      await invoke('claude_cancel', { requestId: id });
+    } else {
       await invoke('ai_cancel', { requestId: id });
-    } catch {
-      /* best-effort */
     }
+  } catch {
+    /* best-effort */
   }
   agent.isStreaming = false;
   agent.currentRunId = null;
+  agent.cliStatus = null;
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -294,6 +352,10 @@ let unlistenError: UnlistenFn | null = null;
 let unlistenToolCall: UnlistenFn | null = null;
 let unlistenToolResult: UnlistenFn | null = null;
 let unlistenRunStarted: UnlistenFn | null = null;
+let unlistenClaudeChunk: UnlistenFn | null = null;
+let unlistenClaudeStatus: UnlistenFn | null = null;
+let unlistenClaudeDone: UnlistenFn | null = null;
+let unlistenClaudeError: UnlistenFn | null = null;
 
 onMounted(async () => {
   unlistenChunk = await listen<{ request_id: string; chunk: string }>(
@@ -387,6 +449,53 @@ onMounted(async () => {
       agent.currentPersistRunId = e.payload.run_id;
     },
   );
+
+  // Claude CLI events — separate channel so the API path stays untouched.
+  unlistenClaudeChunk = await listen<{ request_id: string; chunk: string }>(
+    'solomd://claude-chunk',
+    (e) => {
+      if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
+      agent.appendToLastAssistant(e.payload.chunk);
+      autoscroll();
+    },
+  );
+  unlistenClaudeStatus = await listen<{ request_id: string; text: string }>(
+    'solomd://claude-status',
+    (e) => {
+      if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
+      agent.cliStatus = e.payload.text;
+    },
+  );
+  unlistenClaudeDone = await listen<{ request_id: string }>(
+    'solomd://claude-done',
+    (e) => {
+      if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
+      const last = agent.messages[agent.messages.length - 1];
+      if (last && last.role === 'assistant' && last.content === '') {
+        agent.messages.pop();
+      }
+      agent.isStreaming = false;
+      agent.currentRunId = null;
+      agent.cliStatus = null;
+      agent.cliStarted = true;
+    },
+  );
+  unlistenClaudeError = await listen<{ request_id: string; error: string }>(
+    'solomd://claude-error',
+    (e) => {
+      if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
+      agent.isStreaming = false;
+      agent.currentRunId = null;
+      agent.cliStatus = null;
+      const last = agent.messages[agent.messages.length - 1];
+      if (last && last.role === 'assistant' && last.content === '') {
+        agent.messages.pop();
+      }
+      if (e.payload.error !== 'cancelled') {
+        errorMsg.value = e.payload.error;
+      }
+    },
+  );
 });
 
 onBeforeUnmount(() => {
@@ -396,8 +505,13 @@ onBeforeUnmount(() => {
   unlistenToolCall?.();
   unlistenToolResult?.();
   unlistenRunStarted?.();
+  unlistenClaudeChunk?.();
+  unlistenClaudeStatus?.();
+  unlistenClaudeDone?.();
+  unlistenClaudeError?.();
   unlistenChunk = unlistenDone = unlistenError = null;
   unlistenToolCall = unlistenToolResult = unlistenRunStarted = null;
+  unlistenClaudeChunk = unlistenClaudeStatus = unlistenClaudeDone = unlistenClaudeError = null;
 });
 
 // --- Wikilink handling --------------------------------------------------
@@ -468,9 +582,29 @@ watch(stateKey, (k) => {
     <header class="rp-head agent-panel__head">
       <span class="rp-title agent-panel__title">{{ t('agent.heading') }}</span>
       <span class="agent-panel__beta">Beta</span>
+      <div class="agent-panel__source">
+        <button
+          class="rp-chip"
+          :class="{ 'is-active agent-panel__chip--on': !isCli }"
+          type="button"
+          @click="agent.setSource('api')"
+        >{{ t('agent.source.api') }}</button>
+        <button
+          v-if="!isMobile()"
+          class="rp-chip"
+          :class="{ 'is-active agent-panel__chip--on': isCli }"
+          type="button"
+          @click="agent.setSource('claude-cli')"
+        >{{ t('agent.source.cli') }}</button>
+      </div>
+      <span
+        v-if="isCli && agent.cliFolder"
+        class="agent-panel__folder"
+        :title="agent.cliFolder"
+      >📁 {{ cliFolderLabel }}</span>
       <span class="agent-panel__spacer" />
       <button
-        v-if="stateKey === 'ready'"
+        v-if="stateKey === 'ready' && !isCli"
         class="rp-chip agent-panel__chip"
         :class="{ 'is-active agent-panel__chip--on': includeActiveNote }"
         type="button"
@@ -614,6 +748,10 @@ watch(stateKey, (k) => {
 
       <div v-if="errorMsg" class="agent-panel__error">{{ errorMsg }}</div>
 
+      <div v-if="isCli && agent.cliStatus" class="agent-panel__status">
+        {{ agent.cliStatus }}
+      </div>
+
       <footer class="agent-panel__compose">
         <textarea
           ref="inputRef"
@@ -654,6 +792,28 @@ watch(stateKey, (k) => {
 <style scoped>
 .agent-panel__title {
   flex: 0 1 auto;
+}
+.agent-panel__source {
+  display: inline-flex;
+  gap: 4px;
+  margin-right: 4px;
+}
+.agent-panel__folder {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.agent-panel__status {
+  padding: 4px 12px;
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-top: 1px solid var(--border-1);
 }
 .agent-panel__beta {
   flex: 0 0 auto;
