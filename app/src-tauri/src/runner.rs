@@ -29,6 +29,11 @@ mod ai_keystore;
 #[path = "ai_proxy.rs"]
 mod ai_proxy;
 
+// Folder Agent — spawns the local Claude Code CLI. Declared here as well as
+// in lib.rs because the binary's real invoke handler lives in this file.
+#[path = "claude_cli.rs"]
+mod claude_cli;
+
 #[path = "pandoc.rs"]
 mod pandoc;
 
@@ -723,6 +728,8 @@ pub fn run_with(initial_file: Option<String>) {
             ai_proxy::ai_cancel,
             ai_proxy::ai_verify_key,
             ai_proxy::ai_list_models,
+            claude_cli::claude_chat,
+            claude_cli::claude_cancel,
             pandoc::pandoc_detect,
             pandoc::pandoc_export,
             git_history::git_workspace_status,
