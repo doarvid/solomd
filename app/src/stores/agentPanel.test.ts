@@ -31,6 +31,16 @@ test('abortTurn drops the session id after a failed first turn', () => {
   assert.equal(s.cliStatus, null);
 });
 
+test('the composer draft lives in the store so a dock switch keeps it', () => {
+  const s = useAgentPanelStore();
+  s.openForFolder('/vault');
+  s.draft = 'half-typed prompt';
+  // A dock switch remounts AgentPanel but never touches the store.
+  assert.equal(s.draft, 'half-typed prompt');
+  s.openForFolder('/other');
+  assert.equal(s.draft, '');
+});
+
 test('abortTurn keeps the session id after a successful turn', () => {
   const s = useAgentPanelStore();
   s.openForFolder('/vault');

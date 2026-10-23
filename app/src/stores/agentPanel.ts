@@ -60,6 +60,9 @@ interface AgentPanelState {
   cliStarted: boolean;
   /** Human-readable tool activity ("Read notes/a.md"), cleared on done. */
   cliStatus: string | null;
+  /** Composer text. Lives here so a dock switch (which remounts the panel)
+   *  does not throw away what the user was typing. */
+  draft: string;
 }
 
 function newId(): string {
@@ -80,6 +83,7 @@ export const useAgentPanelStore = defineStore('agentPanel', {
     cliSessionId: null,
     cliStarted: false,
     cliStatus: null,
+    draft: '',
   }),
   actions: {
     addMessage(msg: Omit<AgentMessage, 'id' | 'createdAt'>): AgentMessage {
@@ -149,6 +153,7 @@ export const useAgentPanelStore = defineStore('agentPanel', {
       this.cliSessionId = null;
       this.cliStarted = false;
       this.cliStatus = null;
+      this.draft = '';
     },
     clear() {
       this.clearSession();

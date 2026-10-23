@@ -1,4 +1,5 @@
 import { isTreeSortMode, type TreeSortMode } from '../lib/tree-sort';
+import { clampStoredDockHeight } from '../lib/agent-dock';
 import { defineStore } from 'pinia';
 import type { Theme, ViewMode } from '../types';
 import type { WindowsEditorEngine } from '../lib/platform';
@@ -890,10 +891,7 @@ function load(): Settings {
       // 停靠值来自旧版本或被篡改的 blob：未知停靠位一律按底部，
       // 高度夹到渲染器能用的范围。
       if (merged.agentDock !== 'right') merged.agentDock = 'bottom';
-      const dockH = Number(merged.agentDockHeight);
-      merged.agentDockHeight = Number.isFinite(dockH)
-        ? Math.max(160, Math.min(2000, Math.round(dockH)))
-        : 320;
+      merged.agentDockHeight = clampStoredDockHeight(merged.agentDockHeight);
       // v4.15 — bookmark folder selection was removed: the managed SoloMD/
       // folder is now the only sync surface. Drop the stale key so it does
       // not keep getting written back to localStorage.
@@ -1440,7 +1438,7 @@ export const useSettingsStore = defineStore('settings', {
     },
     /** 存储层粗夹取；窗口 70% 上限由拖拽与 CSS 负责。 */
     setAgentDockHeight(px: number) {
-      this.agentDockHeight = Math.max(160, Math.min(2000, Math.round(px)));
+      this.agentDockHeight = clampStoredDockHeight(px);
       this.persist();
     },
     toggleRelatedLinks() {

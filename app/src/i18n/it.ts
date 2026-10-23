@@ -2006,7 +2006,7 @@ export const it: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Cartella: {path}',
-    dockToRight: 'Dock right',
+    dockToRight: 'Dock sidebar',
     dockToBottom: 'Dock bottom',
     dragDock: 'Drag to move this panel',
     heading: 'Agent',

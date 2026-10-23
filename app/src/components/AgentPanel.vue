@@ -42,7 +42,6 @@ const agent = useAgentPanelStore();
 const files = useFiles();
 const { t } = useI18n();
 
-const draft = ref('');
 const errorMsg = ref<string | null>(null);
 const messagesRef = ref<HTMLUListElement | null>(null);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
@@ -139,7 +138,7 @@ const stateKey = computed<StateKey>(() => {
   return 'ready';
 });
 
-const canSend = computed(() => draft.value.trim().length > 0 && !agent.isStreaming);
+const canSend = computed(() => agent.draft.trim().length > 0 && !agent.isStreaming);
 
 function onOpenAiSettings() {
   emit('open-settings', 'integrations');
@@ -193,7 +192,7 @@ function autoscroll() {
 }
 
 async function send() {
-  const prompt = draft.value.trim();
+  const prompt = agent.draft.trim();
   if (!prompt || agent.isStreaming) return;
   errorMsg.value = null;
 
@@ -201,7 +200,7 @@ async function send() {
   // placeholder via the `solomd://ai-chunk` listener below.
   agent.addMessage({ role: 'user', content: prompt });
   agent.addMessage({ role: 'assistant', content: '' });
-  draft.value = '';
+  agent.draft = '';
   autoscroll();
 
   if (isCli.value) {
@@ -499,6 +498,10 @@ onMounted(async () => {
       }
     },
   );
+
+  // A dock switch remounts this component; restore the view the user left.
+  await nextTick();
+  autoscroll();
 });
 
 onBeforeUnmount(() => {
@@ -762,7 +765,7 @@ watch(stateKey, (k) => {
       <footer class="agent-panel__compose">
         <textarea
           ref="inputRef"
-          v-model="draft"
+          v-model="agent.draft"
           class="rp-textarea agent-panel__input"
           :placeholder="t('agent.placeholder')"
           rows="2"
@@ -799,6 +802,7 @@ watch(stateKey, (k) => {
 <style scoped>
 .agent-panel__head--draggable {
   cursor: grab;
+  touch-action: none;
 }
 .agent-panel__head--draggable:active {
   cursor: grabbing;

@@ -2023,7 +2023,7 @@ export const sv: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Mapp: {path}',
-    dockToRight: 'Dock right',
+    dockToRight: 'Dock sidebar',
     dockToBottom: 'Dock bottom',
     dragDock: 'Drag to move this panel',
     heading: 'Agent',

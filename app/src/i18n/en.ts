@@ -2037,7 +2037,7 @@ export const en = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Folder: {path}',
-    dockToRight: 'Dock right',
+    dockToRight: 'Dock sidebar',
     dockToBottom: 'Dock bottom',
     dragDock: 'Drag to move this panel',
     empty: {

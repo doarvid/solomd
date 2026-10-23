@@ -2023,7 +2023,7 @@ export const uk: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: 'Папка: {path}',
-    dockToRight: 'Dock right',
+    dockToRight: 'Dock sidebar',
     dockToBottom: 'Dock bottom',
     dragDock: 'Drag to move this panel',
     heading: 'Агент',

@@ -58,6 +58,11 @@ import FileChangedDialog from './components/FileChangedDialog.vue';
 import Toast from './components/Toast.vue';
 import KeyboardBar from './components/KeyboardBar.vue';
 import { forceKeyboardBarPreview } from './lib/platform';
+import {
+  resizeOriginHeight,
+  nextDockHeight,
+  sidebarDropSide,
+} from './lib/agent-dock';
 import { useTabsStore } from './stores/tabs';
 import { useSettingsStore, buildEditorFontStack, setRightSidebarShell } from './stores/settings';
 import { useWindowsStore, isAuxLabel } from './stores/windows';
@@ -2234,55 +2239,82 @@ function startPaneReorder(e: PointerEvent, id: string) {
 // --- Agent panel docking -------------------------------------------------
 const dockDragging = ref(false);
 const dockDropZone = ref<'right' | 'bottom' | null>(null);
+const dockResizing = ref(false);
+const sidebarDropSideValue = computed(() => sidebarDropSide(settings.outlineSide));
 
 /** 头部拖动：显示两个落点区，松手时切换停靠。 */
 function startAgentDockDrag(ev: PointerEvent) {
+  if (dockDragging.value) return;
   if (ev.button !== 0 && ev.pointerType === 'mouse') return;
   ev.preventDefault();
-  dockDragging.value = true;
-  dockDropZone.value = null;
   const zoneAt = (x: number, y: number) =>
     (document.elementFromPoint(x, y) as HTMLElement | null)
       ?.closest('[data-agent-dock-zone]')
       ?.getAttribute('data-agent-dock-zone');
+  dockDragging.value = true;
+  dockDropZone.value = null;
+  try {
+    (ev.target as Element | null)?.setPointerCapture?.(ev.pointerId);
+  } catch {
+    /* pointer capture is best-effort */
+  }
   const onMove = (m: PointerEvent) => {
     const z = zoneAt(m.clientX, m.clientY);
     dockDropZone.value = z === 'right' || z === 'bottom' ? z : null;
   };
-  const onUp = () => {
+  const finish = () => {
     document.removeEventListener('pointermove', onMove);
     document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', finish);
+    window.removeEventListener('blur', finish);
     document.body.style.userSelect = '';
-    const target = dockDropZone.value;
     dockDragging.value = false;
     dockDropZone.value = null;
+  };
+  const onUp = () => {
+    const target = dockDropZone.value;
+    finish();
     if (target) settings.setAgentDock(target);
   };
   document.body.style.userSelect = 'none';
   document.addEventListener('pointermove', onMove);
   document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointercancel', finish);
+  window.addEventListener('blur', finish);
 }
 
-/** 底部停靠的上边缘：向上拖变高。 */
+/** 底部停靠的上边缘：向上拖变高。起点是屏幕上实际高度，不是存储值。 */
 function onAgentDockResize(ev: PointerEvent) {
+  if (dockResizing.value) return;
   ev.preventDefault();
+  dockResizing.value = true;
+  const origin = resizeOriginHeight(settings.agentDockHeight, window.innerHeight);
   const startY = ev.clientY;
-  const startH = settings.agentDockHeight;
+  try {
+    (ev.currentTarget as Element | null)?.setPointerCapture?.(ev.pointerId);
+  } catch {
+    /* pointer capture is best-effort */
+  }
   const onMove = (m: PointerEvent) => {
-    const next = startH - (m.clientY - startY);
-    const cap = Math.round(window.innerHeight * 0.7);
-    settings.setAgentDockHeight(Math.min(next, cap));
+    settings.setAgentDockHeight(
+      nextDockHeight(origin, m.clientY - startY, window.innerHeight),
+    );
   };
-  const onUp = () => {
+  const finish = () => {
     document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointerup', finish);
+    document.removeEventListener('pointercancel', finish);
+    window.removeEventListener('blur', finish);
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
+    dockResizing.value = false;
   };
   document.body.style.cursor = 'ns-resize';
   document.body.style.userSelect = 'none';
   document.addEventListener('pointermove', onMove);
-  document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointerup', finish);
+  document.addEventListener('pointercancel', finish);
+  window.addEventListener('blur', finish);
 }
 
 // Sidebar visibility / pane composition changes the editor's available
@@ -2494,8 +2526,11 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       <div class="workspace">
         <div v-if="dockDragging" class="agent-dock-zones">
           <div
-            class="agent-dock-zone agent-dock-zone--right"
-            :class="{ 'is-active': dockDropZone === 'right' }"
+            class="agent-dock-zone"
+            :class="[
+              `agent-dock-zone--${sidebarDropSideValue}`,
+              { 'is-active': dockDropZone === 'right' },
+            ]"
             data-agent-dock-zone="right"
           >
             {{ t('agent.dockToRight') }}
@@ -3251,6 +3286,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
   right: 0;
   height: 8px;
   cursor: ns-resize;
+  touch-action: none;
   z-index: 10;
 }
 .agent-dock__resize:hover {
@@ -3275,6 +3311,12 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
 .agent-dock-zone--right {
   top: 8px;
   right: 8px;
+  bottom: 8px;
+  width: 240px;
+}
+.agent-dock-zone--left {
+  top: 8px;
+  left: 8px;
   bottom: 8px;
   width: 240px;
 }

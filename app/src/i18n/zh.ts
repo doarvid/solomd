@@ -2010,7 +2010,7 @@ export const zh: I18n = {
       cli: 'Claude CLI',
     },
     cliFolder: '目录：{path}',
-    dockToRight: '停靠到右侧',
+    dockToRight: '停靠到侧栏',
     dockToBottom: '停靠到底部',
     dragDock: '拖动可移动面板',
     empty: {
