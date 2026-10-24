@@ -513,6 +513,9 @@ interface Settings {
   bookmarkSyncIntervalMinutes: number;
   /** Fingerprint of all discovered Bookmarks files at the last read pass. */
   bookmarkSyncFingerprint: string;
+  // 收藏源（一期：GitHub Star）。默认关，避免用户没配 token 时反复报错。
+  collectionGithubEnabled: boolean;
+  collectionRefreshMinutes: number;
   // v4.3.0 PR #75 (beihai23) — transient (not persisted) snapshot of the
   // right-sidebar pane visibility taken when the sidebar is hidden, so
   // toggling it back on can restore the exact previous layout instead of
@@ -825,6 +828,8 @@ function defaults(): Settings {
     bookmarkSyncEnabled: false,
     bookmarkSyncIntervalMinutes: 30,
     bookmarkSyncFingerprint: '',
+    collectionGithubEnabled: false,
+    collectionRefreshMinutes: 30,
     _rsPanesBeforeHide: null,
   };
 }

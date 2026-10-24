@@ -94,6 +94,7 @@ import { usePropertiesStore } from './stores/properties';
 import { useRagStore } from './stores/rag';
 import { useBrowserStore } from './stores/browser';
 import { useBookmarkSyncStore } from './stores/bookmarkSync';
+import { useCollectionsStore } from './stores/collections';
 import { isBrowserTab } from './lib/tab-kind';
 import { overlayDepth, useOverlayPresence, useOverlayPresenceOf } from './lib/overlay-presence';
 import { setBrowserPageZoom } from './lib/browser-rect';
@@ -176,6 +177,7 @@ async function requestAndroidStorage() {
 }
 const workspaceIndex = useWorkspaceIndexStore();
 const bookmarkSync = useBookmarkSyncStore();
+const collections = useCollectionsStore();
 const properties = usePropertiesStore();
 const rag = useRagStore();
 const autoCommit = useAutoCommit();
@@ -873,6 +875,7 @@ watch(
   () => workspace.currentFolder,
   (folder) => {
     if (folder) bookmarkSync.kick();
+    if (folder) void collections.start();
   },
 );
 
@@ -1360,6 +1363,7 @@ function scheduleStarPrompt() {
 onMounted(async () => {
   scheduleStarPrompt();
   bookmarkSync.start();
+  void collections.start();
   // Launch: put the keyboard in the editor once it has mounted (the
   // CodeMirror path never focused itself, so typing went nowhere until a
   // click). Skipped while a dialog is up or something else has focus.
