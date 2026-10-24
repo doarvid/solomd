@@ -74,6 +74,12 @@ mod cjk_proofread;
 #[path = "github_sync.rs"]
 mod github_sync;
 
+// 收藏源（一期：GitHub Star）—— 二进制侧的 invoke handler 在本文件，
+// 必须与 lib.rs 双注册。
+#[cfg(not(target_os = "android"))]
+#[path = "collections.rs"]
+mod collections;
+
 // v2.6.1 cloud-folder detection + cross-device session restore.
 #[path = "cloud_folder.rs"]
 mod cloud_folder;
@@ -902,6 +908,16 @@ pub fn run_with(initial_file: Option<String>) {
             bookmarks::bookmarks_catalog,
             bookmarks::bookmarks_sync_plan,
             bookmarks::bookmarks_apply,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_load,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_refresh_github,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_import,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_dismiss,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_clear_history,
         ])
         .on_menu_event(|app_handle, event| {
             let id = event.id().0.clone();

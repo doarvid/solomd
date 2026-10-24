@@ -366,6 +366,16 @@ pub fn run() {
             bookmarks::bookmarks_catalog,
             bookmarks::bookmarks_sync_plan,
             bookmarks::bookmarks_apply,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_load,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_refresh_github,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_import,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_dismiss,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_clear_history,
             quick_capture::quick_capture_open,
             quick_capture::quick_capture_close,
             quick_capture::quick_capture_write,
