@@ -340,7 +340,7 @@ fn date_of(timestamp: &str) -> String {
 /// `[[某次对话]]` 看着挺正常，但以 `[` 开头在 YAML 里是流式序列的语法，
 /// 于是 `source: [[x]]` 会被解析成嵌套数组而不是字符串 —— wikilink 就
 /// 永远找不到了。同理还有 `{`、`*`、`&` 等。
-fn yaml_scalar(s: &str) -> String {
+pub(crate) fn yaml_scalar(s: &str) -> String {
     // YAML 规范里不能作为普通标量开头的指示符。
     const INDICATORS: [char; 18] = [
         '[', ']', '{', '}', ',', '&', '*', '#', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`',

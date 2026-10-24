@@ -127,6 +127,9 @@ pub mod page_assets;
 pub mod github_readme;
 // 浏览器书签双向同步（仅桌面；移动端返回空）。
 pub mod bookmarks;
+// 收藏源（GitHub Star）缓存与导入。
+#[cfg(not(target_os = "android"))]
+pub mod collections;
 #[cfg(desktop)]
 mod browser;
 #[cfg(mobile)]

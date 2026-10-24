@@ -99,7 +99,7 @@ fn remove_token_marker() {
     }
 }
 
-fn read_token() -> Result<Option<String>, String> {
+pub(crate) fn read_token() -> Result<Option<String>, String> {
     // Cached read first — if the user already authorized the keychain
     // earlier in this session, never bother them again.
     if let Ok(guard) = TOKEN_CACHE.lock() {
