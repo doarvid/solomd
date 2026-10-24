@@ -257,6 +257,153 @@ pub async fn collections_refresh_github(workspace: String) -> Result<RefreshOutc
     })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOutcome {
+    pub path: Option<String>,
+    /// 导入成功但有非致命问题（例如 frontmatter 补写失败）。
+    pub warning: Option<String>,
+    /// 导入失败；Some 时条目仍待导入。
+    pub error: Option<String>,
+}
+
+fn import_dir(workspace: &Path) -> PathBuf {
+    match super::capture_endpoint::current_target() {
+        Some((_workspace, folder)) => workspace.join(folder),
+        None => workspace.join("inbox"),
+    }
+}
+
+/// 在 frontmatter 里补字段；已有同名键不重复写，因此可安全调用两次。
+pub fn frontmatter_with_item(body: &str, item: &PendingItem) -> String {
+    let mut lines: Vec<String> = body.lines().map(str::to_string).collect();
+    let Some(close) = lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, line)| line.as_str() == "---")
+        .map(|(i, _)| i)
+    else {
+        return body.to_string();
+    };
+
+    let has = |prefix: &str| {
+        lines[..close]
+            .iter()
+            .any(|line| line.trim_start().starts_with(prefix))
+    };
+
+    let mut add: Vec<String> = Vec::new();
+    if !has("inbox:") {
+        add.push("inbox: true".to_string());
+    }
+    if let Some(stars) = item.stars {
+        if !has("stars:") {
+            add.push(format!("stars: {stars}"));
+        }
+    }
+    if let Some(language) = item.language.as_deref().filter(|v| !v.trim().is_empty()) {
+        if !has("language:") {
+            add.push(format!("language: {}", super::capture_store::yaml_scalar(language)));
+        }
+    }
+    if !item.topics.is_empty() && !has("topics:") {
+        add.push("topics:".to_string());
+        for topic in &item.topics {
+            add.push(format!(
+                "  - {}",
+                super::capture_store::yaml_scalar(topic)
+            ));
+        }
+    }
+    if let Some(saved) = item.saved_at.as_deref().filter(|v| !v.trim().is_empty()) {
+        if !has("starred:") {
+            add.push(format!("starred: {}", super::capture_store::yaml_scalar(saved)));
+        }
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + add.len());
+    out.extend_from_slice(&lines[..close]);
+    out.extend(add);
+    out.extend_from_slice(&lines[close..]);
+    lines = out;
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+fn apply_frontmatter(path: &Path, item: &PendingItem) -> Result<(), String> {
+    let body = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let updated = frontmatter_with_item(&body, item);
+    if !updated.contains("inbox: true") {
+        return Err("笔记没有可识别的 frontmatter，未写入 inbox 标记".to_string());
+    }
+    if updated != body {
+        fs::write(path, updated).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 把一次 `capture_fetch_page` 的结果落成待导入条目状态。
+///
+/// 同步函数，方便单测：抓取本身在命令里做，这里只处理结果。
+pub fn finish_import(
+    workspace: &Path,
+    item: &PendingItem,
+    outcome: super::capture_store::FetchOutcome,
+) -> Result<ImportOutcome, String> {
+    match (outcome.error, outcome.path) {
+        (Some(error), path) => {
+            // 抓取失败留下的是存根。删掉它，否则用户重试会得到 -2、-3。
+            if let Some(path) = path {
+                let _ = fs::remove_file(path);
+            }
+            Ok(ImportOutcome {
+                path: None,
+                warning: None,
+                error: Some(error),
+            })
+        }
+        (None, Some(path)) => {
+            let warning = apply_frontmatter(Path::new(&path), item).err();
+            mutate_state(workspace, |state| {
+                state.imported.insert(item.id.clone(), path.clone());
+            })?;
+            Ok(ImportOutcome {
+                path: Some(path),
+                warning,
+                error: None,
+            })
+        }
+        (None, None) => Ok(ImportOutcome {
+            path: None,
+            warning: None,
+            error: Some("抓取没有写出文件".to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn collections_import(workspace: String, id: String) -> Result<ImportOutcome, String> {
+    let workspace = PathBuf::from(workspace);
+    let item = load_state(&workspace)
+        .items
+        .into_iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| format!("unknown collection item: {id}"))?;
+
+    let dir = import_dir(&workspace);
+    let outcome = super::capture_store::capture_fetch_page(
+        dir.to_string_lossy().to_string(),
+        item.url.clone(),
+        item.title.clone(),
+        None,
+    )
+    .await?;
+
+    finish_import(&workspace, &item, outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +544,80 @@ mod tests {
             .find(|i| i.id == "github:a/one")
             .unwrap();
         assert_eq!(same.stars, Some(7));
+    }
+
+    #[test]
+    fn frontmatter_adds_inbox_and_metadata_once() {
+        let body = "---\ntitle: tauri\n---\n\n# Tauri\n";
+        let mut it = item("github:tauri-apps/tauri");
+        it.topics = vec!["desktop".to_string(), "webview".to_string()];
+
+        let once = frontmatter_with_item(body, &it);
+        assert!(once.contains("inbox: true\n"));
+        assert!(once.contains("stars: 42\n"));
+        assert!(once.contains("language: Rust\n"));
+        assert!(once.contains("topics:\n  - desktop\n  - webview\n"));
+        assert!(once.contains("starred: \"2026-10-01T00:00:00Z\"\n"));
+
+        // 幂等：第二次调用不新增任何键。
+        let twice = frontmatter_with_item(&once, &it);
+        assert_eq!(once, twice);
+        assert_eq!(twice.matches("inbox:").count(), 1);
+    }
+
+    #[test]
+    fn failed_capture_removes_stub_and_keeps_item_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("stub.md");
+        std::fs::write(&stub, "---\ntitle: stub\n---\n").unwrap();
+
+        let out = finish_import(
+            dir.path(),
+            &item("github:owner/repo"),
+            super::super::capture_store::FetchOutcome {
+                url: "https://github.com/owner/repo".to_string(),
+                title: "owner__repo".to_string(),
+                path: Some(stub.to_string_lossy().to_string()),
+                via: "stub".to_string(),
+                error: Some("404".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out.error.as_deref(), Some("404"));
+        assert!(!stub.exists(), "stub must be deleted so retry does not duplicate");
+        assert!(load_state(dir.path()).imported.is_empty());
+    }
+
+    #[test]
+    fn successful_import_writes_inbox_flag_and_records_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("owner__repo.md");
+        std::fs::write(&note, "---\ntitle: owner__repo\n---\n\nREADME\n").unwrap();
+
+        let out = finish_import(
+            dir.path(),
+            &item("github:owner/repo"),
+            super::super::capture_store::FetchOutcome {
+                url: "https://github.com/owner/repo".to_string(),
+                title: "owner__repo".to_string(),
+                path: Some(note.to_string_lossy().to_string()),
+                via: "readme".to_string(),
+                error: None,
+            },
+        )
+        .unwrap();
+
+        assert!(out.error.is_none());
+        let body = std::fs::read_to_string(&note).unwrap();
+        assert!(body.contains("inbox: true"));
+        assert!(body.contains("stars: 42"));
+        assert_eq!(
+            load_state(dir.path())
+                .imported
+                .get("github:owner/repo")
+                .map(String::as_str),
+            Some(note.to_string_lossy().as_ref())
+        );
     }
 }
