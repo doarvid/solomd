@@ -40,6 +40,7 @@ import CaptureEndpointSettings from './CaptureEndpointSettings.vue';
 import RestApiSettings from './RestApiSettings.vue';
 import CostMeterSettings from './CostMeterSettings.vue';
 import IntegrationsSettings from './IntegrationsSettings.vue';
+import CollectionSourcesSettings from './CollectionSourcesSettings.vue';
 import BookmarkSyncSettings from './BookmarkSyncSettings.vue';
 // v4.0 Pillar 2 — Agent Recipes panel. Mounted under the existing
 // "Integrations" category so users find Recipes alongside CLI / MCP /
@@ -254,6 +255,9 @@ function onRecordKey(e: KeyboardEvent): void {
   stopRecording();
 }
 onUnmounted(stopRecording);
+onUnmounted(() =>
+  window.removeEventListener('solomd:settings-section', onSettingsSection as EventListener),
+);
 
 const categories: { id: SettingsCategory; icon: string; labelKey: string }[] = [
   { id: 'basics', icon: 'settings', labelKey: 'settings.catBasics' },
@@ -308,6 +312,19 @@ watch(
     }
   },
 );
+
+/**
+ * 设置面板已经打开时，`solomd:open-settings` 的 initial-section 不会再触发
+ * （open 一直是 true）。收藏源卡片需要从“集成”跳到“同步”，所以单独监听
+ * 一个只切换分类的事件。
+ */
+function onSettingsSection(e: Event) {
+  const section = (e as CustomEvent).detail?.section;
+  if (typeof section === 'string' && VALID_CATEGORIES.has(section as SettingsCategory)) {
+    activeCategory.value = section as SettingsCategory;
+  }
+}
+window.addEventListener('solomd:settings-section', onSettingsSection as EventListener);
 
 const settings = useSettingsStore();
 // #328/#344 — the editor-engine choice only exists where there are two
@@ -2114,6 +2131,7 @@ function onSelectPdfFont(v: string) {
 
         <!-- v2.4: Integrations (CLI + MCP). -->
         <div data-cat="integrations"><IntegrationsSettings /></div>
+        <div v-if="gitBackend" data-cat="integrations"><CollectionSourcesSettings /></div>
 
         <!-- v4.0 Pillar 2: Agent Recipes. -->
         <!-- #230 — recipe_runner is desktop/iOS only (git-backed receipts). -->
