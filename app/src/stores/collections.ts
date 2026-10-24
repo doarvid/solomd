@@ -33,7 +33,6 @@ const normalizedUrls = new Map<string, string>();
 export const useCollectionsStore = defineStore('collections', {
   state: () => ({
     state: null as CollectionsState | null,
-    pendingItems: [] as PendingItem[],
     loading: false,
     refreshing: false,
     importingIds: [] as string[],
@@ -44,10 +43,8 @@ export const useCollectionsStore = defineStore('collections', {
     available(): boolean {
       return !isMobile() && hasGitBackend() && !!useWorkspaceStore().currentFolder;
     },
-  },
 
-  actions: {
-    buildDedupe(): DedupeIndex {
+    dedupe(): DedupeIndex {
       const index = useWorkspaceIndexStore();
       const capturedUrls = new Set<string>();
       const noteLinkedUrls = new Set<string>();
@@ -63,16 +60,23 @@ export const useCollectionsStore = defineStore('collections', {
       return { capturedUrls, noteLinkedUrls, capturedTitles };
     },
 
-    recomputePending() {
-      this.pendingItems = this.state
-        ? visibleItems(this.state, this.buildDedupe(), normalizedUrls)
-        : [];
+    /**
+     * Derived, never stored: an item disappears the moment its URL is captured
+     * or linked anywhere in the workspace, and stays hidden until the index is
+     * ready (otherwise startup briefly shows everything as pending).
+     */
+    pendingItems(): PendingItem[] {
+      const index = useWorkspaceIndexStore();
+      if (!this.available || !index.ready) return [];
+      if (!useSettingsStore().collectionGithubEnabled) return [];
+      return this.state ? visibleItems(this.state, this.dedupe, normalizedUrls) : [];
     },
+  },
 
+  actions: {
     async load() {
       if (!this.available) {
         this.state = null;
-        this.pendingItems = [];
         return;
       }
       this.loading = true;
@@ -88,7 +92,6 @@ export const useCollectionsStore = defineStore('collections', {
             await invoke<string>('capture_normalize_url', { url: item.url }).catch(() => item.url),
           );
         }
-        this.recomputePending();
       } catch (e) {
         this.lastError = String(e);
       } finally {
@@ -114,6 +117,7 @@ export const useCollectionsStore = defineStore('collections', {
 
     async refresh() {
       if (!this.available || this.refreshing) return;
+      if (!useSettingsStore().collectionGithubEnabled) return;
       this.refreshing = true;
       this.lastError = null;
       try {
@@ -139,10 +143,11 @@ export const useCollectionsStore = defineStore('collections', {
           id: item.id,
         });
         if (out.error) {
-          this.lastError = out.error;
+          // Toasts carry import errors; `lastError` is the refresh line.
           toasts.error(t('inbox.pendingImport.importFailed', { title: item.title, error: out.error }));
           return { ok: false };
         }
+        this.lastError = null;
         if (out.warning) {
           toasts.info(t('inbox.pendingImport.importWarning', { title: item.title, error: out.warning }));
         } else {
@@ -153,7 +158,6 @@ export const useCollectionsStore = defineStore('collections', {
         return { ok: true };
       } catch (e) {
         const error = String(e);
-        this.lastError = error;
         toasts.error(t('inbox.pendingImport.importFailed', { title: item.title, error }));
         return { ok: false };
       } finally {
@@ -190,7 +194,6 @@ export const useCollectionsStore = defineStore('collections', {
           workspace: useWorkspaceStore().currentFolder,
           id,
         });
-        this.recomputePending();
       } catch (e) {
         this.lastError = String(e);
       }
@@ -202,7 +205,6 @@ export const useCollectionsStore = defineStore('collections', {
         this.state = await invoke<CollectionsState>('collections_clear_history', {
           workspace: useWorkspaceStore().currentFolder,
         });
-        this.recomputePending();
       } catch (e) {
         this.lastError = String(e);
       }
