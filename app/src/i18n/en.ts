@@ -550,7 +550,7 @@ export const en = {
       noteSafety:
         'Bookmarks outside SoloMD are never read or modified. Deleting one there has no effect on notes.',
       managedWarning:
-        'SoloMD/ is fully managed: note links are maintained automatically, while bookmarks you add there are kept until their page becomes a note.',
+        'SoloMD/ mirrors the note structure exactly: folders follow the note folders, and bookmarks that are not represented by notes are removed. Bookmarks you add there are captured into notes first.',
       noWorkspace: 'Open a workspace folder to sync.',
       manualNothing: 'Bookmark sync: nothing new',
       manualResult:

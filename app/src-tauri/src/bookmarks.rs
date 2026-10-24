@@ -8,8 +8,13 @@
 //! - Read: only the managed `SoloMD/` subtree is consulted. URL nodes we
 //!   mirrored from notes are marked (`solomd_mirror`) and skipped; every
 //!   unmarked bookmark there is a page the user wants captured as a note.
-//! - Write: reconcile the folder marked `meta_info.solomd_managed`; nodes
-//!   without a mirror marker are user additions and are preserved, and
+//! - Write: replace the folder marked `meta_info.solomd_managed` with an exact
+//!   projection of the note folders — same hierarchy, including folders whose
+//!   notes have no external links. Bookmark nodes that are not represented by
+//!   a note are removed (the backup file is kept), so `SoloMD/` always matches
+//!   the workspace instead of accumulating legacy paths. Bookmarks the user
+//!   dropped into `SoloMD/` are captured into notes by the read pass first;
+//!   from the next round they are part of the projection.
 //!   `checksum` is dropped so Chromium recomputes it on the next launch.
 //! - Never write while the browser is running: it would overwrite us from
 //!   memory (and we could drop the user's in-memory changes).
@@ -68,6 +73,7 @@ pub struct BookmarkWriteEntry {
     /// Note directory, relative to the workspace root.
     pub folder: Vec<String>,
     pub title: String,
+    /// An empty URL is a folder marker: create the folder without a bookmark.
     pub url: String,
 }
 
@@ -490,6 +496,13 @@ fn build_desired(entries: &[BookmarkWriteEntry]) -> DesiredFolder {
         (a.folder.join("/"), &a.title, &a.url).cmp(&(b.folder.join("/"), &b.title, &b.url))
     });
     for entry in ordered {
+        // Folder marker: the note folder exists even if none of its notes
+        // link anywhere. Folders covered by another entry are created by the
+        // path walk in `insert_desired`, so there is no need to dedupe here.
+        if entry.url.trim().is_empty() {
+            ensure_desired_folder(&mut root, &entry.folder);
+            continue;
+        }
         if !is_http(&entry.url) {
             continue;
         }
@@ -506,6 +519,26 @@ fn build_desired(entries: &[BookmarkWriteEntry]) -> DesiredFolder {
     }
     sort_desired(&mut root);
     root
+}
+
+fn ensure_desired_folder(node: &mut DesiredFolder, folder: &[String]) {
+    let Some((head, rest)) = folder.split_first() else {
+        return;
+    };
+    let Some(head) = sanitize_segment(head) else {
+        return;
+    };
+    let index = match node.folders.iter().position(|f| f.name == head) {
+        Some(index) => index,
+        None => {
+            node.folders.push(DesiredFolder {
+                name: head,
+                ..DesiredFolder::default()
+            });
+            node.folders.len() - 1
+        }
+    };
+    ensure_desired_folder(&mut node.folders[index], rest);
 }
 
 fn insert_desired(
@@ -536,67 +569,6 @@ fn insert_desired(
         url: url.to_string(),
         mirrored,
     });
-}
-
-/// Carry over bookmarks the user placed in `SoloMD/` (no mirror marker) so a
-/// not-yet-captured bookmark is never erased by the write pass. Mirrored URLs
-/// from notes win, so once the page becomes a note the user node disappears
-/// naturally.
-fn merge_user_nodes(desired: &mut DesiredFolder, managed: &Value) {
-    let mut seen = collect_desired_urls(desired);
-    merge_user_nodes_into(desired, managed, &mut Vec::new(), &mut seen);
-    sort_desired(desired);
-}
-
-fn merge_user_nodes_into(
-    desired: &mut DesiredFolder,
-    node: &Value,
-    rel: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    let Some(children) = node.get("children").and_then(|c| c.as_array()) else {
-        return;
-    };
-    for child in children {
-        match child.get("type").and_then(|t| t.as_str()) {
-            Some("url") => {
-                if is_mirror(child) {
-                    continue;
-                }
-                let url = child.get("url").and_then(|u| u.as_str()).unwrap_or("");
-                if !is_http(url) {
-                    continue;
-                }
-                let normalized = normalize_url(url);
-                if normalized.is_empty() || !seen.insert(normalized) {
-                    continue;
-                }
-                let title = child
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let title = if title.trim().is_empty() {
-                    host_of(url)
-                } else {
-                    title
-                };
-                insert_desired(desired, rel, &title, url, false);
-            }
-            Some("folder") => {
-                let Some(name) = child.get("name").and_then(|n| n.as_str()) else {
-                    continue;
-                };
-                if name.is_empty() {
-                    continue;
-                }
-                rel.push(name.to_string());
-                merge_user_nodes_into(desired, child, rel, seen);
-                rel.pop();
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Sorted output makes the on-disk representation stable across runs, so an
@@ -636,11 +608,10 @@ fn apply_to_file(path: &Path, desired: &DesiredFolder) -> Result<Option<(usize, 
     }
 
     if let Some(index) = managed_index {
-        // Unmarked nodes are the user's bookmarks. They are kept until their
-        // page has become a note, then the marked mirror takes over.
-        let mut aligned = desired.clone();
-        merge_user_nodes(&mut aligned, &children[index]);
-        let desired_value = Value::Array(desired_children(&aligned, &mut next_id));
+        // Strict projection: the managed subtree is exactly what the notes
+        // say it is. Non-mirror nodes are leftovers from older builds or
+        // bookmarks already handled by the read pass; drop them.
+        let desired_value = Value::Array(desired_children(desired, &mut next_id));
 
         let existing = children[index]
             .get("children")
@@ -650,7 +621,7 @@ fn apply_to_file(path: &Path, desired: &DesiredFolder) -> Result<Option<(usize, 
             return Ok(None);
         }
         let old_urls = collect_urls(&existing);
-        let new_urls = collect_desired_urls(&aligned);
+        let new_urls = collect_desired_urls(desired);
         let added = new_urls.difference(&old_urls).count();
         let removed = old_urls.difference(&new_urls).count();
         children[index]["children"] = desired_value;
@@ -1166,13 +1137,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_preserves_user_bookmarks_until_they_are_captured() {
+    fn apply_drops_bookmarks_that_are_not_in_the_note_projection() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_fixture(dir.path());
         let first = desired_for(&[(&["Notes"], "Note", "https://note.example/")]);
         apply_to_file(&path, &first).unwrap();
 
-        // Simulate the user adding a bookmark to SoloMD while Chrome is closed.
+        // Simulate a bookmark left inside SoloMD by an older build.
         let mut doc: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let managed = doc["roots"]["bookmark_bar"]["children"]
             .as_array_mut()
@@ -1188,7 +1159,6 @@ mod tests {
         }));
         fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
 
-        // Next write pass: the note set changed, the user node must survive.
         let second = desired_for(&[(&["Notes"], "Other", "https://other.example/")]);
         apply_to_file(&path, &second).unwrap();
 
@@ -1217,26 +1187,40 @@ mod tests {
         urls.sort();
         assert_eq!(
             urls,
-            vec![
-                ("https://other.example/".to_string(), true),
-                ("https://user.example/".to_string(), false),
-            ]
+            vec![("https://other.example/".to_string(), true)],
+            "SoloMD must contain exactly the note projection"
         );
-        let user = urls
-            .iter()
-            .find(|(u, _)| u == "https://user.example/")
-            .expect("user bookmark preserved");
-        assert!(!user.1, "user bookmark must stay unmarked so it is captured");
-        let mirrored = urls
-            .iter()
-            .find(|(u, _)| u == "https://other.example/")
-            .expect("note link mirrored");
-        assert!(mirrored.1);
-        assert!(!urls.iter().any(|(u, _)| u == "https://note.example/"));
     }
 
     #[test]
-    fn apply_preserves_unmarked_nodes_without_any_schema_stamp() {
+    fn apply_creates_folders_for_notes_without_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_fixture(dir.path());
+        // Folder marker entries carry an empty URL.
+        let entries = vec![BookmarkWriteEntry {
+            folder: vec!["01.股票交易".into(), "10.市场基础".into()],
+            title: String::new(),
+            url: String::new(),
+        }];
+        apply_to_file(&path, &build_desired(&entries)).unwrap();
+
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let managed = after["roots"]["bookmark_bar"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["meta_info"]["solomd_managed"] == "1")
+            .unwrap();
+        assert_eq!(managed["children"][0]["name"], "01.股票交易");
+        assert_eq!(managed["children"][0]["children"][0]["name"], "10.市场基础");
+        assert_eq!(
+            managed["children"][0]["children"][0]["children"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn apply_replaces_legacy_unmarked_mirrors() {
         let dir = tempfile::tempdir().unwrap();
         let mut doc = fixture();
         doc["roots"]["bookmark_bar"]["children"]
@@ -1267,8 +1251,8 @@ mod tests {
         let urls = collect_urls(managed);
         assert!(urls.contains("https://fresh.example"));
         assert!(
-            urls.contains("https://stale.example"),
-            "unmarked nodes are user bookmarks and must survive a write"
+            !urls.contains("https://stale.example"),
+            "legacy nodes outside the note projection must be removed"
         );
         fn find_url<'a>(node: &'a Value, url: &str) -> Option<&'a Value> {
             if node["type"] == "url" && node["url"] == url {
@@ -1282,11 +1266,6 @@ mod tests {
         assert_eq!(
             find_url(managed, "https://fresh.example/").unwrap()["meta_info"]["solomd_mirror"],
             "1"
-        );
-        assert!(
-            find_url(managed, "https://stale.example/").unwrap()["meta_info"]["solomd_mirror"]
-                .is_null(),
-            "user bookmark must stay unmarked so it gets captured"
         );
     }
 

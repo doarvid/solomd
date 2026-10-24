@@ -546,7 +546,7 @@ export const zh: I18n = {
       noteSafety:
         'SoloMD 之外的书签不会被读取，也不会被修改；在那里删除书签不影响笔记。',
       managedWarning:
-        'SoloMD 目录由应用管理：笔记外链会自动维护，你手动添加进去的书签会保留到对应页面变成笔记为止。',
+        'SoloMD 目录完全按笔记结构镜像：文件夹层级与笔记目录一致，不在笔记里的书签会被清理。你手动放进去的书签会先被采集为笔记。',
       noWorkspace: '先打开一个工作区文件夹再同步。',
       manualNothing: '书签同步：没有新内容',
       manualResult: '书签同步：采集 {captured} · 已存在 {skipped} · 失败 {failed}',

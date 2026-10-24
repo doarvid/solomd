@@ -187,7 +187,10 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
 
       try {
         await this.readDirection(root, force);
-        await this.writeDirection(root);
+        // The read pass feeds the "already captured" set the write pass uses
+        // to decide what is not a note. If it failed, writing would delete
+        // the user's new SoloMD bookmarks before they were captured.
+        if (!this.lastError) await this.writeDirection(root);
         this.lastRunAt = Date.now();
       } catch (e) {
         this.lastError = String(e);
@@ -275,8 +278,9 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
             // The stub note still carries `url:`, so don't retry a failed page
             // forever. Same behavior as the manual capture panel.
             captured.add(entry.normalized_url);
-          } catch {
+          } catch (e) {
             this.failed += 1;
+            this.lastError = String(e);
             fatal = true;
           }
           this.done += 1;
@@ -316,6 +320,9 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
         const rel = relativePath(root, note.path);
         if (rel === null) continue;
         const folder = rel.split('/').slice(0, -1).filter(Boolean);
+        // Mirror the note folder tree even when the notes in it have no
+        // external links: an empty url tells Rust to just create the folder.
+        if (folder.length > 0) entries.push({ folder, title: '', url: '' });
         const add = (url: unknown, text: string) => {
           if (typeof url !== 'string' || !isHttp(url)) return;
           const label = text.trim() || hostOf(url);
