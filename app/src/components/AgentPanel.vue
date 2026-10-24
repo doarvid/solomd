@@ -17,7 +17,11 @@ import { useTabsStore } from '../stores/tabs';
 import { useTilesStore } from '../stores/tiles';
 import { useToastsStore } from '../stores/toasts';
 import { useWorkspaceIndexStore } from '../stores/workspaceIndex';
-import { useAgentPanelStore } from '../stores/agentPanel';
+import {
+  useAgentPanelStore,
+  type AcpSessionInfo,
+  type AcpSessionSummary,
+} from '../stores/agentPanel';
 import { providerById, type ProviderId } from '../lib/ai-providers';
 import { parseWithWikilinks, chipLabel } from '../lib/wikilinks';
 import { isMobile } from '../lib/platform';
@@ -118,24 +122,60 @@ function buildActiveNoteContext(): string {
   return `Active note content (${path}):\n\`\`\`markdown\n${truncated}\n\`\`\``;
 }
 
-const isCli = computed(() => agent.source === 'claude-cli');
+const isAcp = computed(() => agent.source === 'acp');
 
 /** Last path segment, for the header chip. */
-const cliFolderLabel = computed(() => {
-  const p = agent.cliFolder || '';
+const acpFolderLabel = computed(() => {
+  const p = agent.acpFolder || workspace.currentFolder || '';
   return p.split(/[\\/]/).filter(Boolean).pop() || p;
 });
 
-const hasFolder = computed(() =>
-  isCli.value ? !!agent.cliFolder : !!workspace.currentFolder,
-);
-const aiConfigured = computed(() => isCli.value || settings.aiEnabled);
+const acpFolder = computed(() => agent.acpFolder || workspace.currentFolder);
 
-type StateKey = 'no-folder' | 'no-ai' | 'ready';
+const hasFolder = computed(() =>
+  isAcp.value ? !!acpFolder.value : !!workspace.currentFolder,
+);
+const hasAcpAgent = computed(() => agent.agents.some((a) => a.available));
+const aiConfigured = computed(() =>
+  isAcp.value ? (agent.agentsLoaded ? hasAcpAgent.value : true) : settings.aiEnabled,
+);
+
+const selectedAgentInfo = computed(
+  () => agent.agents.find((a) => a.id === agent.agentId) || null,
+);
+
+type StateKey = 'no-folder' | 'no-ai' | 'no-agent' | 'ready';
 const stateKey = computed<StateKey>(() => {
   if (!hasFolder.value) return 'no-folder';
-  if (!aiConfigured.value) return 'no-ai';
+  if (!aiConfigured.value) return isAcp.value ? 'no-agent' : 'no-ai';
   return 'ready';
+});
+
+const historyOpen = ref(false);
+const permissionBusy = ref(false);
+
+/** Slash-command menu: only active while the draft is exactly `/prefix`. */
+const slashQuery = computed(() => {
+  if (!isAcp.value) return null;
+  const match = agent.draft.match(/^\/([^\s]*)$/);
+  return match ? match[1].toLowerCase() : null;
+});
+const slashMatches = computed(() => {
+  if (slashQuery.value === null) return [];
+  return agent.acpCommands
+    .filter((cmd) => cmd.name.toLowerCase().startsWith(slashQuery.value || ''))
+    .slice(0, 8);
+});
+
+const usageLabel = computed(() => {
+  const usage = agent.acpUsage as { used?: number; size?: number; cost?: number } | null;
+  if (!usage) return '';
+  const parts: string[] = [];
+  if (typeof usage.used === 'number' && typeof usage.size === 'number' && usage.size > 0) {
+    parts.push(`${Math.round((usage.used / usage.size) * 100)}% context`);
+  }
+  if (typeof usage.cost === 'number') parts.push(`$${usage.cost.toFixed(2)}`);
+  return parts.join(' · ');
 });
 
 const canSend = computed(() => agent.draft.trim().length > 0 && !agent.isStreaming);
@@ -203,8 +243,8 @@ async function send() {
   agent.draft = '';
   autoscroll();
 
-  if (isCli.value) {
-    await sendCli(prompt);
+  if (isAcp.value) {
+    await sendAcp(prompt);
     return;
   }
 
@@ -271,51 +311,212 @@ async function send() {
   }
 }
 
-async function sendCli(prompt: string) {
-  const cwd = agent.cliFolder;
+async function refreshAgents() {
+  try {
+    const list = await invoke<typeof agent.agents>('acp_list_agents');
+    agent.setAgents(list);
+  } catch (err) {
+    errorMsg.value = String(err);
+  }
+}
+
+async function openAcpSession(cwd: string): Promise<boolean> {
+  if (!agent.agentsLoaded || agent.agents.length === 0) await refreshAgents();
+  let agentId = agent.agentId;
+  if (!agent.agents.find((a) => a.id === agentId && a.available)) {
+    agentId = agent.agents.find((a) => a.available)?.id || null;
+  }
+  if (!agentId) {
+    errorMsg.value = t('agent.noAgents');
+    return false;
+  }
+  if (agent.acpSessionId && agent.acpFolder !== cwd) {
+    try {
+      await invoke('acp_stop', { sessionId: agent.acpSessionId });
+    } catch {
+      /* best-effort */
+    }
+    agent.resetAcpSession();
+  }
+  const info = await invoke<AcpSessionInfo>('acp_start_session', {
+    agentId,
+    cwd,
+  });
+  agent.setSession(info);
+  await refreshSessions();
+  return true;
+}
+
+async function refreshSessions() {
+  const cwd = acpFolder.value;
   if (!cwd) return;
-  const requestId =
-    typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  if (!agent.cliSessionId) {
-    agent.cliSessionId =
+  try {
+    agent.sessions = await invoke<AcpSessionSummary[]>('acp_list_sessions', { cwd });
+  } catch {
+    /* history is best-effort */
+  }
+}
+
+async function sendAcp(prompt: string) {
+  const cwd = acpFolder.value;
+  if (!cwd) {
+    agent.dropEmptyAssistant();
+    return;
+  }
+  try {
+    if (!agent.acpSessionId || agent.acpFolder !== cwd) {
+      if (!(await openAcpSession(cwd))) {
+        agent.dropEmptyAssistant();
+        return;
+      }
+    }
+    const requestId =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  }
-  agent.currentRunId = requestId;
-  agent.isStreaming = true;
-  agent.cliStatus = null;
-  try {
-    await invoke('claude_chat', {
-      request: {
-        request_id: requestId,
-        prompt,
-        cwd,
-        session_id: agent.cliSessionId,
-        resume: agent.cliStarted,
-        allow_write: settings.agentAllowWrite,
-      },
+    agent.currentRunId = requestId;
+    agent.isStreaming = true;
+    agent.acpNotice = null;
+    // ACP agents can read files themselves, but pointing at the exact note
+    // saves a discovery step when the user enabled "Active note".
+    const noteCtx = buildActiveNoteContext();
+    await invoke('acp_send', {
+      sessionId: agent.acpSessionId,
+      prompt: noteCtx ? `${noteCtx}\n\n${prompt}` : prompt,
     });
   } catch (err) {
     agent.abortTurn();
     errorMsg.value = String(err);
-    const last = agent.messages[agent.messages.length - 1];
-    if (last && last.role === 'assistant' && last.content === '') {
-      agent.messages.pop();
-    }
+    agent.dropEmptyAssistant();
   }
 }
 
-async function stop() {
-  const id = agent.currentRunId;
-  if (!id) return;
+async function onAgentChange(e: Event) {
+  const id = (e.target as HTMLSelectElement).value;
+  if (agent.acpSessionId) {
+    try {
+      await invoke('acp_stop', { sessionId: agent.acpSessionId });
+    } catch {
+      /* best-effort */
+    }
+  }
+  agent.selectAgent(id);
+}
+
+async function onModeChange(e: Event) {
+  const modeId = (e.target as HTMLSelectElement).value;
+  agent.setMode(modeId);
+  if (!agent.acpSessionId) return;
   try {
-    if (isCli.value) {
-      await invoke('claude_cancel', { requestId: id });
+    await invoke('acp_set_mode', { sessionId: agent.acpSessionId, modeId });
+  } catch (err) {
+    errorMsg.value = String(err);
+  }
+}
+
+async function answerPermission(optionId: string | null) {
+  const permission = agent.permission;
+  if (!permission || permissionBusy.value) return;
+  permissionBusy.value = true;
+  agent.setPermission(null);
+  try {
+    await invoke('acp_respond_permission', {
+      requestId: permission.requestId,
+      optionId,
+    });
+  } catch (err) {
+    errorMsg.value = String(err);
+  } finally {
+    permissionBusy.value = false;
+  }
+}
+
+function applyCommand(cmd: { name: string }) {
+  agent.draft = `/${cmd.name} `;
+  void nextTick(() => inputRef.value?.focus());
+}
+
+/** Rebuild the transcript from the JSONL records the backend persisted. */
+function restoreFromRecords(records: Array<Record<string, unknown>>) {
+  agent.messages = [];
+  agent.resetAcpSession();
+  for (const record of records) {
+    const type = record.type;
+    if (type === 'meta') {
+      agent.agentId = String(record.agentId ?? agent.agentId ?? '');
+      continue;
+    }
+    if (type === 'user' && typeof record.text === 'string') {
+      agent.addMessage({ role: 'user', content: record.text });
+    } else if (type === 'text' && typeof record.text === 'string') {
+      agent.appendToLastAssistant(record.text);
+    } else if (type === 'thought' && typeof record.text === 'string') {
+      agent.appendThought(record.text);
+    } else if (type === 'tool_call' && record.toolCall) {
+      agent.upsertToolCall(record.toolCall as Record<string, unknown>);
+    } else if (type === 'tool_call_update' && record.toolCallUpdate) {
+      agent.updateToolCall(record.toolCallUpdate as Record<string, unknown>);
+    } else if (type === 'plan') {
+      const plan = record.plan as { entries?: unknown } | undefined;
+      if (Array.isArray(plan?.entries)) {
+        agent.setPlan(plan.entries as typeof agent.acpPlan);
+      }
+    }
+  }
+  agent.dropEmptyAssistant();
+  agent.isStreaming = false;
+}
+
+async function loadHistory(summary: AcpSessionSummary) {
+  const cwd = acpFolder.value;
+  if (!cwd) return;
+  historyOpen.value = false;
+  errorMsg.value = null;
+  try {
+    const records = await invoke<Array<Record<string, unknown>>>('acp_read_session', {
+      cwd,
+      sessionId: summary.id,
+    });
+    restoreFromRecords(records);
+    if (agent.acpSessionId) {
+      try {
+        await invoke('acp_stop', { sessionId: agent.acpSessionId });
+      } catch {
+        /* best-effort */
+      }
+    }
+    agent.resetAcpSession();
+    const info = await invoke<AcpSessionInfo>('acp_load_session', {
+      agentId: summary.agentId || agent.agentId,
+      sessionId: summary.id,
+      cwd,
+    });
+    agent.setSession(info);
+    if (!info.restored) {
+      agent.acpNotice = t('agent.historyReadOnly');
+    }
+  } catch (err) {
+    errorMsg.value = String(err);
+  }
+}
+
+function startNewSession() {
+  if (agent.acpSessionId) {
+    void invoke('acp_stop', { sessionId: agent.acpSessionId }).catch(() => {});
+  }
+  agent.messages = [];
+  agent.resetAcpSession();
+  historyOpen.value = false;
+  errorMsg.value = null;
+}
+
+async function stop() {
+  try {
+    if (isAcp.value && agent.acpSessionId) {
+      await invoke('acp_cancel', { sessionId: agent.acpSessionId });
     } else {
-      await invoke('ai_cancel', { requestId: id });
+      const id = agent.currentRunId;
+      if (id) await invoke('ai_cancel', { requestId: id });
     }
   } catch {
     /* best-effort */
@@ -356,10 +557,10 @@ let unlistenError: UnlistenFn | null = null;
 let unlistenToolCall: UnlistenFn | null = null;
 let unlistenToolResult: UnlistenFn | null = null;
 let unlistenRunStarted: UnlistenFn | null = null;
-let unlistenClaudeChunk: UnlistenFn | null = null;
-let unlistenClaudeStatus: UnlistenFn | null = null;
-let unlistenClaudeDone: UnlistenFn | null = null;
-let unlistenClaudeError: UnlistenFn | null = null;
+let unlistenAcpUpdate: UnlistenFn | null = null;
+let unlistenAcpPermission: UnlistenFn | null = null;
+let unlistenAcpDone: UnlistenFn | null = null;
+let unlistenAcpError: UnlistenFn | null = null;
 
 onMounted(async () => {
   unlistenChunk = await listen<{ request_id: string; chunk: string }>(
@@ -454,50 +655,84 @@ onMounted(async () => {
     },
   );
 
-  // Claude CLI events — separate channel so the API path stays untouched.
-  unlistenClaudeChunk = await listen<{ request_id: string; chunk: string }>(
-    'solomd://claude-chunk',
+  // ACP events. The panel owns one live session at a time; events for a
+  // different session (a stale one being torn down) are ignored.
+  unlistenAcpUpdate = await listen<{ sessionId: string; update: Record<string, any> }>(
+    'solomd://acp-update',
     (e) => {
-      if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
-      agent.appendToLastAssistant(e.payload.chunk);
+      if (!agent.acpSessionId || e.payload.sessionId !== agent.acpSessionId) return;
+      const update = e.payload.update;
+      switch (update.type) {
+        case 'text':
+          agent.appendToLastAssistant(String(update.text ?? ''));
+          break;
+        case 'thought':
+          agent.appendThought(String(update.text ?? ''));
+          break;
+        case 'tool_call':
+          if (update.toolCall) agent.upsertToolCall(update.toolCall);
+          break;
+        case 'tool_call_update':
+          if (update.toolCallUpdate) agent.updateToolCall(update.toolCallUpdate);
+          break;
+        case 'plan': {
+          const entries = update.plan?.entries;
+          if (Array.isArray(entries)) agent.setPlan(entries);
+          break;
+        }
+        case 'commands': {
+          const commands = update.availableCommands?.availableCommands;
+          if (Array.isArray(commands)) agent.setCommands(commands);
+          break;
+        }
+        case 'mode':
+          if (update.currentModeId) agent.setMode(String(update.currentModeId));
+          break;
+        case 'usage':
+          agent.setUsage(update.usage ?? null);
+          break;
+        case 'notice': {
+          const content = update.notice?.content ?? update.notice?.message;
+          if (content) agent.acpNotice = String(content);
+          break;
+        }
+        default:
+          break;
+      }
       autoscroll();
     },
   );
-  unlistenClaudeStatus = await listen<{ request_id: string; text: string }>(
-    'solomd://claude-status',
+  unlistenAcpPermission = await listen<{
+    requestId: string;
+    sessionId: string;
+    toolCall: Record<string, unknown>;
+    options: Array<{ optionId: string; name: string; kind: string }>;
+  }>('solomd://acp-permission', (e) => {
+    if (agent.acpSessionId && e.payload.sessionId !== agent.acpSessionId) return;
+    agent.setPermission(e.payload);
+  });
+  unlistenAcpDone = await listen<{ sessionId: string; stopReason: string }>(
+    'solomd://acp-done',
     (e) => {
-      if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
-      agent.cliStatus = e.payload.text;
-    },
-  );
-  unlistenClaudeDone = await listen<{ request_id: string }>(
-    'solomd://claude-done',
-    (e) => {
-      if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
-      const last = agent.messages[agent.messages.length - 1];
-      if (last && last.role === 'assistant' && last.content === '') {
-        agent.messages.pop();
-      }
-      agent.isStreaming = false;
-      agent.currentRunId = null;
-      agent.cliStatus = null;
-      agent.cliStarted = true;
-    },
-  );
-  unlistenClaudeError = await listen<{ request_id: string; error: string }>(
-    'solomd://claude-error',
-    (e) => {
-      if (!agent.currentRunId || e.payload.request_id !== agent.currentRunId) return;
+      if (e.payload.sessionId !== agent.acpSessionId) return;
+      agent.dropEmptyAssistant();
       agent.abortTurn();
-      const last = agent.messages[agent.messages.length - 1];
-      if (last && last.role === 'assistant' && last.content === '') {
-        agent.messages.pop();
-      }
-      if (e.payload.error !== 'cancelled') {
-        errorMsg.value = e.payload.error;
-      }
     },
   );
+  unlistenAcpError = await listen<{ sessionId: string; error: string }>(
+    'solomd://acp-error',
+    (e) => {
+      if (e.payload.sessionId !== agent.acpSessionId) return;
+      agent.abortTurn();
+      agent.dropEmptyAssistant();
+      errorMsg.value = e.payload.error;
+    },
+  );
+
+  if (isAcp.value) {
+    await refreshAgents();
+    await refreshSessions();
+  }
 
   // A dock switch remounts this component; restore the view the user left.
   await nextTick();
@@ -511,13 +746,13 @@ onBeforeUnmount(() => {
   unlistenToolCall?.();
   unlistenToolResult?.();
   unlistenRunStarted?.();
-  unlistenClaudeChunk?.();
-  unlistenClaudeStatus?.();
-  unlistenClaudeDone?.();
-  unlistenClaudeError?.();
+  unlistenAcpUpdate?.();
+  unlistenAcpPermission?.();
+  unlistenAcpDone?.();
+  unlistenAcpError?.();
   unlistenChunk = unlistenDone = unlistenError = null;
   unlistenToolCall = unlistenToolResult = unlistenRunStarted = null;
-  unlistenClaudeChunk = unlistenClaudeStatus = unlistenClaudeDone = unlistenClaudeError = null;
+  unlistenAcpUpdate = unlistenAcpPermission = unlistenAcpDone = unlistenAcpError = null;
 });
 
 // --- Wikilink handling --------------------------------------------------
@@ -581,6 +816,31 @@ function formatArgsInline(args: Record<string, unknown>): string {
 watch(stateKey, (k) => {
   if (k !== 'ready') errorMsg.value = null;
 });
+
+// The ACP agent list and saved sessions depend on the machine and the open
+// folder, so re-read them when either becomes relevant.
+// Only one agent process should be alive at a time. Whenever the panel moves
+// off a live session (folder switch, agent switch, new session) stop the old
+// one; the store clears `acpSessionId` in all those paths.
+let liveSessionId: string | null = null;
+watch(
+  () => agent.acpSessionId,
+  (id) => {
+    if (liveSessionId && liveSessionId !== id) {
+      void invoke('acp_stop', { sessionId: liveSessionId }).catch(() => {});
+    }
+    liveSessionId = id;
+  },
+  { flush: 'sync' },
+);
+watch(isAcp, async (on) => {
+  if (!on) return;
+  await refreshAgents();
+  await refreshSessions();
+});
+watch([() => agent.acpFolder, () => workspace.currentFolder], async () => {
+  if (isAcp.value) await refreshSessions();
+});
 </script>
 
 <template>
@@ -595,26 +855,48 @@ watch(stateKey, (k) => {
       <div class="agent-panel__source">
         <button
           class="rp-chip"
-          :class="{ 'is-active agent-panel__chip--on': !isCli }"
+          :class="{ 'is-active agent-panel__chip--on': !isAcp }"
           type="button"
           @click="agent.setSource('api')"
         >{{ t('agent.source.api') }}</button>
         <button
           v-if="!isMobile()"
           class="rp-chip"
-          :class="{ 'is-active agent-panel__chip--on': isCli }"
+          :class="{ 'is-active agent-panel__chip--on': isAcp }"
           type="button"
-          @click="agent.setSource('claude-cli')"
-        >{{ t('agent.source.cli') }}</button>
+          @click="agent.setSource('acp')"
+        >{{ t('agent.source.acp') }}</button>
+        <select
+          v-if="isAcp && agent.agents.length"
+          class="rp-chip agent-panel__agent-select"
+          :value="agent.agentId || ''"
+          :title="selectedAgentInfo?.detail || selectedAgentInfo?.description"
+          @change="onAgentChange"
+        >
+          <option
+            v-for="item in agent.agents"
+            :key="item.id"
+            :value="item.id"
+            :disabled="!item.available"
+          >{{ item.name }}{{ item.available ? '' : ` · ${item.reason || t('agent.unavailable')}` }}</option>
+        </select>
       </div>
       <span
-        v-if="isCli && agent.cliFolder"
+        v-if="isAcp && acpFolder"
         class="agent-panel__folder"
-        :title="agent.cliFolder"
-      >📁 {{ cliFolderLabel }}</span>
+        :title="acpFolder"
+      >📁 {{ acpFolderLabel }}</span>
+      <button
+        v-if="isAcp && (agent.sessions.length || agent.acpSessionId)"
+        class="rp-icon-btn agent-panel__icon-btn"
+        type="button"
+        :title="t('agent.historyTitle')"
+        :aria-label="t('agent.historyTitle')"
+        @click="historyOpen = !historyOpen"
+      ><Icons name="recent" :size="14" /></button>
       <span class="agent-panel__spacer" />
       <button
-        v-if="stateKey === 'ready' && !isCli"
+        v-if="stateKey === 'ready'"
         class="rp-chip agent-panel__chip"
         :class="{ 'is-active agent-panel__chip--on': includeActiveNote }"
         type="button"
@@ -646,6 +928,27 @@ watch(stateKey, (k) => {
       </button>
     </header>
 
+    <div v-if="historyOpen" class="agent-panel__history">
+      <div class="agent-panel__history-head">
+        <span>{{ t('agent.historyTitle') }}</span>
+        <button
+          class="rp-btn rp-btn--sm rp-btn--ghost"
+          type="button"
+          @click="startNewSession"
+        >{{ t('agent.newSession') }}</button>
+      </div>
+      <button
+        v-for="item in agent.sessions"
+        :key="item.id"
+        class="agent-panel__history-item"
+        type="button"
+        @click="loadHistory(item)"
+      >{{ item.title }}</button>
+      <div v-if="!agent.sessions.length" class="agent-panel__history-empty">
+        {{ t('agent.historyEmpty') }}
+      </div>
+    </div>
+
     <div v-if="stateKey === 'no-folder'" class="rp-empty agent-panel__empty">
       {{ t('agent.empty.noFolder') }}
     </div>
@@ -657,7 +960,42 @@ watch(stateKey, (k) => {
       </button>
     </div>
 
+    <div v-else-if="stateKey === 'no-agent'" class="rp-empty agent-panel__empty">
+      <p>{{ t('agent.noAgents') }}</p>
+      <ul class="agent-panel__agent-reasons">
+        <li v-for="item in agent.agents" :key="item.id">
+          <strong>{{ item.name }}</strong> — {{ item.reason || item.description }}
+          <span v-if="item.detail" class="agent-panel__agent-detail">{{ item.detail }}</span>
+        </li>
+      </ul>
+      <button class="rp-btn agent-panel__cta" type="button" @click="refreshAgents">
+        {{ t('agent.rescanAgents') }}
+      </button>
+    </div>
+
     <template v-else>
+      <div v-if="isAcp && agent.acpPlan?.length" class="agent-panel__plan">
+        <div class="agent-panel__plan-title">{{ t('agent.plan') }}</div>
+        <ul>
+          <li
+            v-for="(entry, pi) in agent.acpPlan"
+            :key="pi"
+            :class="`agent-panel__plan-item agent-panel__plan-item--${entry.status}`"
+          >
+            <span class="agent-panel__plan-mark" aria-hidden="true">
+              {{ entry.status === 'completed' ? '✓' : entry.status === 'in_progress' ? '▸' : '·' }}
+            </span>{{ entry.content }}
+          </li>
+        </ul>
+      </div>
+
+      <div v-if="agent.acpNotice" class="agent-panel__notice">
+        <span>{{ agent.acpNotice }}</span>
+        <button class="rp-icon-btn" type="button" @click="agent.acpNotice = null">
+          <Icons name="close" :size="12" />
+        </button>
+      </div>
+
       <ul ref="messagesRef" v-if="agent.messages.length" class="agent-panel__messages">
         <li
           v-for="(m, i) in agent.messages"
@@ -669,17 +1007,26 @@ watch(stateKey, (k) => {
           <div v-if="m.role === 'tool' && m.tool" class="agent-panel__tool">
             <button
               class="agent-panel__tool-head"
-              :class="{ 'agent-panel__tool-head--err': !!m.tool.error, 'agent-panel__tool-head--pending': !m.tool.result && !m.tool.error }"
+              :class="{
+                'agent-panel__tool-head--err': !!m.tool.error || m.tool.status === 'failed',
+                'agent-panel__tool-head--pending': !m.tool.error
+                  && (m.tool.status === 'pending' || m.tool.status === 'in_progress'
+                    || (!m.tool.result && !m.tool.status)),
+              }"
               type="button"
               :aria-expanded="!!m.tool.expanded"
               @click="agent.toggleToolExpand(m.tool.toolCallId)"
             >
               <span class="agent-panel__tool-icon" aria-hidden="true">
-                <span v-if="!m.tool.result && !m.tool.error" class="agent-panel__tool-spinner" />
-                <Icons v-else-if="m.tool.error" name="info" :size="14" />
+                <span
+                  v-if="!m.tool.error && (m.tool.status === 'pending' || m.tool.status === 'in_progress'
+                    || (!m.tool.result && !m.tool.status))"
+                  class="agent-panel__tool-spinner"
+                />
+                <Icons v-else-if="m.tool.error || m.tool.status === 'failed'" name="info" :size="14" />
                 <Icons v-else name="wrench" :size="14" />
               </span>
-              <code class="agent-panel__tool-sig">{{ m.tool.name }}({{ formatArgsInline(m.tool.args) }})</code>
+              <code class="agent-panel__tool-sig">{{ m.tool.title || m.tool.name }}{{ m.tool.kind ? ` · ${m.tool.kind}` : '' }}({{ formatArgsInline(m.tool.args) }})</code>
               <Icons
                 class="agent-panel__tool-caret"
                 :name="m.tool.expanded ? 'chevron-down' : 'chevron-right'"
@@ -688,11 +1035,11 @@ watch(stateKey, (k) => {
             </button>
             <div v-if="m.tool.expanded" class="agent-panel__tool-body">
               <div class="agent-panel__tool-section">
-                <div class="agent-panel__tool-label">args</div>
+                <div class="agent-panel__tool-label">{{ isAcp ? 'input' : 'args' }}</div>
                 <pre class="agent-panel__tool-pre">{{ JSON.stringify(m.tool.args, null, 2) }}</pre>
               </div>
               <div class="agent-panel__tool-section">
-                <div class="agent-panel__tool-label">{{ m.tool.error ? 'error' : 'result' }}</div>
+                <div class="agent-panel__tool-label">{{ m.tool.error ? 'error' : (isAcp ? 'output' : 'result') }}</div>
                 <pre
                   class="agent-panel__tool-pre"
                   :class="{ 'agent-panel__tool-pre--err': !!m.tool.error }"
@@ -700,6 +1047,12 @@ watch(stateKey, (k) => {
               </div>
             </div>
           </div>
+
+          <!-- Agent reasoning — collapsed by default. -->
+          <details v-else-if="m.role === 'thought'" class="agent-panel__thought">
+            <summary>{{ t('agent.thought') }}</summary>
+            <pre class="agent-panel__thought-body">{{ m.content }}</pre>
+          </details>
 
           <!-- User / assistant / system text. Assistant text gets wikilink chips. -->
           <template v-else>
@@ -758,11 +1111,20 @@ watch(stateKey, (k) => {
 
       <div v-if="errorMsg" class="agent-panel__error">{{ errorMsg }}</div>
 
-      <div v-if="isCli && agent.cliStatus" class="agent-panel__status">
-        {{ agent.cliStatus }}
-      </div>
 
       <footer class="agent-panel__compose">
+        <div v-if="slashMatches.length" class="agent-panel__slash">
+          <button
+            v-for="cmd in slashMatches"
+            :key="cmd.name"
+            type="button"
+            class="agent-panel__slash-item"
+            @click="applyCommand(cmd)"
+          >
+            <code>/{{ cmd.name }}</code>
+            <span>{{ cmd.description }}</span>
+          </button>
+        </div>
         <textarea
           ref="inputRef"
           v-model="agent.draft"
@@ -776,6 +1138,20 @@ watch(stateKey, (k) => {
             <template v-if="agent.isStreaming">{{ t('agent.streaming') }}</template>
             <template v-else>{{ t('agent.enterToSend') }}</template>
           </span>
+          <span v-if="isAcp && usageLabel" class="agent-panel__usage">{{ usageLabel }}</span>
+          <select
+            v-if="isAcp && agent.acpModes"
+            class="agent-panel__mode"
+            :value="agent.acpModes.currentModeId"
+            :title="t('agent.mode')"
+            @change="onModeChange"
+          >
+            <option
+              v-for="mode in agent.acpModes.availableModes"
+              :key="mode.id"
+              :value="mode.id"
+            >{{ mode.name }}</option>
+          </select>
           <button
             v-if="agent.isStreaming"
             class="rp-btn agent-panel__send agent-panel__send--stop"
@@ -796,10 +1172,39 @@ watch(stateKey, (k) => {
         </div>
       </footer>
     </template>
+
+    <div v-if="agent.permission" class="agent-panel__permission">
+      <div class="agent-panel__permission-card">
+        <div class="agent-panel__permission-head">
+          <strong>{{ t('agent.permissionTitle') }}</strong>
+          <button class="rp-icon-btn" type="button" @click="answerPermission(null)">
+            <Icons name="close" :size="14" />
+          </button>
+        </div>
+        <div class="agent-panel__permission-tool">
+          {{ agent.permission.toolCall.title || agent.permission.toolCall.name || t('agent.permissionTool') }}
+        </div>
+        <pre v-if="agent.permission.toolCall.rawInput" class="agent-panel__permission-pre">{{ JSON.stringify(agent.permission.toolCall.rawInput, null, 2) }}</pre>
+        <div class="agent-panel__permission-actions">
+          <button
+            v-for="option in agent.permission.options"
+            :key="option.optionId"
+            class="rp-btn rp-btn--sm"
+            :class="{ 'rp-btn--primary': (option.kind || '').startsWith('allow') }"
+            type="button"
+            :disabled="permissionBusy"
+            @click="answerPermission(option.optionId)"
+          >{{ option.name }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.agent-panel {
+  position: relative;
+}
 .agent-panel__head--draggable {
   cursor: grab;
   touch-action: none;
@@ -1125,4 +1530,246 @@ watch(stateKey, (k) => {
 .agent-panel__send {
   flex-shrink: 0;
 }
+/* --- ACP additions ------------------------------------------------------- */
+.agent-panel__agent-select {
+  max-width: 160px;
+  height: 24px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+.agent-panel__agent-detail {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.agent-panel__agent-reasons {
+  margin: 8px 0 12px;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.agent-panel__history {
+  position: absolute;
+  top: 38px;
+  right: 8px;
+  z-index: 20;
+  width: min(280px, calc(100% - 16px));
+  max-height: 60%;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--bg-elev);
+  border: var(--bd-hair);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2);
+}
+.agent-panel__history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+.agent-panel__history-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-panel__history-item:hover {
+  background: var(--fill-1);
+}
+.agent-panel__history-empty {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* Reasoning blocks */
+.agent-panel__thought {
+  border-left: 2px solid var(--border-1);
+  padding-left: 10px;
+  color: var(--text-3);
+}
+.agent-panel__thought summary {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  user-select: none;
+}
+.agent-panel__thought-body {
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+}
+
+/* Plan checklist */
+.agent-panel__plan {
+  flex: 0 0 auto;
+  margin: 0 12px 6px;
+  padding: 8px 10px;
+  border: var(--bd-hair);
+  border-radius: var(--r-md);
+  background: var(--bg-elev);
+}
+.agent-panel__plan-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+.agent-panel__plan ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.agent-panel__plan-mark {
+  display: inline-block;
+  width: 14px;
+  color: var(--text-3);
+}
+.agent-panel__plan-item--in_progress { color: var(--text); }
+.agent-panel__plan-item--in_progress .agent-panel__plan-mark { color: var(--accent); }
+.agent-panel__plan-item--completed { color: var(--text-3); text-decoration: line-through; }
+.agent-panel__plan-item--completed .agent-panel__plan-mark { color: var(--success, var(--accent)); }
+
+/* Notice banner */
+.agent-panel__notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 12px 8px;
+  padding: 6px 8px;
+  border-radius: var(--r-md);
+  background: var(--fill-1);
+  font-size: 12px;
+  color: var(--text-2, var(--text));
+}
+.agent-panel__notice > span { flex: 1; }
+
+/* Slash-command menu */
+.agent-panel__slash {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% - 4px);
+  z-index: 15;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-elev);
+  border: var(--bd-hair);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+}
+.agent-panel__slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-panel__slash-item:hover { background: var(--fill-1); }
+.agent-panel__slash-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+}
+.agent-panel__usage {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.agent-panel__mode {
+  height: 22px;
+  font-size: 11px;
+}
+
+/* Permission sheet */
+.agent-panel__permission {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(2px);
+}
+.agent-panel__permission-card {
+  width: 100%;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--bg-elev);
+  border: var(--bd-hair);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2);
+}
+.agent-panel__permission-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.agent-panel__permission-tool {
+  margin: 8px 0 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-word;
+}
+.agent-panel__permission-pre {
+  margin: 0 0 10px;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--bg);
+  border: var(--bd-hair);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agent-panel__permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 </style>

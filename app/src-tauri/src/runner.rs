@@ -31,8 +31,6 @@ mod ai_proxy;
 
 // Folder Agent — spawns the local Claude Code CLI. Declared here as well as
 // in lib.rs because the binary's real invoke handler lives in this file.
-#[path = "claude_cli.rs"]
-mod claude_cli;
 
 #[path = "pandoc.rs"]
 mod pandoc;
@@ -154,6 +152,15 @@ mod browser;
 #[cfg(mobile)]
 #[path = "browser_mobile.rs"]
 mod browser;
+
+// Agent panel — persistent ACP sessions. Same dual-root requirement as the
+// browser: the desktop binary's handler list has to name the module too.
+#[cfg(desktop)]
+#[path = "acp.rs"]
+mod acp;
+#[cfg(mobile)]
+#[path = "acp_mobile.rs"]
+mod acp;
 
 // v2.4 — integrations panel (CLI status, MCP path, AI-client config
 // discovery) + v4.4.5 MCP auto-install (detect_ai_clients / inject_mcp /
@@ -660,6 +667,9 @@ pub fn run_with(initial_file: Option<String>) {
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
 
+    #[cfg(desktop)]
+    let builder = builder.manage(acp::AcpState::new());
+
     let app = builder
         .manage(PendingOpen(Mutex::new(pending)))
         .manage(watcher::WatcherState::new())
@@ -728,8 +738,16 @@ pub fn run_with(initial_file: Option<String>) {
             ai_proxy::ai_cancel,
             ai_proxy::ai_verify_key,
             ai_proxy::ai_list_models,
-            claude_cli::claude_chat,
-            claude_cli::claude_cancel,
+            acp::acp_list_agents,
+            acp::acp_start_session,
+            acp::acp_load_session,
+            acp::acp_send,
+            acp::acp_cancel,
+            acp::acp_stop,
+            acp::acp_respond_permission,
+            acp::acp_set_mode,
+            acp::acp_list_sessions,
+            acp::acp_read_session,
             pandoc::pandoc_detect,
             pandoc::pandoc_export,
             git_history::git_workspace_status,

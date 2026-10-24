@@ -77,7 +77,6 @@ pub mod saf_android;
 pub mod agent_run;
 pub mod agent_tools;
 // Folder Agent — spawn the local Claude Code CLI and stream its output.
-pub mod claude_cli;
 // v4.0 — provider pricing table for cost estimates written into
 // agent-runs/<id>/meta.json.cost_usd_estimate.
 pub mod pricing;
@@ -134,6 +133,12 @@ mod browser;
 #[path = "browser_mobile.rs"]
 mod browser;
 
+#[cfg(desktop)]
+pub mod acp;
+#[cfg(mobile)]
+#[path = "acp_mobile.rs"]
+pub mod acp;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before any webview exists: moves WebView2 data next to the exe when a
@@ -171,6 +176,8 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
 
     let builder = builder.manage(watcher::WatcherState::new());
+    #[cfg(desktop)]
+    let builder = builder.manage(acp::AcpState::new());
     #[cfg(not(target_os = "android"))]
     let builder = builder.manage(recipe_runner::RecipesState::new());
     let app = builder
@@ -294,8 +301,16 @@ pub fn run() {
             ai_proxy::ai_cancel,
             ai_proxy::ai_verify_key,
             ai_proxy::ai_list_models,
-            claude_cli::claude_chat,
-            claude_cli::claude_cancel,
+            acp::acp_list_agents,
+            acp::acp_start_session,
+            acp::acp_load_session,
+            acp::acp_send,
+            acp::acp_cancel,
+            acp::acp_stop,
+            acp::acp_respond_permission,
+            acp::acp_set_mode,
+            acp::acp_list_sessions,
+            acp::acp_read_session,
             ollama::ollama_detect,
             ollama::ollama_pull,
             ollama::ollama_cancel_pull,
