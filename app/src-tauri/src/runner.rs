@@ -986,25 +986,6 @@ pub fn run_with(initial_file: Option<String>) {
                 dev_bridge::spawn(app.handle().clone());
             }
 
-            // Debug builds: open devtools shortly after launch.
-            //
-            // Deferred rather than called inline — at setup() the WKWebView is
-            // not initialised yet and the call silently no-ops. This app also
-            // builds its own menu (replacing Tauri's default, which is where
-            // ⌥⌘I normally lives), so View → Toggle Developer Tools is the
-            // manual fallback.
-            //
-            // This lives here and not in lib.rs: on desktop main.rs calls
-            // `runner::run_with`, so lib.rs's setup never runs.
-            #[cfg(all(debug_assertions, not(any(target_os = "android", target_os = "ios"))))]
-            if let Some(win) = app.get_webview_window("main") {
-                let win_dt = win.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-                    win_dt.open_devtools();
-                });
-            }
-
             // v4.0 Pillar 2 — start the cron-trigger loop. Sleeps until
             // a `schedule` recipe is due; harmless when no recipes are
             // loaded yet (the loop polls workspace state every minute
