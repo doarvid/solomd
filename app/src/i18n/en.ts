@@ -1488,6 +1488,22 @@ export const en = {
     periodEmptyTitle: 'Nothing in this window',
     periodEmptySub: 'No inbox notes captured in this period. {n} waiting under All.',
     showAll: 'Show all',
+    pendingImport: {
+      heading: 'Pending imports',
+      count: '{n} waiting',
+      refresh: 'Refresh',
+      refreshFailed: 'Refresh failed: {error}',
+      importAll: 'Import all',
+      import: 'Import',
+      importing: 'Importing…',
+      ignore: 'Ignore',
+      importedOne: 'Imported “{title}”',
+      importedAll: 'Imported {n} items',
+      importFinished: '{ok} imported · {failed} failed',
+      importFailed: 'Could not import “{title}”: {error}',
+      importWarning: 'Imported “{title}” with a warning: {error}',
+      sourceGithub: 'GitHub Star',
+    },
     // Settings (Editor) — inbox workflow toggles.
     workflowSetting: 'Inbox workflow',
     workflowSettingHint:

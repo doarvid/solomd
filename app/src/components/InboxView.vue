@@ -37,12 +37,14 @@ import { inboxCapturedAt, inboxLinkCount } from '../lib/inbox-filter';
 import { inferColumns, getCellValue, type ColumnDef } from '../lib/bases';
 import { useI18n } from '../i18n';
 import { INBOX_CLOSE_EVENT } from '../composables/useInboxView';
+import { useCollectionsStore } from '../stores/collections';
 
 const inbox = useInbox();
 const files = useFiles();
 const tabs = useTabsStore();
 const settings = useSettingsStore();
 const idx = useWorkspaceIndexStore();
+const collections = useCollectionsStore();
 const { t, lang } = useI18n();
 // #180 — the chord in this sentence comes from the user's bindings.
 const macChord = usesCommandKey();
@@ -72,6 +74,18 @@ const totalInbox = computed(() => counts.value.all);
 const activePath = computed(() => tabs.activeTab?.filePath ?? null);
 /** Whether ⌘E / the footer button can organize-and-advance right now. */
 const canOrganize = computed(() => inbox.activeIsInbox.value);
+
+const pendingItems = computed(() => collections.pendingItems);
+function isImporting(id: string): boolean {
+  return collections.importingIds.includes(id);
+}
+async function importItem(id: string) {
+  const item = pendingItems.value.find((i) => i.id === id);
+  if (item) await collections.importOne(item);
+}
+async function dismissItem(id: string) {
+  await collections.dismiss(id);
+}
 
 /** Up to two front-matter property chips per row (excluding the inbox flag
  *  itself), reusing the bases column inference so we surface whatever the
@@ -194,6 +208,8 @@ function onKeydown(e: KeyboardEvent) {
 onMounted(() => {
   inbox.setInboxViewOpen(true);
   window.addEventListener('keydown', onKeydown);
+  void collections.load();
+  void collections.maybeRefresh();
 });
 onBeforeUnmount(() => {
   inbox.setInboxViewOpen(false);
@@ -238,6 +254,75 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </header>
+
+    <section v-if="pendingItems.length" class="inbox-view__pending">
+      <div class="inbox-view__pending-head">
+        <h2 class="inbox-view__pending-title">{{ t('inbox.pendingImport.heading') }}</h2>
+        <span class="inbox-view__pending-count">
+          {{ t('inbox.pendingImport.count', { n: String(pendingItems.length) }) }}
+        </span>
+        <span class="pg-spacer" />
+        <button
+          class="rp-btn"
+          type="button"
+          :disabled="collections.refreshing"
+          @click="collections.refresh()"
+        >
+          {{ t('inbox.pendingImport.refresh') }}
+        </button>
+        <button
+          class="rp-btn rp-btn--primary"
+          type="button"
+          :disabled="collections.importingIds.length > 0"
+          @click="collections.importAll()"
+        >
+          {{ t('inbox.pendingImport.importAll') }}
+        </button>
+      </div>
+
+      <p v-if="collections.lastError" class="inbox-view__pending-error">
+        {{ t('inbox.pendingImport.refreshFailed', { error: collections.lastError }) }}
+      </p>
+
+      <div class="inbox-view__pending-list" role="list">
+        <div
+          v-for="item in pendingItems"
+          :key="item.id"
+          class="inbox-view__pending-row"
+          role="listitem"
+        >
+          <span class="inbox-view__pending-main">
+            <span class="inbox-view__pending-name">{{ item.title }}</span>
+            <span v-if="item.description" class="inbox-view__pending-desc">
+              {{ item.description }}
+            </span>
+            <span class="inbox-view__pending-sub">
+              <span class="rp-chip">{{ t('inbox.pendingImport.sourceGithub') }}</span>
+              <span v-if="item.language" class="rp-chip">{{ item.language }}</span>
+              <span v-if="item.stars != null" class="rp-chip">★ {{ item.stars }}</span>
+            </span>
+          </span>
+          <span class="inbox-view__pending-actions">
+            <button
+              class="rp-btn rp-btn--primary"
+              type="button"
+              :disabled="isImporting(item.id)"
+              @click="importItem(item.id)"
+            >
+              {{ isImporting(item.id) ? t('inbox.pendingImport.importing') : t('inbox.pendingImport.import') }}
+            </button>
+            <button
+              class="rp-btn"
+              type="button"
+              :disabled="isImporting(item.id)"
+              @click="dismissItem(item.id)"
+            >
+              {{ t('inbox.pendingImport.ignore') }}
+            </button>
+          </span>
+        </div>
+      </div>
+    </section>
 
     <!-- True inbox-zero: nothing flagged inbox anywhere. -->
     <div v-if="totalInbox === 0" class="inbox-view__zero">
@@ -466,5 +551,73 @@ onBeforeUnmount(() => {
 .inbox-view__hint {
   color: var(--text-3);
   font-size: 12px;
+}
+.inbox-view__pending {
+  margin: 12px 16px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--bg-elev);
+  max-height: 44vh;
+  overflow: auto;
+}
+.inbox-view__pending-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.inbox-view__pending-title {
+  margin: 0;
+  font-size: 14px;
+}
+.inbox-view__pending-count {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.inbox-view__pending-error {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--danger);
+}
+.inbox-view__pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.inbox-view__pending-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+.inbox-view__pending-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.inbox-view__pending-name {
+  font-weight: 600;
+}
+.inbox-view__pending-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.inbox-view__pending-sub {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.inbox-view__pending-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 </style>
