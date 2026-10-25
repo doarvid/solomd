@@ -154,10 +154,13 @@ mod github_readme;
 mod bookmarks;
 #[cfg(desktop)]
 #[path = "browser.rs"]
-mod browser;
+pub(crate) mod browser;
 #[cfg(mobile)]
 #[path = "browser_mobile.rs"]
-mod browser;
+pub(crate) mod browser;
+#[cfg(desktop)]
+#[path = "collector.rs"]
+mod collector;
 
 // Agent panel — persistent ACP sessions. Same dual-root requirement as the
 // browser: the desktop binary's handler list has to name the module too.
@@ -918,6 +921,12 @@ pub fn run_with(initial_file: Option<String>) {
             collections::collections_dismiss,
             #[cfg(not(target_os = "android"))]
             collections::collections_clear_history,
+            #[cfg(desktop)]
+            collector::collector_status,
+            #[cfg(desktop)]
+            collector::collector_harvest,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_upsert_items,
         ])
         .on_menu_event(|app_handle, event| {
             let id = event.id().0.clone();

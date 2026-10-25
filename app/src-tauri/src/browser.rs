@@ -35,7 +35,8 @@ use std::sync::Mutex;
 use base64::Engine as _;
 use once_cell::sync::Lazy;
 use tauri::{
-    webview::WebviewBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl,
+    webview::{PageLoadEvent, WebviewBuilder},
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl,
 };
 
 // `super::`, not `crate::`: this file is compiled into two roots (the lib via
@@ -43,6 +44,7 @@ use tauri::{
 // resolves to the crate root in both; `crate::browser_types` would only work
 // in one.
 use super::browser_types::CapturePayload;
+use super::collector;
 
 /// 活着的子 webview，按前端 tab id 索引。
 static WEBVIEWS: Lazy<Mutex<HashMap<String, tauri::Webview>>> =
@@ -84,6 +86,10 @@ fn label_for(tab_id: &str) -> String {
 /// 数据通过赋值 `location.href` 指向哨兵域名送出，由 on_navigation 截获。
 const CAPTURE_SCRIPT: &str = include_str!("capture_script.js");
 
+/// Collector 专用脚本：probe / harvest / render。只在隐藏采集 webview
+/// 里注入，普通浏览器标签页不加载它。
+const COLLECTOR_SCRIPT: &str = include_str!("collector_script.js");
+
 /// 拆解哨兵 URL：`/capture/<kind>/<n>/<total>#<b64片>`。
 ///
 /// 返回 `(kind, index, total, chunk)`。不是哨兵 URL、或格式不对，返回 None。
@@ -99,7 +105,10 @@ fn parse_sentinel(url: &tauri::Url) -> Option<(String, usize, usize, String)> {
     }
     let kind = segs.next()?.to_string();
     // kind 只用来区分事件名，白名单化，别让页面塞任意字符串进来。
-    if kind != "capture" && kind != "selection" {
+    if !matches!(
+        kind.as_str(),
+        "capture" | "selection" | "probe" | "collect" | "render"
+    ) {
         return None;
     }
     let index: usize = segs.next()?.parse().ok()?;
@@ -158,7 +167,18 @@ fn accept_chunk(app: &AppHandle, label: &str, url: &tauri::Url) {
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(flattened) else {
         return;
     };
-    let Ok(payload) = serde_json::from_slice::<CapturePayload>(&bytes) else {
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return;
+    };
+
+    // Collector 的数据不广播给前端浏览器 store：它没有对应的 tab。
+    // 交给等待中的采集/渲染请求，其余两 kind 仍走原事件。
+    if collector::is_collector_label(label) {
+        collector::deliver(label, &kind, payload);
+        return;
+    }
+
+    let Ok(payload) = serde_json::from_value::<CapturePayload>(payload) else {
         return;
     };
 
@@ -172,6 +192,117 @@ fn accept_chunk(app: &AppHandle, label: &str, url: &tauri::Url) {
         event,
         serde_json::json!({ "tabId": tab_id, "payload": payload }),
     );
+}
+
+/// 清掉某个 webview + kind 的残片。collector 开始新一轮请求时调用，
+/// 否则上一轮超时留下的空洞会把新 payload 拼坏。
+pub(crate) fn clear_chunks(label: &str, kind: &str) {
+    if let Ok(mut map) = PENDING_CHUNKS.lock() {
+        map.remove(&(label.to_string(), kind.to_string()));
+    }
+}
+
+/// 一个处理器干两件事：回传 + 放行白名单。
+///   哨兵域名  → 收片，返回 false 取消导航（页面不跳转，登录态不丢）
+///   http/https → 放行
+///   其他一切   → 取消
+fn handle_navigation(app: &AppHandle, label: &str, u: &tauri::Url) -> bool {
+    if u.host_str() == Some(SENTINEL_HOST) {
+        accept_chunk(app, label, u);
+        return false;
+    }
+    matches!(u.scheme(), "http" | "https")
+}
+
+/// Collector 每次 load Finished 都把代数 +1。等待方订阅 watch，
+/// 不会因为"检查之后、await 之前"的加载而永久卡住。
+static LOADED: Lazy<tokio::sync::watch::Sender<u64>> =
+    Lazy::new(|| tokio::sync::watch::channel(0u64).0);
+
+pub(crate) fn collector_load_generation() -> u64 {
+    *LOADED.subscribe().borrow()
+}
+
+pub(crate) async fn wait_collector_loaded(after: u64, timeout: std::time::Duration) -> Result<(), String> {
+    let mut rx = LOADED.subscribe();
+    let wait = async {
+        while *rx.borrow() <= after {
+            rx.changed()
+                .await
+                .map_err(|_| "collector load channel closed".to_string())?;
+        }
+        Ok::<(), String>(())
+    };
+    tokio::time::timeout(timeout, wait)
+        .await
+        .map_err(|_| "collector load timed out".to_string())?
+}
+
+/// 创建 collector 后隐藏。隐藏仍然会让 WebKit 跑脚本 —— 这是采集和
+/// 渲染兜底成立的前提；Task 4 的真机 spike 验证这一点。
+pub(crate) fn ensure_collector(app: &AppHandle) -> Result<(), String> {
+    let tab_id = collector::COLLECTOR_ID;
+    if WEBVIEWS
+        .lock()
+        .map_err(|e| e.to_string())?
+        .contains_key(tab_id)
+    {
+        return Ok(());
+    }
+
+    let parsed: tauri::Url = "https://www.toutiao.com/"
+        .parse()
+        .map_err(|e| format!("bad url: {e}"))?;
+    let label = label_for(tab_id);
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    let app_for_nav = app.clone();
+    let label_for_nav = label.clone();
+
+    let webview = window
+        .add_child(
+            WebviewBuilder::new(label, WebviewUrl::External(parsed))
+                .initialization_script(CAPTURE_SCRIPT)
+                .initialization_script(COLLECTOR_SCRIPT)
+                .on_page_load(|_wv, payload| {
+                    if matches!(payload.event(), PageLoadEvent::Finished) {
+                        LOADED.send_modify(|n| *n += 1);
+                    }
+                })
+                .on_navigation(move |u| handle_navigation(&app_for_nav, &label_for_nav, &u)),
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(1200.0, 2000.0),
+        )
+        .map_err(|e| format!("add_child failed: {e}"))?;
+
+    let _ = webview.hide();
+    WEBVIEWS
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(tab_id.to_string(), webview);
+    Ok(())
+}
+
+pub(crate) fn collector_navigate(url: &str) -> Result<(), String> {
+    let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("only http/https allowed".into());
+    }
+    let map = WEBVIEWS.lock().map_err(|e| e.to_string())?;
+    let wv = map
+        .get(collector::COLLECTOR_ID)
+        .ok_or_else(|| "collector not created".to_string())?;
+    wv.navigate(parsed).map_err(|e| e.to_string())
+}
+
+pub(crate) fn collector_eval(script: &str) -> Result<(), String> {
+    let map = WEBVIEWS.lock().map_err(|e| e.to_string())?;
+    let wv = map
+        .get(collector::COLLECTOR_ID)
+        .ok_or_else(|| "collector not created".to_string())?;
+    wv.eval(script).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -209,17 +340,7 @@ pub async fn browser_create(
         .add_child(
             WebviewBuilder::new(label, WebviewUrl::External(parsed))
                 .initialization_script(CAPTURE_SCRIPT)
-                // 一个处理器干两件事：回传 + 放行白名单。
-                //   哨兵域名  → 收片，返回 false 取消导航（页面不跳转，登录态不丢）
-                //   http/https → 放行
-                //   其他一切   → 取消
-                .on_navigation(move |u| {
-                    if u.host_str() == Some(SENTINEL_HOST) {
-                        accept_chunk(&app_for_nav, &label_for_nav, u);
-                        return false;
-                    }
-                    matches!(u.scheme(), "http" | "https")
-                }),
+                .on_navigation(move |u| handle_navigation(&app_for_nav, &label_for_nav, &u)),
             LogicalPosition::new(x, y),
             LogicalSize::new(w, h),
         )
@@ -359,6 +480,14 @@ mod tests {
     fn parses_selection_kind() {
         let got = parse_sentinel(&u("https://solomd.invalid/capture/selection/0/1#BB"));
         assert_eq!(got, Some(("selection".into(), 0, 1, "BB".into())));
+    }
+
+    #[test]
+    fn parses_collector_kinds() {
+        for kind in ["probe", "collect", "render"] {
+            let s = format!("https://solomd.invalid/capture/{kind}/0/1#BB");
+            assert_eq!(parse_sentinel(&u(&s)), Some((kind.into(), 0, 1, "BB".into())));
+        }
     }
 
     #[test]

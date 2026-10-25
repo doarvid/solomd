@@ -412,6 +412,7 @@ export const useBrowserStore = defineStore('browser', {
           url,
           fallbackTitle: title,
           sourceTitle: sourceTitle ?? null,
+          renderFallback: useSettingsStore().captureRenderFallback,
         });
         const failed = !!outcome.error && outcome.via === 'stub';
         this.linkStatus = { ...this.linkStatus, [key]: failed ? 'failed' : 'done' };

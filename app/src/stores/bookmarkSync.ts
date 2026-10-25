@@ -272,6 +272,7 @@ export const useBookmarkSyncStore = defineStore('bookmarkSync', {
               url: entry.url,
               fallbackTitle: entry.title,
               sourceTitle: null,
+              renderFallback: useSettingsStore().captureRenderFallback,
             });
             if (outcome.error) this.failed += 1;
             else this.captured += 1;

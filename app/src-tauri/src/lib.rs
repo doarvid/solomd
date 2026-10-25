@@ -131,10 +131,13 @@ pub mod bookmarks;
 #[cfg(not(target_os = "android"))]
 pub mod collections;
 #[cfg(desktop)]
-mod browser;
+pub(crate) mod browser;
 #[cfg(mobile)]
 #[path = "browser_mobile.rs"]
-mod browser;
+pub(crate) mod browser;
+/// 收藏源采集用的隐藏 webview（桌面独占）。
+#[cfg(desktop)]
+pub mod collector;
 
 #[cfg(desktop)]
 pub mod acp;
@@ -376,6 +379,12 @@ pub fn run() {
             collections::collections_dismiss,
             #[cfg(not(target_os = "android"))]
             collections::collections_clear_history,
+            #[cfg(desktop)]
+            collector::collector_status,
+            #[cfg(desktop)]
+            collector::collector_harvest,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_upsert_items,
             quick_capture::quick_capture_open,
             quick_capture::quick_capture_close,
             quick_capture::quick_capture_write,

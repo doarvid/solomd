@@ -515,6 +515,8 @@ interface Settings {
   bookmarkSyncFingerprint: string;
   // 收藏源（一期：GitHub Star）。默认关，避免用户没配 token 时反复报错。
   collectionGithubEnabled: boolean;
+  collectionToutiaoEnabled: boolean;
+  captureRenderFallback: boolean;
   collectionRefreshMinutes: number;
   // v4.3.0 PR #75 (beihai23) — transient (not persisted) snapshot of the
   // right-sidebar pane visibility taken when the sidebar is hidden, so
@@ -829,6 +831,8 @@ function defaults(): Settings {
     bookmarkSyncIntervalMinutes: 30,
     bookmarkSyncFingerprint: '',
     collectionGithubEnabled: false,
+    collectionToutiaoEnabled: false,
+    captureRenderFallback: true,
     collectionRefreshMinutes: 30,
     _rsPanesBeforeHide: null,
   };
