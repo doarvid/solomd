@@ -379,6 +379,12 @@ pub fn run() {
             collections::collections_dismiss,
             #[cfg(not(target_os = "android"))]
             collections::collections_clear_history,
+            #[cfg(desktop)]
+            collector::collector_status,
+            #[cfg(desktop)]
+            collector::collector_harvest,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_upsert_items,
             quick_capture::quick_capture_open,
             quick_capture::quick_capture_close,
             quick_capture::quick_capture_write,

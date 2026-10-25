@@ -183,7 +183,7 @@ fn map_star(entry: StarredEntry) -> PendingItem {
     }
 }
 
-fn upsert_items(state: &mut CollectionsState, incoming: Vec<PendingItem>) -> u32 {
+fn merge_items(state: &mut CollectionsState, incoming: Vec<PendingItem>) -> u32 {
     let mut added = 0u32;
     for item in incoming {
         if let Some(existing) = state.items.iter_mut().find(|i| i.id == item.id) {
@@ -194,6 +194,110 @@ fn upsert_items(state: &mut CollectionsState, incoming: Vec<PendingItem>) -> u32
         }
     }
     added
+}
+
+/// 页面脚本回传的原始候选。URL 形态与标题长度在这里才校验 ——
+/// 注入脚本里写不动单测，筛选逻辑必须留在 Rust。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawItem {
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+pub const MAX_TOUTIAO_ITEMS: usize = 200;
+
+fn is_toutiao_url(url: &str) -> bool {
+    let Ok(parsed) = tauri::Url::parse(url) else {
+        return false;
+    };
+    matches!(
+        parsed.host_str(),
+        Some("toutiao.com") | Some("www.toutiao.com") | Some("m.toutiao.com")
+    ) && ["/article/", "/w/", "/video/", "/i/"]
+        .iter()
+        .any(|prefix| parsed.path().starts_with(prefix))
+}
+
+fn map_toutiao(raw: RawItem) -> Option<PendingItem> {
+    let title = raw.title.trim().to_string();
+    if title.chars().count() < 4 {
+        return None;
+    }
+    let url = super::capture_store::normalize_url(&raw.url);
+    if url.is_empty() || !is_toutiao_url(&url) {
+        return None;
+    }
+    Some(PendingItem {
+        id: format!("toutiao:{url}"),
+        source: "toutiao".to_string(),
+        title,
+        url,
+        saved_at: None,
+        description: None,
+        language: None,
+        stars: None,
+        topics: Vec::new(),
+    })
+}
+
+/// 过滤 + 去重 + 截断。返回 `(items, cap_hit)`。
+pub fn filter_toutiao_items(raw: Vec<RawItem>) -> (Vec<PendingItem>, bool) {
+    let mut out: Vec<PendingItem> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut cap_hit = false;
+    for entry in raw {
+        let Some(item) = map_toutiao(entry) else {
+            continue;
+        };
+        if !seen.insert(item.url.clone()) {
+            continue;
+        }
+        if out.len() >= MAX_TOUTIAO_ITEMS {
+            cap_hit = true;
+            break;
+        }
+        out.push(item);
+    }
+    (out, cap_hit)
+}
+
+/// 把一次采集结果写进缓存。未知来源直接拒绝，避免页面 data 变成
+/// 别的源的条目；条目只增不删 —— 已导入/忽略由 dismissed/imported 过滤。
+pub fn upsert_items(
+    state: &mut CollectionsState,
+    source: &str,
+    raw: Vec<RawItem>,
+    truncated: bool,
+) -> Result<RefreshOutcome, String> {
+    if source != "toutiao" {
+        return Err(format!("unknown collection source: {source}"));
+    }
+    let (incoming, cap_hit) = filter_toutiao_items(raw);
+    let total = incoming.len() as u32;
+    let added = merge_items(state, incoming);
+    state
+        .last_refresh
+        .insert(source.to_string(), now_ms());
+    Ok(RefreshOutcome {
+        added,
+        total,
+        truncated: truncated || cap_hit,
+    })
+}
+
+#[tauri::command]
+pub fn collections_upsert_items(
+    workspace: String,
+    source: String,
+    items: Vec<RawItem>,
+    has_more: Option<bool>,
+) -> Result<RefreshOutcome, String> {
+    let workspace = PathBuf::from(workspace);
+    mutate_state(&workspace, |state| {
+        upsert_items(state, &source, items, has_more.unwrap_or(false))
+    })?
 }
 
 async fn fetch_starred_page(token: &str, page: u32) -> Result<Vec<StarredEntry>, String> {
@@ -245,7 +349,7 @@ pub async fn collections_refresh_github(workspace: String) -> Result<RefreshOutc
 
     // 网络成功之后才动缓存：刷新失败绝不能清空待导入列表。
     let (added, total) = mutate_state(&workspace, |state| {
-        let added = upsert_items(state, incoming);
+        let added = merge_items(state, incoming);
         state.last_refresh.insert("github".to_string(), now_ms());
         (added, state.items.len() as u32)
     })?;
@@ -422,7 +526,129 @@ mod tests {
         }
     }
 
+    fn raw(url: &str, title: &str) -> RawItem {
+        RawItem {
+            url: url.to_string(),
+            title: title.to_string(),
+        }
+    }
+
     #[test]
+    fn toutiao_filter_keeps_only_known_paths() {
+        let (items, capped) = filter_toutiao_items(vec![
+            raw("https://www.toutiao.com/article/123/", "一篇文章"),
+            raw("https://www.toutiao.com/w/456/", "微头条标题"),
+            raw("https://www.toutiao.com/video/789/", "视频标题"),
+            raw("https://www.toutiao.com/c/user/favourite/", "收藏页"),
+            raw("https://www.toutiao.com/", "首页"),
+        ]);
+        let urls: Vec<&str> = items.iter().map(|i| i.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://www.toutiao.com/article/123",
+                "https://www.toutiao.com/w/456",
+                "https://www.toutiao.com/video/789",
+            ]
+        );
+        assert!(!capped);
+        assert!(items.iter().all(|i| i.source == "toutiao"));
+        assert!(items[0].id.starts_with("toutiao:"));
+    }
+
+    #[test]
+    fn toutiao_filter_drops_short_titles_and_dedupes() {
+        let (items, _) = filter_toutiao_items(vec![
+            raw("https://www.toutiao.com/article/1/?utm_source=x", "足够长的标题"),
+            raw("https://www.toutiao.com/article/1/", "重复的另一条"),
+            raw("https://www.toutiao.com/article/2/", "短"),
+        ]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "足够长的标题");
+    }
+
+    #[test]
+    fn toutiao_filter_caps_at_the_limit() {
+        let batch: Vec<RawItem> = (0..MAX_TOUTIAO_ITEMS + 5)
+            .map(|n| raw(&format!("https://www.toutiao.com/article/{n}/"), "标题够长"))
+            .collect();
+        let (items, capped) = filter_toutiao_items(batch);
+        assert_eq!(items.len(), MAX_TOUTIAO_ITEMS);
+        assert!(capped);
+    }
+
+    #[test]
+    fn upsert_rejects_an_unknown_source() {
+        let mut state = default_state();
+        let err = upsert_items(&mut state, "mastodon", vec![raw("https://x.test/a", "标题够长")], false)
+            .unwrap_err();
+        assert!(err.contains("unknown collection source"));
+        assert!(state.items.is_empty());
+    }
+
+    #[test]
+    fn upsert_is_idempotent_and_records_the_source_timestamp() {
+        let mut state = default_state();
+        let first = upsert_items(
+            &mut state,
+            "toutiao",
+            vec![raw("https://www.toutiao.com/article/1/", "标题够长")],
+            false,
+        )
+        .unwrap();
+        assert_eq!(first.added, 1);
+        assert_eq!(first.total, 1);
+        let second = upsert_items(
+            &mut state,
+            "toutiao",
+            vec![raw("https://www.toutiao.com/article/1/", "标题够长")],
+            false,
+        )
+        .unwrap();
+        assert_eq!(second.added, 0);
+        assert_eq!(second.total, 1);
+        assert!(state.last_refresh.contains_key("toutiao"));
+        assert_eq!(state.items.len(), 1);
+    }
+
+    #[test]
+    fn upsert_marks_truncation_from_either_side() {
+        let mut state = default_state();
+        let out = upsert_items(
+            &mut state,
+            "toutiao",
+            vec![raw("https://www.toutiao.com/w/1/", "标题够长")],
+            true,
+        )
+        .unwrap();
+        assert!(out.truncated);
+    }
+
+    #[test]
+    fn upsert_does_not_resurrect_dismissed_or_imported_ids() {
+        let mut state = default_state();
+        let first = upsert_items(
+            &mut state,
+            "toutiao",
+            vec![raw("https://www.toutiao.com/article/9/", "标题够长")],
+            false,
+        )
+        .unwrap();
+        let id = state.items[0].id.clone();
+        state.dismissed.push(id.clone());
+        state.imported.insert(id.clone(), "/vault/a.md".to_string());
+        let second = upsert_items(
+            &mut state,
+            "toutiao",
+            vec![raw("https://www.toutiao.com/article/9/", "标题够长")],
+            false,
+        )
+        .unwrap();
+        assert_eq!(first.added, 1);
+        assert_eq!(second.added, 0);
+        assert_eq!(state.dismissed, vec![id.clone()]);
+        assert!(state.imported.contains_key(&id));
+    }    #[test]
     fn cache_round_trip_keeps_items() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = default_state();
@@ -531,7 +757,7 @@ mod tests {
 
         let mut fresh = item("github:a/one");
         fresh.stars = Some(7);
-        let added = upsert_items(
+        let added = merge_items(
             &mut state,
             vec![fresh, item("github:a/two")],
         );

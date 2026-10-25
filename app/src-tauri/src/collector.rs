@@ -99,6 +99,90 @@ pub async fn navigate_and_wait(
     Ok(())
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectorStatus {
+    /// `ready` | `login_required`
+    pub state: String,
+    pub url: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarvestOutcome {
+    pub items: Vec<super::collections::RawItem>,
+    pub has_more: bool,
+    pub login_required: bool,
+}
+
+async fn probe_once(app: &AppHandle) -> Result<(bool, String), String> {
+    begin("probe");
+    browser::collector_eval("window.__solomdCollector && window.__solomdCollector.probe()")?;
+    let value = wait_for("probe", Duration::from_secs(10)).await?;
+    let logged_in = value
+        .get("loggedIn")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let reason = value
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Ok((logged_in, reason))
+}
+
+/// 打开来源页并报告登录态。失败（导航、超时）走 Err，由前端做源级报错。
+#[tauri::command]
+pub async fn collector_status(app: AppHandle, source: String) -> Result<CollectorStatus, String> {
+    let url = source_url(&source)?;
+    navigate_and_wait(&app, url, Duration::from_secs(30)).await?;
+    let (logged_in, reason) = probe_once(&app).await?;
+    Ok(CollectorStatus {
+        state: if logged_in { "ready" } else { "login_required" }.to_string(),
+        url: url.to_string(),
+        error: if logged_in { None } else { Some(reason) },
+    })
+}
+
+/// 采集当前来源页。未登录时返回空的 `items` + `login_required`，
+/// 不写缓存、也不报错 —— 前端据此展示登录引导。
+#[tauri::command]
+pub async fn collector_harvest(app: AppHandle, source: String) -> Result<HarvestOutcome, String> {
+    let url = source_url(&source)?;
+    navigate_and_wait(&app, url, Duration::from_secs(30)).await?;
+
+    let (logged_in, _reason) = probe_once(&app).await?;
+    if !logged_in {
+        return Ok(HarvestOutcome {
+            items: Vec::new(),
+            has_more: false,
+            login_required: true,
+        });
+    }
+
+    begin("collect");
+    browser::collector_eval("window.__solomdCollector && window.__solomdCollector.harvest()")?;
+    let value = wait_for("collect", Duration::from_secs(45)).await?;
+    let items = value
+        .get("items")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("bad harvest payload: {e}"))?
+        .unwrap_or_default();
+    let has_more = value
+        .get("hasMore")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    Ok(HarvestOutcome {
+        items,
+        has_more,
+        login_required: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

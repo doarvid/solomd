@@ -921,6 +921,12 @@ pub fn run_with(initial_file: Option<String>) {
             collections::collections_dismiss,
             #[cfg(not(target_os = "android"))]
             collections::collections_clear_history,
+            #[cfg(desktop)]
+            collector::collector_status,
+            #[cfg(desktop)]
+            collector::collector_harvest,
+            #[cfg(not(target_os = "android"))]
+            collections::collections_upsert_items,
         ])
         .on_menu_event(|app_handle, event| {
             let id = event.id().0.clone();
