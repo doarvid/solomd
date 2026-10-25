@@ -27,6 +27,24 @@ interface ImportOutcome {
   error: string | null;
 }
 
+interface CollectorStatus {
+  state: 'ready' | 'login_required';
+  url: string;
+  error: string | null;
+}
+
+interface HarvestOutcome {
+  items: { url: string; title: string }[];
+  hasMore: boolean;
+  loginRequired: boolean;
+}
+
+interface UpsertOutcome {
+  added: number;
+  total: number;
+  truncated: boolean;
+}
+
 /** 归一化 URL 缓存：id → capture_normalize_url 的结果。进程内即可。 */
 const normalizedUrls = new Map<string, string>();
 
@@ -41,6 +59,8 @@ export const useCollectionsStore = defineStore('collections', {
     importingAll: false,
     importDone: 0,
     importTotal: 0,
+    /** Toutiao probe said the session is logged out; stop auto-retrying. */
+    toutiaoLoginRequired: false,
     lastError: null as string | null,
   }),
 
@@ -73,8 +93,15 @@ export const useCollectionsStore = defineStore('collections', {
     pendingItems(): PendingItem[] {
       const index = useWorkspaceIndexStore();
       if (!this.available || !index.ready) return [];
-      if (!useSettingsStore().collectionGithubEnabled) return [];
-      return this.state ? visibleItems(this.state, this.dedupe, normalizedUrls) : [];
+      const settings = useSettingsStore();
+      if (!this.state) return [];
+      return visibleItems(this.state, this.dedupe, normalizedUrls).filter((item) =>
+        item.source === 'github'
+          ? settings.collectionGithubEnabled
+          : item.source === 'toutiao'
+            ? settings.collectionToutiaoEnabled
+            : true,
+      );
     },
   },
 
@@ -116,13 +143,22 @@ export const useCollectionsStore = defineStore('collections', {
     },
 
     async maybeRefresh(force = false) {
-      if (!this.available) return;
+      if (!this.available || this.refreshing) return;
       const settings = useSettingsStore();
-      if (!settings.collectionGithubEnabled || this.refreshing) return;
-      const last = this.state?.lastRefresh?.github ?? 0;
       const interval = Math.max(1, settings.collectionRefreshMinutes) * 60_000;
-      if (!force && Date.now() - last < interval) return;
-      await this.refresh();
+      const due = (source: string) =>
+        force || Date.now() - (this.state?.lastRefresh?.[source] ?? 0) >= interval;
+
+      if (settings.collectionGithubEnabled && due('github')) {
+        await this.refresh();
+      }
+      if (
+        settings.collectionToutiaoEnabled &&
+        !this.toutiaoLoginRequired &&
+        due('toutiao')
+      ) {
+        await this.refreshToutiao(false);
+      }
     },
 
     /** No token = stay silent, per spec §5. A command failure is not a
@@ -152,6 +188,58 @@ export const useCollectionsStore = defineStore('collections', {
       } finally {
         this.refreshing = false;
       }
+    },
+
+    /** Toutiao has no token: the hidden collector probes the session instead.
+     *  `manual` lets the settings card retry after the user has logged in;
+     *  the scheduled path respects the login-required latch. */
+    async refreshToutiao(manual: boolean) {
+      if (!this.available || this.refreshing) return;
+      if (!useSettingsStore().collectionToutiaoEnabled && !manual) return;
+      if (this.toutiaoLoginRequired && !manual) return;
+      this.refreshing = true;
+      this.lastError = null;
+      try {
+        const status = await invoke<CollectorStatus>('collector_status', {
+          source: 'toutiao',
+        });
+        if (status.state !== 'ready') {
+          this.toutiaoLoginRequired = true;
+          return;
+        }
+        this.toutiaoLoginRequired = false;
+
+        const harvested = await invoke<HarvestOutcome>('collector_harvest', {
+          source: 'toutiao',
+        });
+        if (harvested.loginRequired) {
+          this.toutiaoLoginRequired = true;
+          return;
+        }
+
+        const outcome = await invoke<UpsertOutcome>('collections_upsert_items', {
+          workspace: useWorkspaceStore().currentFolder,
+          source: 'toutiao',
+          items: harvested.items,
+          hasMore: harvested.hasMore,
+        });
+        this.truncated = outcome.truncated;
+        await this.load();
+      } catch (e) {
+        this.lastError = String(e);
+      } finally {
+        this.refreshing = false;
+      }
+    },
+
+    /** 登录成功后由设置卡调用：先探活，成功才打开开关。 */
+    async connectToutiao(): Promise<boolean> {
+      const settings = useSettingsStore();
+      await this.refreshToutiao(true);
+      if (this.toutiaoLoginRequired || this.lastError) return false;
+      settings.collectionToutiaoEnabled = true;
+      settings.persist();
+      return true;
     },
 
     async importOne(item: PendingItem, reload = true): Promise<{ ok: boolean }> {

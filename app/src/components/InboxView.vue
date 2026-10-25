@@ -31,6 +31,7 @@ import '../styles/panels.css';
 import { useInbox, type InboxPeriod } from '../composables/useInbox';
 import { useFiles } from '../composables/useFiles';
 import { useTabsStore } from '../stores/tabs';
+import { useWorkspaceStore } from '../stores/workspace';
 import { useSettingsStore } from '../stores/settings';
 import { useWorkspaceIndexStore, type IndexEntry } from '../stores/workspaceIndex';
 import { inboxCapturedAt, inboxLinkCount } from '../lib/inbox-filter';
@@ -46,6 +47,7 @@ const tabs = useTabsStore();
 const settings = useSettingsStore();
 const idx = useWorkspaceIndexStore();
 const collections = useCollectionsStore();
+const workspace = useWorkspaceStore();
 const { t, lang } = useI18n();
 // #180 — the chord in this sentence comes from the user's bindings.
 const macChord = usesCommandKey();
@@ -86,6 +88,25 @@ async function importItem(id: string) {
 }
 async function dismissItem(id: string) {
   await collections.dismiss(id);
+}
+function sourceLabel(item: PendingItem): string {
+  return item.source === 'toutiao'
+    ? t('inbox.pendingImport.sourceToutiao')
+    : t('inbox.pendingImport.sourceGithub');
+}
+/** Toutiao login must happen in the embedded browser so the collector's
+ *  data store sees the session afterwards. */
+function openToutiaoLogin() {
+  const dir = workspace.currentFolder ? `${workspace.currentFolder}/inbox` : '';
+  tabs.newBrowserTab({
+    url: 'https://www.toutiao.com/',
+    captureDir: dir,
+    refsDir: dir,
+    title: t('inbox.pendingImport.sourceToutiao'),
+  });
+}
+async function recollectToutiao() {
+  await collections.connectToutiao();
 }
 
 /** Up to two front-matter property chips per row (excluding the inbox flag
@@ -268,6 +289,20 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <div
+      v-if="settings.collectionToutiaoEnabled && collections.toutiaoLoginRequired"
+      class="inbox-view__login-hint"
+    >
+      <span>{{ t('inbox.pendingImport.toutiaoLoginHint') }}</span>
+      <span class="pg-spacer" />
+      <button class="rp-btn" type="button" @click="openToutiaoLogin">
+        {{ t('inbox.pendingImport.toutiaoOpenLogin') }}
+      </button>
+      <button class="rp-btn rp-btn--primary" type="button" @click="recollectToutiao">
+        {{ t('inbox.pendingImport.toutiaoRecollect') }}
+      </button>
+    </div>
+
     <section v-if="pendingItems.length" class="inbox-view__pending">
       <div class="inbox-view__pending-head">
         <h2 class="inbox-view__pending-title">{{ t('inbox.pendingImport.heading') }}</h2>
@@ -318,7 +353,7 @@ onBeforeUnmount(() => {
               {{ item.description }}
             </span>
             <span class="inbox-view__pending-sub">
-              <span class="rp-chip">{{ t('inbox.pendingImport.sourceGithub') }}</span>
+              <span class="rp-chip">{{ sourceLabel(item) }}</span>
               <span v-if="item.language" class="rp-chip">{{ item.language }}</span>
               <span v-if="item.stars != null" class="rp-chip">★ {{ item.stars }}</span>
               <span v-if="pendingSaved(item)" class="rp-chip">{{ pendingSaved(item) }}</span>
@@ -574,9 +609,19 @@ onBeforeUnmount(() => {
   color: var(--text-3);
   font-size: 12px;
 }
-.inbox-view__pending {
+.inbox-view__login-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 12px 16px 0;
-  border: 1px solid var(--border);
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: var(--fill-1);
+  color: var(--text-2);
+  font-size: 12px;
+}
+.inbox-view__pending {
+  margin: 12px 16px 0;  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 12px;
   background: var(--bg-elev);

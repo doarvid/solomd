@@ -33,6 +33,18 @@ const ITEM = {
   topics: [],
 };
 
+const TOUTIAO = {
+  id: 'toutiao:https://www.toutiao.com/article/1',
+  source: 'toutiao',
+  title: '头条文章标题',
+  url: 'https://www.toutiao.com/article/1',
+  savedAt: null,
+  description: null,
+  language: null,
+  stars: null,
+  topics: [],
+};
+
 function setup() {
   setActivePinia(createPinia());
   const workspace = useWorkspaceStore();
@@ -152,5 +164,55 @@ test('clearHistory reports failure instead of pretending success', async () => {
   stubBackend({ collections_clear_history: Promise.reject(new Error('disk full')) });
   const { collections } = setup();
   assert.equal(await collections.clearHistory(), false);
+});
+
+test('each source toggle hides only its own items', () => {
+  const { collections } = setup();
+  collections.state!.items.push(TOUTIAO);
+  const settings = useSettingsStore();
+
+  settings.collectionGithubEnabled = false;
+  settings.collectionToutiaoEnabled = true;
+  assert.deepEqual(collections.pendingItems.map((i) => i.source), ['toutiao']);
+
+  settings.collectionGithubEnabled = true;
+  settings.collectionToutiaoEnabled = false;
+  assert.deepEqual(collections.pendingItems.map((i) => i.source), ['github']);
+});
+
+test('a login-required probe stops before harvesting', async () => {
+  const calls = stubBackend({
+    collector_status: { state: 'login_required', url: '', error: 'no-avatar' },
+  });
+  const { collections } = setup();
+  useSettingsStore().collectionToutiaoEnabled = true;
+
+  await collections.refreshToutiao(true);
+
+  assert.ok(calls.includes('collector_status'));
+  assert.ok(!calls.includes('collector_harvest'));
+  assert.equal(collections.toutiaoLoginRequired, true);
+  assert.equal(collections.lastError, null);
+});
+
+test('a ready harvest upserts the items and reloads the cache', async () => {
+  const calls = stubBackend({
+    collector_status: { state: 'ready', url: '', error: null },
+    collector_harvest: {
+      items: [{ url: TOUTIAO.url, title: TOUTIAO.title }],
+      hasMore: false,
+      loginRequired: false,
+    },
+    collections_upsert_items: { added: 1, total: 1, truncated: false },
+  });
+  const { collections } = setup();
+  useSettingsStore().collectionToutiaoEnabled = true;
+
+  await collections.refreshToutiao(true);
+
+  assert.ok(calls.includes('collector_harvest'));
+  assert.ok(calls.includes('collections_upsert_items'));
+  assert.equal(collections.toutiaoLoginRequired, false);
+  assert.equal(calls.filter((c) => c === 'collections_load').length, 1);
 });
 

@@ -9,6 +9,8 @@ import { computed, onMounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useSettingsStore } from '../stores/settings';
 import { useCollectionsStore } from '../stores/collections';
+import { useTabsStore } from '../stores/tabs';
+import { useWorkspaceStore } from '../stores/workspace';
 import { useToastsStore } from '../stores/toasts';
 import { isMobile } from '../lib/platform';
 import { useI18n } from '../i18n';
@@ -16,11 +18,17 @@ import { useI18n } from '../i18n';
 const { t } = useI18n();
 const settings = useSettingsStore();
 const collections = useCollectionsStore();
+const tabs = useTabsStore();
+const workspace = useWorkspaceStore();
 const toasts = useToastsStore();
 const githubConnected = ref(false);
 
 const pendingCount = computed(() => collections.pendingItems.length);
+const toutiaoPending = computed(
+  () => collections.pendingItems.filter((i) => i.source === 'toutiao').length,
+);
 const lastRefresh = computed(() => collections.state?.lastRefresh?.github ?? 0);
+const lastToutiaoRefresh = computed(() => collections.state?.lastRefresh?.toutiao ?? 0);
 const lastRefreshLabel = computed(() => {
   if (!lastRefresh.value) return t('settings.collectionSources.never');
   return new Date(lastRefresh.value).toLocaleString();
@@ -44,6 +52,24 @@ function setMinutes(event: Event) {
 
 async function refreshNow() {
   await collections.refresh();
+}
+
+function openToutiaoLogin() {
+  const dir = workspace.currentFolder ? `${workspace.currentFolder}/inbox` : '';
+  tabs.newBrowserTab({
+    url: 'https://www.toutiao.com/',
+    captureDir: dir,
+    refsDir: dir,
+    title: t('settings.collectionSources.toutiaoHeading'),
+  });
+}
+
+async function collectToutiao() {
+  await collections.refreshToutiao(true);
+}
+
+function toggleToutiao() {
+  settings.persist();
 }
 
 function openGithubSettings() {
@@ -153,9 +179,67 @@ onMounted(() => {
     <div class="collection-sources__card">
       <div class="collection-sources__card-head">
         <strong>{{ t('settings.collectionSources.toutiaoHeading') }}</strong>
+        <span
+          class="collection-sources__status"
+          :class="{ 'is-on': settings.collectionToutiaoEnabled && !collections.toutiaoLoginRequired }"
+        >
+          {{
+            settings.collectionToutiaoEnabled && !collections.toutiaoLoginRequired
+              ? t('settings.collectionSources.connected')
+              : t('settings.collectionSources.toutiaoLoginNeeded')
+          }}
+        </span>
       </div>
-      <p class="collection-sources__hint">{{ t('settings.collectionSources.toutiaoSoon') }}</p>
+      <p class="collection-sources__hint">{{ t('settings.collectionSources.toutiaoHint') }}</p>
+
+      <div class="collection-sources__row">
+        <button class="rp-btn" type="button" @click="openToutiaoLogin">
+          {{ t('settings.collectionSources.toutiaoOpenLogin') }}
+        </button>
+        <button
+          class="rp-btn rp-btn--primary"
+          type="button"
+          :disabled="collections.refreshing || !collections.available"
+          @click="collectToutiao"
+        >
+          {{
+            collections.refreshing
+              ? t('settings.collectionSources.refreshing')
+              : t('settings.collectionSources.toutiaoCollect')
+          }}
+        </button>
+      </div>
+
+      <label class="collection-sources__row">
+        <input
+          v-model="settings.collectionToutiaoEnabled"
+          type="checkbox"
+          @change="toggleToutiao"
+        />
+        <span>{{ t('settings.collectionSources.toutiaoEnable') }}</span>
+      </label>
+
+      <div class="collection-sources__row">
+        <span class="collection-sources__hint">
+          {{ t('settings.collectionSources.lastRefresh') }} {{ lastToutiaoRefresh ? new Date(lastToutiaoRefresh).toLocaleString() : t('settings.collectionSources.never') }}
+        </span>
+        <span class="collection-sources__hint">
+          {{ t('settings.collectionSources.toutiaoPending', { n: String(toutiaoPending) }) }}
+        </span>
+      </div>
+      <p v-if="collections.toutiaoLoginRequired" class="collection-sources__hint">
+        {{ t('settings.collectionSources.toutiaoLoginHint') }}
+      </p>
+      <p v-if="collections.lastError" class="collection-sources__error">
+        {{ t('settings.collectionSources.lastError', { error: collections.lastError }) }}
+      </p>
     </div>
+
+    <label class="collection-sources__row">
+      <input v-model="settings.captureRenderFallback" type="checkbox" @change="persistToggle" />
+      <span>{{ t('settings.collectionSources.renderFallback') }}</span>
+    </label>
+    <p class="collection-sources__hint">{{ t('settings.collectionSources.renderFallbackHint') }}</p>
   </section>
 </template>
 
