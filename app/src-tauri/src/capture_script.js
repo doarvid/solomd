@@ -362,6 +362,9 @@
   // ------------------------------------------------ 对外接口
 
   window.__solomd = {
+    // collector_script.js 复用同一套分片发送逻辑，避免在页面里再抄一份。
+    _send: send,
+
     capture: function () {
       var convId = conversationId();
       var tok = token();

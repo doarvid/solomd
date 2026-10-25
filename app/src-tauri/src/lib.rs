@@ -131,10 +131,13 @@ pub mod bookmarks;
 #[cfg(not(target_os = "android"))]
 pub mod collections;
 #[cfg(desktop)]
-mod browser;
+pub(crate) mod browser;
 #[cfg(mobile)]
 #[path = "browser_mobile.rs"]
-mod browser;
+pub(crate) mod browser;
+/// 收藏源采集用的隐藏 webview（桌面独占）。
+#[cfg(desktop)]
+pub mod collector;
 
 #[cfg(desktop)]
 pub mod acp;

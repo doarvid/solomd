@@ -154,10 +154,13 @@ mod github_readme;
 mod bookmarks;
 #[cfg(desktop)]
 #[path = "browser.rs"]
-mod browser;
+pub(crate) mod browser;
 #[cfg(mobile)]
 #[path = "browser_mobile.rs"]
-mod browser;
+pub(crate) mod browser;
+#[cfg(desktop)]
+#[path = "collector.rs"]
+mod collector;
 
 // Agent panel — persistent ACP sessions. Same dual-root requirement as the
 // browser: the desktop binary's handler list has to name the module too.
