@@ -875,7 +875,8 @@ watch(
   () => workspace.currentFolder,
   (folder) => {
     if (folder) bookmarkSync.kick();
-    if (folder) void collections.start();
+    // Also runs on close (folder = null): start()/load() clear the stale state.
+    void collections.start();
   },
 );
 

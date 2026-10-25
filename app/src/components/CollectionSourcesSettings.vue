@@ -10,6 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useSettingsStore } from '../stores/settings';
 import { useCollectionsStore } from '../stores/collections';
 import { useToastsStore } from '../stores/toasts';
+import { isMobile } from '../lib/platform';
 import { useI18n } from '../i18n';
 
 const { t } = useI18n();
@@ -53,8 +54,9 @@ function openGithubSettings() {
 
 async function clearHistory() {
   if (!window.confirm(t('settings.collectionSources.clearConfirm'))) return;
-  await collections.clearHistory();
-  toasts.success(t('settings.collectionSources.clearDone'));
+  if (await collections.clearHistory()) {
+    toasts.success(t('settings.collectionSources.clearDone'));
+  }
 }
 
 onMounted(() => {
@@ -67,7 +69,10 @@ onMounted(() => {
   <section class="collection-sources">
     <h3 class="collection-sources__heading">{{ t('settings.collectionSources.heading') }}</h3>
     <p class="collection-sources__hint">{{ t('settings.collectionSources.hint') }}</p>
-    <p v-if="!collections.available" class="collection-sources__hint">
+    <p v-if="isMobile()" class="collection-sources__hint">
+      {{ t('settings.collectionSources.disabledHere') }}
+    </p>
+    <p v-else-if="!collections.available" class="collection-sources__hint">
       {{ t('settings.collectionSources.noWorkspace') }}
     </p>
 

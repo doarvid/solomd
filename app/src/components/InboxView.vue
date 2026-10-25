@@ -38,6 +38,7 @@ import { inferColumns, getCellValue, type ColumnDef } from '../lib/bases';
 import { useI18n } from '../i18n';
 import { INBOX_CLOSE_EVENT } from '../composables/useInboxView';
 import { useCollectionsStore } from '../stores/collections';
+import type { PendingItem } from '../lib/collections-filter';
 
 const inbox = useInbox();
 const files = useFiles();
@@ -127,11 +128,8 @@ function capturedAbsolute(entry: IndexEntry): string {
   }
 }
 
-/** Relative captured label ("today", "2 days ago"…) for at-a-glance recency,
- *  localized via Intl.RelativeTimeFormat with a graceful fallback. */
-function capturedRelative(entry: IndexEntry): string {
-  const ms = inboxCapturedAt(entry);
-  if (!ms) return '';
+/** Relative label ("2 days ago"…) for a timestamp, or '' when unusable. */
+function relativeLabel(ms: number): string {
   const diff = ms - Date.now();
   const absDays = Math.round(Math.abs(diff) / 86_400_000);
   try {
@@ -145,8 +143,23 @@ function capturedRelative(entry: IndexEntry): string {
     if (absDays < 365) return rtf.format(Math.round(diff / (86_400_000 * 30)), 'month');
     return rtf.format(Math.round(diff / (86_400_000 * 365)), 'year');
   } catch {
-    return capturedAbsolute(entry);
+    return '';
   }
+}
+
+/** Relative captured label ("today", "2 days ago"…) for at-a-glance recency,
+ *  localized via Intl.RelativeTimeFormat with a graceful fallback. */
+function capturedRelative(entry: IndexEntry): string {
+  const ms = inboxCapturedAt(entry);
+  if (!ms) return '';
+  return relativeLabel(ms) || capturedAbsolute(entry);
+}
+
+/** When the item was saved in its source (GitHub `starred_at`). */
+function pendingSaved(item: PendingItem): string {
+  if (!item.savedAt) return '';
+  const ms = Date.parse(item.savedAt);
+  return Number.isFinite(ms) ? relativeLabel(ms) : '';
 }
 
 function selectPeriod(p: InboxPeriod) {
@@ -273,12 +286,20 @@ onBeforeUnmount(() => {
         <button
           class="rp-btn rp-btn--primary"
           type="button"
-          :disabled="collections.importingIds.length > 0"
+          :disabled="collections.importingAll || collections.importingIds.length > 0"
           @click="collections.importAll()"
         >
-          {{ t('inbox.pendingImport.importAll') }}
+          {{
+            collections.importingAll
+              ? `${collections.importDone} / ${collections.importTotal}`
+              : t('inbox.pendingImport.importAll')
+          }}
         </button>
       </div>
+
+      <p v-if="collections.truncated" class="inbox-view__pending-hint">
+        {{ t('inbox.pendingImport.truncated') }}
+      </p>
 
       <p v-if="collections.lastError" class="inbox-view__pending-error">
         {{ t('inbox.pendingImport.refreshFailed', { error: collections.lastError }) }}
@@ -300,6 +321,7 @@ onBeforeUnmount(() => {
               <span class="rp-chip">{{ t('inbox.pendingImport.sourceGithub') }}</span>
               <span v-if="item.language" class="rp-chip">{{ item.language }}</span>
               <span v-if="item.stars != null" class="rp-chip">★ {{ item.stars }}</span>
+              <span v-if="pendingSaved(item)" class="rp-chip">{{ pendingSaved(item) }}</span>
             </span>
           </span>
           <span class="inbox-view__pending-actions">
@@ -325,7 +347,7 @@ onBeforeUnmount(() => {
     </section>
 
     <!-- True inbox-zero: nothing flagged inbox anywhere. -->
-    <div v-if="totalInbox === 0" class="inbox-view__zero">
+    <div v-if="totalInbox === 0 && !pendingItems.length" class="inbox-view__zero">
       <span class="inbox-view__zero-check" aria-hidden="true">
         <Icons name="check-circle" :size="28" />
       </span>
@@ -579,6 +601,11 @@ onBeforeUnmount(() => {
   margin: 0 0 8px;
   font-size: 12px;
   color: var(--danger);
+}
+.inbox-view__pending-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 .inbox-view__pending-list {
   display: flex;

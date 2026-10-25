@@ -1518,6 +1518,7 @@ export const en = {
     pendingImport: {
       heading: 'Pending imports',
       count: '{n} waiting',
+      truncated: "Only the latest 1000 stars are shown.",
       refresh: 'Refresh',
       refreshFailed: 'Refresh failed: {error}',
       importAll: 'Import all',

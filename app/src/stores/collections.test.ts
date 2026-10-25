@@ -99,3 +99,58 @@ test('the source toggle hides pending items', () => {
   settings.collectionGithubEnabled = true;
   assert.equal(collections.pendingItems.length, 1);
 });
+
+/** Record invocations and answer like the Rust side would. */
+function stubBackend(overrides: Record<string, unknown> = {}) {
+  const calls: string[] = [];
+  g.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (cmd: string) => {
+        calls.push(cmd);
+        if (cmd in overrides) return overrides[cmd];
+        if (cmd === 'github_has_token') return true;
+        if (cmd === 'collections_load') {
+          return { version: 1, items: [ITEM], dismissed: [], imported: {}, lastRefresh: {} };
+        }
+        if (cmd === 'collections_import') return { path: '/vault/inbox/a.md', warning: null, error: null };
+        return null;
+      },
+    },
+    localStorage: g.localStorage,
+  };
+  return calls;
+}
+
+test('refresh is a silent skip when no GitHub token is set', async () => {
+  const calls = stubBackend({ github_has_token: false });
+  const { collections } = setup();
+  await collections.refresh();
+  assert.ok(!calls.includes('collections_refresh_github'));
+  assert.equal(collections.lastError, null);
+});
+
+test('refresh records the truncation flag from the backend', async () => {
+  stubBackend({
+    collections_refresh_github: { added: 0, total: 1000, truncated: true },
+  });
+  const { collections } = setup();
+  await collections.refresh();
+  assert.equal(collections.truncated, true);
+});
+
+test('a second importAll does not start while one is running', async () => {
+  const calls = stubBackend();
+  const { collections } = setup();
+  const first = collections.importAll();
+  const second = collections.importAll();
+  await Promise.all([first, second]);
+  assert.equal(calls.filter((c) => c === 'collections_import').length, 1);
+  assert.equal(collections.importingAll, false);
+});
+
+test('clearHistory reports failure instead of pretending success', async () => {
+  stubBackend({ collections_clear_history: Promise.reject(new Error('disk full')) });
+  const { collections } = setup();
+  assert.equal(await collections.clearHistory(), false);
+});
+

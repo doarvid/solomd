@@ -1501,6 +1501,7 @@ export const zh: I18n = {
     pendingImport: {
       heading: "待导入收藏",
       count: "待导入 {n} 条",
+      truncated: "仅显示最近 1000 条 Star。",
       refresh: "刷新",
       refreshFailed: "刷新失败：{error}",
       importAll: "全部导入",

@@ -35,7 +35,12 @@ export const useCollectionsStore = defineStore('collections', {
     state: null as CollectionsState | null,
     loading: false,
     refreshing: false,
+    /** Backend told us it stopped at the 1000-star page cap. */
+    truncated: false,
     importingIds: [] as string[],
+    importingAll: false,
+    importDone: 0,
+    importTotal: 0,
     lastError: null as string | null,
   }),
 
@@ -87,10 +92,15 @@ export const useCollectionsStore = defineStore('collections', {
         this.state = state;
         for (const item of state.items) {
           if (normalizedUrls.has(item.id)) continue;
-          normalizedUrls.set(
-            item.id,
-            await invoke<string>('capture_normalize_url', { url: item.url }).catch(() => item.url),
-          );
+          try {
+            normalizedUrls.set(
+              item.id,
+              await invoke<string>('capture_normalize_url', { url: item.url }),
+            );
+          } catch {
+            // Leave it uncached: the raw-URL fallback is fine for this pass,
+            // and a later load can succeed.
+          }
         }
       } catch (e) {
         this.lastError = String(e);
@@ -115,15 +125,27 @@ export const useCollectionsStore = defineStore('collections', {
       await this.refresh();
     },
 
+    /** No token = stay silent, per spec §5. A command failure is not a
+     *  "no token" answer, so it falls through and surfaces as a refresh error. */
+    async hasToken(): Promise<boolean> {
+      try {
+        return await invoke<boolean>('github_has_token');
+      } catch {
+        return true;
+      }
+    },
+
     async refresh() {
       if (!this.available || this.refreshing) return;
       if (!useSettingsStore().collectionGithubEnabled) return;
+      if (!(await this.hasToken())) return;
       this.refreshing = true;
       this.lastError = null;
       try {
-        await invoke('collections_refresh_github', {
+        const outcome = await invoke<{ truncated?: boolean }>('collections_refresh_github', {
           workspace: useWorkspaceStore().currentFolder,
         });
+        this.truncated = outcome?.truncated === true;
         await this.load();
       } catch (e) {
         this.lastError = String(e);
@@ -166,14 +188,23 @@ export const useCollectionsStore = defineStore('collections', {
     },
 
     async importAll() {
+      if (this.importingAll) return;
       const items = [...this.pendingItems];
       if (items.length === 0) return;
+      this.importingAll = true;
+      this.importDone = 0;
+      this.importTotal = items.length;
       let ok = 0;
       let failed = 0;
-      for (const item of items) {
-        const result = await this.importOne(item, false);
-        if (result.ok) ok += 1;
-        else failed += 1;
+      try {
+        for (const item of items) {
+          const result = await this.importOne(item, false);
+          if (result.ok) ok += 1;
+          else failed += 1;
+          this.importDone += 1;
+        }
+      } finally {
+        this.importingAll = false;
       }
       await this.load();
       const { t } = useI18n();
@@ -199,15 +230,17 @@ export const useCollectionsStore = defineStore('collections', {
       }
     },
 
-    async clearHistory() {
-      if (!this.available) return;
+    async clearHistory(): Promise<boolean> {
+      if (!this.available) return false;
       try {
         this.state = await invoke<CollectionsState>('collections_clear_history', {
           workspace: useWorkspaceStore().currentFolder,
         });
       } catch (e) {
         this.lastError = String(e);
+        return false;
       }
+      return true;
     },
   },
 });
