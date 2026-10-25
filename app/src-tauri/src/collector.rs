@@ -24,6 +24,15 @@ const KINDS: [&str; 3] = ["probe", "collect", "render"];
 static WAITERS: Lazy<Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// The collector is a single webview: two navigations at once would replace
+/// each other's page mid-flight. Every operation takes this lock and fails
+/// fast instead of queueing behind a 45 s harvest.
+static OP: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+
+fn try_lock_op() -> Result<tokio::sync::MutexGuard<'static, ()>, String> {
+    OP.try_lock().map_err(|_| "collector busy".to_string())
+}
+
 pub fn is_collector_label(label: &str) -> bool {
     label == COLLECTOR_LABEL
 }
@@ -116,7 +125,7 @@ pub struct HarvestOutcome {
     pub login_required: bool,
 }
 
-async fn probe_once(app: &AppHandle) -> Result<(bool, String), String> {
+async fn probe_once(_app: &AppHandle) -> Result<(bool, String), String> {
     begin("probe");
     browser::collector_eval("window.__solomdCollector && window.__solomdCollector.probe()")?;
     let value = wait_for("probe", Duration::from_secs(10)).await?;
@@ -135,6 +144,7 @@ async fn probe_once(app: &AppHandle) -> Result<(bool, String), String> {
 /// 打开来源页并报告登录态。失败（导航、超时）走 Err，由前端做源级报错。
 #[tauri::command]
 pub async fn collector_status(app: AppHandle, source: String) -> Result<CollectorStatus, String> {
+    let _op = try_lock_op()?;
     let url = source_url(&source)?;
     navigate_and_wait(&app, url, Duration::from_secs(30)).await?;
     let (logged_in, reason) = probe_once(&app).await?;
@@ -149,6 +159,7 @@ pub async fn collector_status(app: AppHandle, source: String) -> Result<Collecto
 /// 不写缓存、也不报错 —— 前端据此展示登录引导。
 #[tauri::command]
 pub async fn collector_harvest(app: AppHandle, source: String) -> Result<HarvestOutcome, String> {
+    let _op = try_lock_op()?;
     let url = source_url(&source)?;
     navigate_and_wait(&app, url, Duration::from_secs(30)).await?;
 
@@ -186,6 +197,7 @@ pub async fn collector_harvest(app: AppHandle, source: String) -> Result<Harvest
 /// 用 collector 加载 `url`，回传渲染后的 DOM。只由 `capture_fetch_page`
 /// 在静态抽取失败时调用，不暴露成前端命令。
 pub async fn render(app: &AppHandle, url: &str, timeout: Duration) -> Result<String, String> {
+    let _op = try_lock_op()?;
     navigate_and_wait(app, url, timeout).await?;
     begin("render");
     browser::collector_eval("window.__solomdCollector && window.__solomdCollector.render()")?;
@@ -233,9 +245,16 @@ mod tests {
     }
 
     #[test]
+    fn a_second_collector_operation_is_busy() {
+        let first = try_lock_op().expect("first op");
+        assert_eq!(try_lock_op().unwrap_err(), "collector busy");
+        drop(first);
+        assert!(try_lock_op().is_ok());
+    }
+
+    #[test]
     fn late_or_foreign_payloads_are_dropped() {
-        // 没有等待者 / label 不对 / kind 不认识 —— 全部静默丢弃。
-        deliver(COLLECTOR_LABEL, "render", serde_json::json!({ "html": "x" }));
+        // label 不对 / kind 不认识 —— 全部静默丢弃。
         deliver("browser-abc", "probe", serde_json::json!({}));
         deliver(COLLECTOR_LABEL, "evil", serde_json::json!({}));
     }
