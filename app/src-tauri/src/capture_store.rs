@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tauri::AppHandle;
 
 use super::webdoc;
 
@@ -399,6 +400,12 @@ pub fn capture_save_conversation(
     Ok(path.to_string_lossy().to_string())
 }
 
+/// 静态抽取是否弱到值得再渲染一次。400 字是保守阈值：短公告类页面
+/// 可能多跑一次，但代价只是一次后台加载；反过来放行 JS 空壳会留下空笔记。
+pub fn should_render(markdown: &str, extracted: bool) -> bool {
+    !extracted || markdown.trim().chars().count() < 400
+}
+
 /// 抓一个引用链接：拉页面 → 抽正文 → 写 `<dir>/<标题>.md`（图片落
 /// `<dir>/<标题>.assets/`）。`dir` 由调用方定死 —— 关联链接场景传的是
 /// `D/refs`，读原文场景传的是文档自己的目录。
@@ -407,10 +414,12 @@ pub fn capture_save_conversation(
 /// 改成始终返回 `FetchOutcome`，把失败装进 `error` 字段，逐条状态由前端展示。
 #[tauri::command]
 pub async fn capture_fetch_page(
+    app: AppHandle,
     dir: String,
     url: String,
     fallback_title: String,
     source_title: Option<String>,
+    render_fallback: Option<bool>,
 ) -> Result<FetchOutcome, String> {
     let dir = PathBuf::from(dir);
 
@@ -459,8 +468,46 @@ pub async fn capture_fetch_page(
 
     // 先问一句"拿回来的到底是不是网页"：`.md` 之类纯文本源（GitHub raw、
     // 各类 pastebin）走 HTML 流水线会被整篇毁掉，而且不会报错。
-    let extracted = webdoc::extract_plain_text(&body, &final_url, content_type.as_deref())
+    let mut extracted = webdoc::extract_plain_text(&body, &final_url, content_type.as_deref())
         .or_else(|| webdoc::extract(&body, &final_url, &host));
+
+    // 静态 HTML 抽不到（或只剩几行导航）时，让隐藏 webview 渲染一次。
+    // 这是升级尝试，不是必要条件 —— 渲染失败仍然落原来的存根。
+    let mut used_render = false;
+    let mut render_error: Option<String> = None;
+    let wants_render = match &extracted {
+        Some(e) => should_render(&e.markdown, true),
+        None => should_render("", false),
+    };
+    if render_fallback.unwrap_or(false) && wants_render {
+        #[cfg(desktop)]
+        {
+            match super::collector::render(&app, &final_url, std::time::Duration::from_secs(20))
+                .await
+            {
+                Ok(html) => {
+                    match webdoc::extract_plain_text(&html, &final_url, Some("text/html"))
+                        .or_else(|| webdoc::extract(&html, &final_url, &host))
+                    {
+                        Some(e) => {
+                            extracted = Some(e);
+                            used_render = true;
+                        }
+                        None => {
+                            render_error =
+                                Some("渲染后的页面仍没有可抽取的正文".to_string());
+                        }
+                    }
+                }
+                Err(e) => render_error = Some(format!("渲染失败: {e}")),
+            }
+        }
+        #[cfg(not(desktop))]
+        {
+            render_error = Some("当前平台不支持网页渲染".to_string());
+        }
+    }
+
     let (title, markdown, via, error, meta) = match extracted {
         Some(e) => (
             if e.title.trim().is_empty() {
@@ -469,25 +516,35 @@ pub async fn capture_fetch_page(
                 e.title
             },
             e.markdown,
-            e.via.as_str().to_string(),
+            if used_render {
+                "rendered".to_string()
+            } else {
+                e.via.as_str().to_string()
+            },
             None,
             e.meta,
         ),
-        None => (
-            if fallback_title.trim().is_empty() {
-                final_url.clone()
-            } else {
-                fallback_title.clone()
-            },
+        None => {
             // 抽不到正文时，正文位置放原因 —— 空笔记除了"没采到"什么也
-            // 说明不了。
-            failure_note("没能抽到正文（页面可能需要登录或由 JS 渲染）"),
-            "stub".to_string(),
-            Some("没能抽到正文（页面可能需要登录或由 JS 渲染）".to_string()),
-            // 正文抽不到不代表页面没声明作者和日期 —— 这种页面恰恰最需要
-            // frontmatter 里的信息来辨认，所以单独再读一次 meta。
-            webdoc::extract_meta(&body),
-        ),
+            // 说明不了。渲染也失败时把两个原因都带上。
+            let reason = match &render_error {
+                Some(re) => format!("没能抽到正文（页面可能需要登录或由 JS 渲染；{re}）"),
+                None => "没能抽到正文（页面可能需要登录或由 JS 渲染）".to_string(),
+            };
+            (
+                if fallback_title.trim().is_empty() {
+                    final_url.clone()
+                } else {
+                    fallback_title.clone()
+                },
+                failure_note(&reason),
+                "stub".to_string(),
+                Some(reason),
+                // 正文抽不到不代表页面没声明作者和日期 —— 这种页面恰恰最需要
+                // frontmatter 里的信息来辨认，所以单独再读一次 meta。
+                webdoc::extract_meta(&body),
+            )
+        }
     };
 
     let path = write_reference_with_assets(
@@ -627,6 +684,14 @@ pub fn capture_normalize_url(url: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_is_needed_when_extraction_failed_or_the_body_is_thin() {
+        assert!(should_render("", false));
+        assert!(should_render("  短  ", true));
+        assert!(should_render(&"正".repeat(399), true));
+        assert!(!should_render(&"正".repeat(400), true));
+    }
 
     #[test]
     fn filename_keeps_cjk_and_spaces() {

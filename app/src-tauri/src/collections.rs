@@ -488,7 +488,12 @@ pub fn finish_import(
 }
 
 #[tauri::command]
-pub async fn collections_import(workspace: String, id: String) -> Result<ImportOutcome, String> {
+pub async fn collections_import(
+    app: tauri::AppHandle,
+    workspace: String,
+    id: String,
+    render_fallback: Option<bool>,
+) -> Result<ImportOutcome, String> {
     let workspace = PathBuf::from(workspace);
     let item = load_state(&workspace)
         .items
@@ -498,10 +503,12 @@ pub async fn collections_import(workspace: String, id: String) -> Result<ImportO
 
     let dir = import_dir(&workspace);
     let outcome = super::capture_store::capture_fetch_page(
+        app,
         dir.to_string_lossy().to_string(),
         item.url.clone(),
         item.title.clone(),
         None,
+        render_fallback,
     )
     .await?;
 

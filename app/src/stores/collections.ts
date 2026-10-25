@@ -163,6 +163,7 @@ export const useCollectionsStore = defineStore('collections', {
         const out = await invoke<ImportOutcome>('collections_import', {
           workspace: useWorkspaceStore().currentFolder,
           id: item.id,
+          renderFallback: useSettingsStore().captureRenderFallback,
         });
         if (out.error) {
           // Toasts carry import errors; `lastError` is the refresh line.

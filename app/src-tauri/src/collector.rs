@@ -183,6 +183,21 @@ pub async fn collector_harvest(app: AppHandle, source: String) -> Result<Harvest
     })
 }
 
+/// 用 collector 加载 `url`，回传渲染后的 DOM。只由 `capture_fetch_page`
+/// 在静态抽取失败时调用，不暴露成前端命令。
+pub async fn render(app: &AppHandle, url: &str, timeout: Duration) -> Result<String, String> {
+    navigate_and_wait(app, url, timeout).await?;
+    begin("render");
+    browser::collector_eval("window.__solomdCollector && window.__solomdCollector.render()")?;
+    let value = wait_for("render", Duration::from_secs(15)).await?;
+    value
+        .get("html")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|html| !html.is_empty())
+        .ok_or_else(|| "render payload had no html".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
