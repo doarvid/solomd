@@ -16,7 +16,7 @@ import { useFiles } from '../composables/useFiles';
  * Handle a click that landed on (or inside) `anchor`. Returns true when the
  * click was consumed — the caller's event has been prevented.
  */
-export function openRenderedLink(anchor: HTMLAnchorElement, e: Event, filePath?: string | null): boolean {
+export function openRenderedLink(anchor: Element, e: Event, filePath?: string | null): boolean {
   // Wikilink (F1, v2.0): intercept and dispatch resolution to App.vue.
   if (anchor.classList.contains('md-wikilink')) {
     const target = anchor.getAttribute('data-wikilink-target') || '';
@@ -26,7 +26,11 @@ export function openRenderedLink(anchor: HTMLAnchorElement, e: Event, filePath?:
     window.dispatchEvent(new CustomEvent('solomd:wiki-open', { detail: { target } }));
     return true;
   }
-  const href = anchor.getAttribute('href');
+  const href =
+    anchor.getAttribute('href') ||
+    anchor.getAttribute('xlink:href') ||
+    anchor.getAttributeNS?.('http://www.w3.org/1999/xlink', 'href') ||
+    null;
   if (!href) return false;
   // Allow in-page anchor jumps (#heading)
   if (href.startsWith('#')) return false;

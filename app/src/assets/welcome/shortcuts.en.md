@@ -33,6 +33,7 @@ Press once on a selection to apply, again to remove. With nothing selected it ac
 | --- | --- |
 | `Ctrl+Shift+B` | Bold (want `Ctrl+B`? see the tips below) |
 | `Ctrl+I` | Italic |
+| `Ctrl+U` | Underline |
 | `Ctrl+Shift+X` | Strikethrough |
 | `Ctrl+Shift+M` | Inline code |
 | `Ctrl+K` | Link |

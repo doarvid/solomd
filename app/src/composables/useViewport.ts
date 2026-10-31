@@ -83,14 +83,20 @@ export function isNarrowViewport(): boolean {
 }
 
 /**
- * 5.0 §7 — a tablet held in portrait (or a narrow touch window above the phone
- * breakpoint): wide enough for the desktop shell, too narrow for a 260 px
+ * 5.0 §7 — a tablet held in portrait, or an unfolded foldable phone such as
+ * iPhone Duo's inner display (669×951 pt portrait / 951×669 pt landscape):
+ * wide enough for the desktop shell, too narrow for a persistent 260 px
  * sidebar beside the text. There the sidebar floats over the editor instead,
  * like iPad Notes. Touch only, so a desktop window dragged to the same width
  * keeps its sidebar in the layout.
+ *
+ * Excludes short landscape phone viewports (`min-height: 481px`), such as
+ * iPhone Duo's folded outer display held sideways (678×466 pt), so
+ * `isTabletOverlay` and `isNarrow` are strictly mutually exclusive.
  */
 const TABLET_OVERLAY_QUERY =
-  `(min-width: ${NARROW_BREAKPOINT_PX + 1}px) and (max-width: 1023px) and (pointer: coarse)`;
+  `(min-width: ${NARROW_BREAKPOINT_PX + 1}px) and (max-width: 1023px) and ` +
+  `(min-height: ${SHORT_BREAKPOINT_PX + 1}px) and (pointer: coarse)`;
 const tabletOverlay = ref(false);
 let tabletMql: MediaQueryList | null = null;
 function evaluateTablet(): void {

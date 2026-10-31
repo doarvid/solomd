@@ -44,6 +44,8 @@ import type { Range } from '@codemirror/state';
 // tree-walk fields we touch rather than importing the real type.
 export interface MdSyntaxNode {
   name: string;
+  from: number;
+  to: number;
   parent: MdSyntaxNode | null;
   firstChild: MdSyntaxNode | null;
   nextSibling: MdSyntaxNode | null;
@@ -327,6 +329,7 @@ function buildDecorations(view: EditorView, showMarkers = false): DecorationSet 
   const seenFencedLines = new Set<number>();
   const seenCopyBlocks = new Set<number>();
   const seenHeadingLines = new Set<number>();
+  const seenListLines = new Set<number>();
   const seenInlineHtmlLines = new Set<number>();
 
   for (const { from, to } of view.visibleRanges) {
@@ -462,11 +465,75 @@ function buildDecorations(view: EditorView, showMarkers = false): DecorationSet 
           const endLine = view.state.doc.lineAt(
             Math.min(nTo, view.state.doc.length),
           ).number;
+          const isFenced = name === 'FencedCode';
+          const firstLineObj = view.state.doc.line(startLine);
+          const fenceIndentCols = isFenced ? Math.max(0, nFrom - firstLineObj.from) : 0;
+          let fencedMarginLeft = '';
+          if (fenceIndentCols > 0) {
+            let indentEm = Math.min(8, fenceIndentCols * 0.58);
+            let cur = (node.node as unknown as MdSyntaxNode).parent;
+            while (cur) {
+              if (cur.name === 'ListItem') {
+                for (let ch = cur.firstChild; ch; ch = ch.nextSibling) {
+                  if (ch.name === 'ListMark') {
+                    const markLine = view.state.doc.lineAt(ch.from);
+                    const mark = view.state.doc.sliceString(ch.from, ch.to);
+                    const isBullet = mark === '-' || mark === '*' || mark === '+';
+                    const leadSpaces = ch.from - markLine.from;
+                    const markCols = ch.to - ch.from + 1;
+                    indentEm = isBullet
+                      ? Math.min(6, Math.max(1.15, leadSpaces * 0.55 + 1.15))
+                      : Math.min(8, Math.max(1.65, leadSpaces * 0.55 + markCols * 0.58));
+                    break;
+                  }
+                }
+                break;
+              }
+              cur = cur.parent;
+            }
+            // `.cm-md-fenced-line` sets `font-size: 0.8125em`, so scale `em`
+            // by `1 / 0.8125` to match the list item's parent-font `em` indent.
+            fencedMarginLeft = `${(indentEm / 0.8125).toFixed(2)}em`;
+          }
+          const bodyStart = isFenced ? startLine + 1 : startLine;
+          const hasClosingFence =
+            isFenced &&
+            endLine > startLine &&
+            /^\s*(`{3,}|~{3,})\s*$/.test(view.state.doc.line(endLine).text);
+          const bodyEnd = hasClosingFence ? endLine - 1 : endLine;
           for (let ln = startLine; ln <= endLine; ln++) {
             const lineObj = view.state.doc.line(ln);
             if (!seenFencedLines.has(lineObj.from)) {
               seenFencedLines.add(lineObj.from);
-              ranges.push(fencedLine.range(lineObj.from));
+              const leadingSpaces = /^[ ]*/.exec(lineObj.text)?.[0].length ?? 0;
+              const stripCols = !showMarkers && fenceIndentCols > 0
+                ? Math.min(fenceIndentCols, leadingSpaces)
+                : 0;
+              const styleParts: string[] = [];
+              if (fencedMarginLeft) styleParts.push(`margin-left: ${fencedMarginLeft};`);
+              if (stripCols > 0) styleParts.push(`text-indent: -${stripCols}ch;`);
+              const styleAttr = styleParts.length > 0 ? styleParts.join(' ') : undefined;
+              if (ln >= bodyStart && ln <= bodyEnd) {
+                const attrs: Record<string, string> = {
+                  'data-cb-line': String(ln - bodyStart + 1),
+                };
+                if (styleAttr) attrs.style = styleAttr;
+                ranges.push(
+                  Decoration.line({
+                    class: 'cm-md-fenced-line cm-md-fenced-body-line',
+                    attributes: attrs,
+                  }).range(lineObj.from),
+                );
+              } else if (styleAttr) {
+                ranges.push(
+                  Decoration.line({
+                    class: 'cm-md-fenced-line',
+                    attributes: { style: styleAttr },
+                  }).range(lineObj.from),
+                );
+              } else {
+                ranges.push(fencedLine.range(lineObj.from));
+              }
               if (ln === startLine) ranges.push(blockFirstLine.range(lineObj.from));
               if (ln === endLine) ranges.push(blockLastLine.range(lineObj.from));
             }
@@ -501,22 +568,76 @@ function buildDecorations(view: EditorView, showMarkers = false): DecorationSet 
           return;
         }
 
-        // ---- List markers (v4.7.1) ----
+        // ---- List markers (v4.7.1) + hanging indent (#469) ----
         // Bullets (`-`/`*`/`+`) become a • glyph; ordered numbers stay; a
         // task item's dash is hidden so the checkbox widget leads. Revealed
         // (raw) on the caret line so the marker stays editable.
+        // #469: apply a matched `padding-left: X; text-indent: -X` line
+        // decoration so soft-wrapped continuation lines hang aligned with the
+        // list item body instead of wrapping back under the number/bullet.
         if (name === 'ListMark') {
-          if (showMarkers || caretTouches || nTo <= nFrom) return;
+          const lineObj = view.state.doc.lineAt(nFrom);
           const mark = view.state.doc.sliceString(nFrom, nTo);
           const isBullet = mark === '-' || mark === '*' || mark === '+';
-          if (!isBullet) return; // ordered list ("1.", "2)") keeps its number
-          if (listItemHasTask(node.node as unknown as MdSyntaxNode)) {
-            // Hide "- " (dash + trailing space) — the checkbox renders the item.
-            const after = view.state.doc.sliceString(
-              nTo,
-              Math.min(nTo + 1, view.state.doc.length),
+          const isTask = isBullet && listItemHasTask(node.node as unknown as MdSyntaxNode);
+          const after = view.state.doc.sliceString(
+            nTo,
+            Math.min(nTo + 1, view.state.doc.length),
+          );
+          const prefixTo = after === ' ' ? nTo + 1 : nTo;
+          if (!seenListLines.has(lineObj.from)) {
+            seenListLines.add(lineObj.from);
+            const leadSpaces = nFrom - lineObj.from;
+            const markLen = nTo - nFrom;
+            // #486 — Use a uniform column width (1.65em) for 1–2 digit ordered
+            // list markers (`1.`..`99.`) so single- and double-digit items in
+            // the same list share the exact same body text start X coordinate.
+            const markEm = isBullet
+              ? 1.25
+              : markLen <= 3
+                ? 1.65
+                : Math.min(5, markLen * 0.55 + 0.35);
+            const indentEm = Math.min(8, leadSpaces * 0.55 + markEm);
+            const indentStr = `${indentEm.toFixed(2)}em`;
+            ranges.push(
+              Decoration.line({
+                class: 'cm-md-list-line',
+                attributes: {
+                  style: `padding-left: ${indentStr}; text-indent: -${indentStr};`,
+                },
+              }).range(lineObj.from),
             );
-            ranges.push(hideDeco.range(nFrom, after === ' ' ? nTo + 1 : nTo));
+            // #486 — Wrap the list prefix (leading spaces + marker + trailing
+            // space) in an inline-block span of width `indentStr` (`text-indent: 0`)
+            // so the first line's body text starts at the exact same X offset
+            // (`indentStr`) as soft-wrapped continuation lines (`padding-left`).
+            if (!isTask && after === ' ') {
+              let leadFrom = nFrom;
+              while (
+                leadFrom > lineObj.from &&
+                view.state.doc.sliceString(leadFrom - 1, leadFrom) === ' '
+              ) {
+                leadFrom--;
+              }
+              const prefixWidthEm =
+                leadFrom === lineObj.from
+                  ? indentEm
+                  : Math.min(8, (nFrom - leadFrom) * 0.55 + markEm);
+              ranges.push(
+                Decoration.mark({
+                  class: 'cm-md-list-prefix',
+                  attributes: {
+                    style: `display: inline-block; width: ${prefixWidthEm.toFixed(2)}em; text-indent: 0; font-variant-numeric: tabular-nums;`,
+                  },
+                }).range(leadFrom, prefixTo),
+              );
+            }
+          }
+          if (showMarkers || caretTouches || nTo <= nFrom) return;
+          if (!isBullet) return; // ordered list ("1.", "2)") keeps its number
+          if (isTask) {
+            // Hide "- " (dash + trailing space) — the checkbox renders the item.
+            ranges.push(hideDeco.range(nFrom, prefixTo));
           } else {
             ranges.push(bulletDeco.range(nFrom, nTo));
           }
@@ -791,6 +912,22 @@ const liveEditTheme = EditorView.theme({
   // already a line of air each — the card needs no extra inset there.
   '.cm-md-fenced-line.cm-md-block-first': { paddingTop: '2px' },
   '.cm-md-fenced-line.cm-md-block-last': { paddingBottom: '2px' },
+  // #454 — code block line numbers in CodeMirror Live-Edit mode when enabled.
+  '.cb-numbered-on & .cm-md-fenced-line.cm-md-fenced-body-line': {
+    paddingLeft: '3.6em',
+  },
+  '.cb-numbered-on & .cm-md-fenced-line.cm-md-fenced-body-line::before': {
+    content: 'attr(data-cb-line)',
+    position: 'absolute',
+    left: '0',
+    width: '2.6em',
+    paddingRight: '0.6em',
+    textAlign: 'right',
+    color: 'var(--text-faint)',
+    borderRight: '1px solid var(--border)',
+    userSelect: 'none',
+    pointerEvents: 'none',
+  },
 
   // v4.11.18 — code-block copy button. Same visual language as the preview
   // pane's `.code-copy-button` (styles/main.css), sized down a notch so it

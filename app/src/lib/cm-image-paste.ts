@@ -15,10 +15,13 @@
 
 import { EditorView } from '@codemirror/view';
 import { invoke } from '@tauri-apps/api/core';
-import { tempDir, sep, documentDir } from '@tauri-apps/api/path';
+import { tempDir, sep, documentDir, appDataDir } from '@tauri-apps/api/path';
 import { uploadImage, type ResolvedUploader } from './image-upload';
 import { markdownImage } from './md-image-url';
 import { isContentUri, isSafPath, sniffImageExt } from './image-source';
+import { fromSafPath, safEnsureSubdir, safList, safCreate, safWriteBase64 } from './saf-fs';
+import { insideFence } from './list-continuation';
+import { clipboardTableToMarkdown } from './table-paste';
 
 export interface ImagePasteOptions {
   getFilePath: () => string | undefined;
@@ -172,20 +175,75 @@ function joinPath(a: string, b: string, sepCh: string): string {
   return a + sepCh + b;
 }
 
+function activeSafContext(): { treeUri: string; rootDocId: string | null } | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem('solomd.workspace.v1');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { safTreeUri?: unknown; currentFolder?: unknown };
+    const treeUri =
+      typeof parsed.safTreeUri === 'string' && parsed.safTreeUri ? parsed.safTreeUri : null;
+    if (!treeUri) return null;
+    const currentFolder =
+      typeof parsed.currentFolder === 'string' && parsed.currentFolder.startsWith('saf:')
+        ? parsed.currentFolder.slice(4)
+        : null;
+    return { treeUri, rootDocId: currentFolder };
+  } catch {
+    return null;
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function mimeForFilename(name: string): string {
+  const ext = extFromName(name) || 'png';
+  for (const [m, e] of Object.entries(IMAGE_MIME_EXT)) {
+    if (e === ext) return m;
+  }
+  return 'image/png';
+}
+
 async function resolveTempDir(override?: string): Promise<string> {
   if (override) return override;
   try {
     return await tempDir();
   } catch {
-    return '/tmp';
+    try {
+      return await appDataDir();
+    } catch {
+      return '/tmp';
+    }
   }
 }
 
-/** #349 — bytes of an Android `content://` URI, through the fs plugin's
- *  ContentResolver bridge (the same one #148 uses to open notes). */
+/** #349 / #502 — bytes of an Android `content://` URI, through the fs plugin's
+ *  ContentResolver bridge, with a direct JNI fallback (`saf_read_content_uri_base64`)
+ *  when plugin-fs rejects Photo Picker / SAF URIs under Scoped Storage. */
 async function readContentUri(uri: string): Promise<Uint8Array> {
-  const { readFile } = await import('@tauri-apps/plugin-fs');
-  return readFile(uri);
+  try {
+    const { readFile } = await import('@tauri-apps/plugin-fs');
+    return await readFile(uri);
+  } catch {
+    const b64 = await invoke<string>('saf_read_content_uri_base64', { uri });
+    return base64ToBytes(b64);
+  }
 }
 
 function reportFailure(opts: ImagePasteOptions, err: unknown): void {
@@ -224,17 +282,63 @@ async function prepareLocalTarget(
   const filePath = opts.getFilePath();
   const imageRoot = opts.getDocContent ? parseImageRootFast(opts.getDocContent()) : null;
 
-  // #349 — a note in a SAF vault has a `saf:<documentId>` path. Joining
-  // `_assets/` onto it gives a string that no filesystem call can write, so
-  // the image was silently lost. SAF can't store binary files yet: keep the
-  // image in SoloMD's own Documents folder and link it by absolute path
-  // (the asset protocol scope covers it, so it renders), and say so.
+  // #349 / #502 — When editing a note in an Android SAF vault (`saf:<docId>`):
+  // If an active SAF tree is granted, store the image directly inside the SAF
+  // vault's `_assets` (or configured attachment folder) and insert a relative
+  // markdown link so Syncthing/Obsidian/desktop and `image-resolve.ts` (#476)
+  // can load it seamlessly. Fall back to appDataDir()/documentDir() only when
+  // no SAF tree URI is active.
   if (isSafPath(filePath)) {
+    const safCtx = activeSafContext();
+    if (safCtx && filePath) {
+      const docId = filePath.slice(4).replace(/\\/g, '/');
+      const lastSlash = docId.lastIndexOf('/');
+      const colonIdx = docId.indexOf(':');
+      const parentDocId =
+        lastSlash >= 0
+          ? docId.slice(0, lastSlash)
+          : colonIdx >= 0
+            ? docId.slice(0, colonIdx + 1)
+            : docId;
+      const mode = opts.getAttachmentMode ? opts.getAttachmentMode() : 'shared';
+      const sharedDir = opts.getAssetsDirName ? opts.getAssetsDirName() || '_assets' : '_assets';
+      const customPath = opts.getCustomPath ? opts.getCustomPath() : undefined;
+      let relAssetsDir: string;
+      let urlPrefix: string;
+      if (imageRoot) {
+        relAssetsDir = imageRoot.replace(/\\/g, '/').replace(/^\.\/+|\/+$/g, '') || sharedDir;
+        urlPrefix = '';
+      } else if (mode === 'per-file') {
+        relAssetsDir = `${basenameNoExt(filePath)}.assets`;
+        urlPrefix = relAssetsDir;
+      } else if (mode === 'custom') {
+        const stem = basenameNoExt(filePath);
+        const raw = (customPath || './images/${filename}/').trim();
+        urlPrefix = raw
+          .replace(/\$\{filename\}/g, stem)
+          .replace(/\\/g, '/')
+          .replace(/^\.\/+|\/+$/g, '');
+        relAssetsDir = urlPrefix || sharedDir;
+      } else {
+        relAssetsDir = sharedDir;
+        urlPrefix = sharedDir;
+      }
+      const sepBetween = parentDocId.endsWith(':') || parentDocId.endsWith('/') ? '' : '/';
+      const fullPath = `saf:${parentDocId}${sepBetween}${relAssetsDir}/${filename}`;
+      const insertText = urlPrefix
+        ? markdownImage(`${urlPrefix}/${filename}`)
+        : markdownImage(filename);
+      return { fullPath, insertText };
+    }
     let base: string;
     try {
-      base = await documentDir();
+      base = await appDataDir();
     } catch {
-      base = await resolveTempDir(opts.tempDir);
+      try {
+        base = await documentDir();
+      } catch {
+        base = await resolveTempDir(opts.tempDir);
+      }
     }
     const fullPath = joinPath(joinPath(base, '_assets', sepCh), filename, sepCh);
     opts.notify?.('info', 'toast.imageSavedOutsideVault');
@@ -275,6 +379,61 @@ async function prepareTempTarget(
 }
 
 async function writeBytes(fullPath: string, bytes: Uint8Array): Promise<boolean> {
+  if (isSafPath(fullPath)) {
+    const safCtx = activeSafContext();
+    if (!safCtx) return false;
+    try {
+      const { treeUri, rootDocId } = safCtx;
+      const docId = fromSafPath(fullPath).replace(/\\/g, '/');
+      const lastSlash = docId.lastIndexOf('/');
+      const colonIdx = docId.indexOf(':');
+      const fileName =
+        lastSlash >= 0
+          ? docId.slice(lastSlash + 1)
+          : colonIdx >= 0
+            ? docId.slice(colonIdx + 1)
+            : docId;
+      let targetDirDocId: string;
+      if (rootDocId && (docId.startsWith(`${rootDocId}/`) || (rootDocId.endsWith(':') && docId.startsWith(rootDocId)))) {
+        const relFromRoot = docId.slice(rootDocId.length).replace(/^\/+/, '');
+        const relSlash = relFromRoot.lastIndexOf('/');
+        const relDir = relSlash >= 0 ? relFromRoot.slice(0, relSlash) : '';
+        targetDirDocId = relDir
+          ? await safEnsureSubdir(treeUri, rootDocId, relDir)
+          : rootDocId;
+      } else if (lastSlash >= 0) {
+        const dirPath = docId.slice(0, lastSlash);
+        const parentSlash = dirPath.lastIndexOf('/');
+        if (parentSlash >= 0) {
+          targetDirDocId = await safEnsureSubdir(
+            treeUri,
+            dirPath.slice(0, parentSlash),
+            dirPath.slice(parentSlash + 1),
+          );
+        } else {
+          const baseParent = colonIdx >= 0 ? dirPath.slice(0, colonIdx + 1) : '';
+          const sub = colonIdx >= 0 ? dirPath.slice(colonIdx + 1) : dirPath;
+          targetDirDocId = baseParent
+            ? await safEnsureSubdir(treeUri, baseParent, sub)
+            : dirPath;
+        }
+      } else {
+        targetDirDocId = rootDocId || (colonIdx >= 0 ? docId.slice(0, colonIdx + 1) : docId);
+      }
+      const children = await safList(treeUri, targetDirDocId);
+      const existing = children.find(
+        (c) => !c.is_dir && c.name.toLowerCase() === fileName.toLowerCase(),
+      );
+      const fileDocId = existing
+        ? fromSafPath(existing.path)
+        : await safCreate(treeUri, targetDirDocId, fileName, mimeForFilename(fileName));
+      await safWriteBase64(treeUri, fileDocId, bytesToBase64(bytes));
+      return true;
+    } catch (err) {
+      console.error('[cm-image-paste] failed to write SAF image', err);
+      return false;
+    }
+  }
   try {
     await invoke('write_binary_file', { path: fullPath, data: Array.from(bytes) });
     return true;
@@ -461,6 +620,22 @@ export async function handleTextareaImagePaste(
     return true;
   }
   if (!cd || !cd.items) return false;
+  // #460 — Excel / WPS / spreadsheet cells put an image bitmap on the clipboard
+  // alongside `text/html` (`<table>`) and `text/plain` (TSV). Convert tabular
+  // clipboard content into a Markdown table before checking `image/*` items.
+  try {
+    const mdTable = clipboardTableToMarkdown(
+      cd.getData?.('text/html'),
+      cd.getData?.('text/plain'),
+    );
+    if (mdTable) {
+      event.preventDefault();
+      insert(mdTable);
+      return true;
+    }
+  } catch {
+    /* ignore clipboard read errors */
+  }
   const images: Array<{ blob: Blob; ext: string }> = [];
   for (let i = 0; i < cd.items.length; i++) {
     const item = cd.items[i];
@@ -578,6 +753,16 @@ async function handleDrop(
   return true;
 }
 
+async function copyOrWriteLocal(srcPath: string, dstPath: string): Promise<void> {
+  if (isSafPath(dstPath)) {
+    const raw = await invoke<number[]>('read_binary_file', { path: srcPath });
+    const ok = await writeBytes(dstPath, new Uint8Array(raw));
+    if (!ok) throw new Error(`could not write SAF image ${dstPath}`);
+    return;
+  }
+  await invoke('copy_file', { src: srcPath, dst: dstPath });
+}
+
 /**
  * Insert a markdown image reference for an OS file path that the user
  * dragged into the window. Unlike paste/drop on the editor DOM (where we
@@ -610,7 +795,7 @@ export async function insertImageFromPath(
 
   if (!up || !up.onPaste) {
     try {
-      await invoke('copy_file', { src: srcPath, dst: local.fullPath });
+      await copyOrWriteLocal(srcPath, local.fullPath);
     } catch (err) {
       // Was a rethrow that nobody caught: the insert just didn't happen.
       reportFailure(opts, err);
@@ -624,15 +809,17 @@ export async function insertImageFromPath(
   // copy; otherwise upload the original file in place (no copy needed).
   let uploadSrc = srcPath;
   if (up.keepLocal) {
-    await invoke('copy_file', { src: srcPath, dst: local.fullPath });
-    uploadSrc = local.fullPath;
+    await copyOrWriteLocal(srcPath, local.fullPath);
+    if (!isSafPath(local.fullPath)) {
+      uploadSrc = local.fullPath;
+    }
   }
   const token = `solomd-uploading-${randSuffix()}${randSuffix()}`;
   insertAtCursor(view, `![](${token})`);
   const finalText = await performUpload(up, uploadSrc, opts, async () => {
     if (up.keepLocal) return local.insertText;
     try {
-      await invoke('copy_file', { src: srcPath, dst: local.fullPath });
+      await copyOrWriteLocal(srcPath, local.fullPath);
       return local.insertText;
     } catch {
       return markdownImage(srcPath.replace(/\\/g, '/'));
@@ -669,7 +856,7 @@ export async function imageTextFromPath(
   const local = await prepareLocalTarget(filename, opts);
   const copyLocal = async (): Promise<boolean> => {
     try {
-      await invoke('copy_file', { src: srcPath, dst: local.fullPath });
+      await copyOrWriteLocal(srcPath, local.fullPath);
       return true;
     } catch (err) {
       reportFailure(opts, err);
@@ -680,7 +867,9 @@ export async function imageTextFromPath(
   let uploadSrc = srcPath;
   if (up.keepLocal) {
     if (!(await copyLocal())) return null;
-    uploadSrc = local.fullPath;
+    if (!isSafPath(local.fullPath)) {
+      uploadSrc = local.fullPath;
+    }
   }
   return performUpload(up, uploadSrc, opts, async () => {
     if (up.keepLocal) return local.insertText;
@@ -705,6 +894,30 @@ export function imagePasteExtension(opts: ImagePasteOptions) {
         return true;
       }
       if (!cd || !cd.items) return false;
+      // #460 — Convert Excel / WPS / HTML / TSV table pastes to a GFM Markdown
+      // table (unless pasting inside a fenced code block) before the image-paste
+      // check consumes spreadsheet bitmap previews as PNGs.
+      try {
+        const sel = view.state.selection.main;
+        const lineStart = view.state.doc.lineAt(sel.from).from;
+        if (!insideFence(view.state.doc.toString(), lineStart)) {
+          const mdTable = clipboardTableToMarkdown(
+            cd.getData?.('text/html'),
+            cd.getData?.('text/plain'),
+          );
+          if (mdTable) {
+            event.preventDefault();
+            view.dispatch({
+              ...view.state.replaceSelection(mdTable),
+              userEvent: 'input.paste',
+              scrollIntoView: true,
+            });
+            return true;
+          }
+        }
+      } catch {
+        /* ignore clipboard read errors */
+      }
       let hasImage = false;
       for (let i = 0; i < cd.items.length; i++) {
         const it = cd.items[i];

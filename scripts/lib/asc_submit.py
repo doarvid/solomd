@@ -160,9 +160,17 @@ def main():
                      "READY_FOR_SALE"):
             sys.exit(f"ERROR: {args.version} is already {state} — nothing to do.")
     else:
-        version = client.create_version(app, platform, args.version,
-                                        release_type=args.release_type)
-        print(f"    created {version['id']} ({args.release_type})")
+        editable = client.find_editable_version(app, platform)
+        if editable:
+            old_ver = editable["attributes"].get("versionString")
+            state = editable["attributes"].get("appStoreState") or \
+                    editable["attributes"].get("state")
+            print(f"    reusing editable version {old_ver} ({state}) -> {args.version}")
+            version = client.update_version_string(editable["id"], args.version)
+        else:
+            version = client.create_version(app, platform, args.version,
+                                            release_type=args.release_type)
+            print(f"    created {version['id']} ({args.release_type})")
 
     if notes or args.notes_dir:
         locs = client.localizations(version["id"])

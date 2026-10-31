@@ -29,6 +29,18 @@
  */
 
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { isWindowsDesktop } from './platform';
+
+/**
+ * Normalize line endings for clipboard plain text (#486).
+ * Traditional Windows desktop apps (e.g. 通达信 formula editor, classic Win32
+ * edit controls) require CRLF (`\r\n`) in `CF_UNICODETEXT` / `text/plain` and
+ * collapse bare LF (`\n`) into a single line.
+ */
+export function formatClipboardCodeText(text: string, windows = isWindowsDesktop()): string {
+  if (!windows) return text;
+  return text.replace(/\r?\n/g, '\r\n');
+}
 
 /**
  * Write `text` to the system clipboard. Prefers the Tauri clipboard plugin
@@ -38,11 +50,12 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
  * self-tests.
  */
 export async function copyPlainText(text: string): Promise<void> {
+  const payload = formatClipboardCodeText(text);
   try {
-    await writeText(text);
+    await writeText(payload);
   } catch (err) {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(payload);
       return;
     }
     throw err;

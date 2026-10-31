@@ -97,8 +97,10 @@ PLIST="app/$APP/Contents/Info.plist"
 # .md / .txt associations so MAS users see the brand icon when previewing.
 cp app/src-tauri/icons/file_icon.icns "app/$APP/Contents/Resources/file_icon.icns"
 for i in 0 1; do
-  /usr/libexec/PlistBuddy -c "Delete :CFBundleDocumentTypes:${i}:CFBundleTypeIconFile" "$PLIST" 2>/dev/null || true
-  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:${i}:CFBundleTypeIconFile string file_icon.icns" "$PLIST"
+  if /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:${i}" "$PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Delete :CFBundleDocumentTypes:${i}:CFBundleTypeIconFile" "$PLIST" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:${i}:CFBundleTypeIconFile string file_icon.icns" "$PLIST"
+  fi
 done
 
 echo "==> Embedding provisioning profile"

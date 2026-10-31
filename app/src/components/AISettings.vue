@@ -1120,13 +1120,26 @@ function onProviderChange(ev: Event): void {
   margin-left: 6px;
 }
 .ai-settings__input {
-  flex: 1;
+  flex: 1 1 0;
+  /* #470 — the provider <select>'s intrinsic width is its widest <option>
+     ("OpenAI 兼容 / OpenAI-compatible (llama.cpp · LM Studio · vLLM)"), and a
+     flex item's default min-width:auto refuses to shrink below that, blowing
+     the row past the card edge. Allow shrinking; the closed control then
+     matches the model input like every other row. */
+  min-width: 0;
+  box-sizing: border-box;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 8px;
   font-size: 12px;
+}
+select.ai-settings__input {
+  flex: 0 1 260px;
+  max-width: 260px;
+  width: 100%;
+  text-overflow: ellipsis;
 }
 .ai-settings__keybox {
   display: flex;

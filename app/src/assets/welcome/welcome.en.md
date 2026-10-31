@@ -27,7 +27,7 @@ This tour is **four short notes**. Open any tab to keep reading.
 - **Front-matter `imageRoot`** lets every paste/drop write to a custom image folder per document.
 - **Your notes never leave your device.** SoloMD sends anonymous usage counts (features used, version, OS — never file content); one switch turns them off: Settings → Advanced → *Send anonymous usage data*. The App Store versions send none.
 
-> Tip: press `Ctrl+K` (or `Cmd+K`) to open the **command palette** — it lists everything SoloMD can do.
+> Tip: press `Ctrl+Shift+K` (or `Cmd+Shift+K`) to open the **command palette** — it lists everything SoloMD can do.
 
 That's it. Close these tutorial tabs whenever you're done — they live only in memory and won't write to disk unless you `Save As`.
 

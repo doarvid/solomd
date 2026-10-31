@@ -11,6 +11,7 @@ import mark from 'markdown-it-mark';
 import cjkFriendly from 'markdown-it-cjk-friendly';
 import yaml from 'js-yaml';
 import { numberEquations } from './equations';
+import { parseImageAltSize } from './md-image-url';
 import { sanitizeRenderedHtml } from './sanitize-html';
 import { getHljs, getKatex } from './render-deps';
 
@@ -118,6 +119,21 @@ export const md = new MarkdownIt({
   .use(mark)
   .use(cjkFriendly);
 
+// #504 — Disable schemeless fuzzy domain auto-linking so stock ticker codes
+// like `00700.HK`, `600519.SH`, `000001.SZ`, or filenames like `README.md` are
+// not falsely turned into `http://00700.HK` links just because `.hk`/`.sh`/`.sz`/`.md`
+// happen to be valid country TLDs. Explicit `http(s)://...` URLs and `<...>`
+// autolinks continue to linkify as expected.
+md.linkify.set({ fuzzyLink: false });
+
+// #464 — Allow GFM tables to interrupt blockquotes and lists without requiring
+// a blank line, matching CodeMirror's GFM parser in Live mode (`> quote\n| a | b |`).
+const tableBlockRule = (md.block.ruler as any).__rules__?.find((r: any) => r.name === 'table');
+if (tableBlockRule) {
+  tableBlockRule.alt = ['paragraph', 'reference', 'blockquote', 'list'];
+}
+(md.block.ruler as any).__cache__ = null;
+
 // ---- Wikilink rule (`[[X]]`, `[[X|alias]]`, `[[X#heading]]`) ---------------
 // Used by F1 (v2.0). Renders into <a class="md-wikilink" data-wikilink-target="X">…</a>.
 // Preview.vue intercepts clicks and resolves through the workspace index.
@@ -200,6 +216,37 @@ md.inline.ruler.before('image', 'image_spaced_path', (state, silent) => {
   state.pos += m[0].length;
   return true;
 });
+
+// ---- Image size syntax (`![alt|50%](url)` / `![alt|300](url)`) (#446) -------
+const defaultImageRenderer = md.renderer.rules.image;
+md.renderer.rules.image = function (tokens, idx, options, env, self) {
+  const token = tokens[idx];
+  if (!token.attrGet('referrerpolicy')) {
+    token.attrSet('referrerpolicy', 'no-referrer');
+  }
+  const rawAlt = token.children
+    ? self.renderInlineAsText(token.children, options, env)
+    : (token.content || token.attrGet('alt') || '');
+  const parsed = parseImageAltSize(rawAlt);
+  if (parsed.width) {
+    const existingStyle = token.attrGet('style');
+    const sizeStyle = `width: ${parsed.width};${parsed.height ? ` height: ${parsed.height};` : ''}`;
+    token.attrSet('style', existingStyle ? `${existingStyle}; ${sizeStyle}` : sizeStyle);
+    if (parsed.width.endsWith('px')) {
+      token.attrSet('width', parsed.width.slice(0, -2));
+    }
+    if (parsed.height?.endsWith('px')) {
+      token.attrSet('height', parsed.height.slice(0, -2));
+    }
+  }
+  const html = defaultImageRenderer
+    ? defaultImageRenderer(tokens, idx, options, env, self)
+    : self.renderToken(tokens, idx, options);
+  if (parsed.width) {
+    return html.replace(/\balt="[^"]*"/, `alt="${escapeHtml(parsed.alt)}"`);
+  }
+  return html;
+};
 
 // ---- Source line mapping for split-pane scroll sync ----
 // Annotate every block-level opening token with `data-source-line` set to
@@ -1247,9 +1294,56 @@ export function normalizeLatexDelimiters(source: string): string {
  * source of truth. The numbered-section step is gated behind its opt-in
  * setting.
  */
+// Converts backslashes to forward slashes in markdown image destinations
+// so that Windows paths like `![x](E:\photos\a.png)` survive markdown-it's
+// CommonMark escape processing (which strips `\p` → `p`, `\i` → `i`, etc.).
+// LiveEdit mode reads the raw source and is unaffected; only the preview /
+// split / PDF / DOCX pipelines go through markdown-it and need this.
+function normalizeImageBackslashPaths(source: string): string {
+  if (!source.includes('\\')) return source;
+  const lines = source.split('\n');
+  const out: string[] = [];
+  let inFence = false;
+  let fenceChar = '';
+  const fenceRe = /^(\s*)(```+|~~~+)/;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fm = fenceRe.exec(line);
+    if (fm) {
+      if (!inFence) {
+        inFence = true;
+        fenceChar = fm[2][0];
+        out.push(line);
+        continue;
+      }
+      if (fm[2][0] === fenceChar && fm[2].length >= 3) {
+        inFence = false;
+        fenceChar = '';
+      }
+      out.push(line);
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+    // Match ![alt](path) where path contains backslashes.
+    // The path is everything between ( and ) that is not ) or whitespace at the end.
+    out.push(
+      line.replace(
+        /(!\[[^\]]*\]\()([^)\n]+?)(\s*\))/g,
+        (_match, prefix: string, path: string, suffix: string) =>
+          prefix + path.replace(/\\/g, '/') + suffix,
+      ),
+    );
+  }
+  return out.join('\n');
+}
+
 export function preprocessMarkdown(source: string): string {
   let s = normalizeTableDelimiters(unwrapInlineHtmlBlocks(source || ''));
   s = normalizeLatexDelimiters(s);
+  s = normalizeImageBackslashPaths(s);
   if (autoNumberHeadings) s = numberedSectionHeadings(s);
   // `\label` / `\eqref` are LaTeX that KaTeX does not implement — resolve
   // them to `\tag` + anchors + links here so preview, PDF, Word and image

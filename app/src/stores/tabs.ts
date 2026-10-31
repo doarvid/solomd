@@ -110,6 +110,7 @@ function bucketKey(folder: string | null): string {
 }
 
 function isDirty(t: Tab): boolean {
+  if (t.ephemeral && !t.filePath) return false;
   return t.content !== t.savedContent;
 }
 
@@ -131,7 +132,17 @@ function readBucket(key: string): PersistedState | null {
     const raw = localStorage.getItem(key);
     if (raw) {
       const data = JSON.parse(raw) as PersistedState;
-      if (Array.isArray(data.tabs)) return { tabs: data.tabs, activeId: data.activeId || '' };
+      if (Array.isArray(data.tabs)) {
+        for (const t of data.tabs) {
+          if (typeof t.content === 'string' && t.content.includes('\r\n')) {
+            t.content = t.content.replace(/\r\n/g, '\n');
+          }
+          if (typeof t.savedContent === 'string' && t.savedContent.includes('\r\n')) {
+            t.savedContent = t.savedContent.replace(/\r\n/g, '\n');
+          }
+        }
+        return { tabs: data.tabs, activeId: data.activeId || '' };
+      }
     }
   } catch {}
   return null;
@@ -210,7 +221,9 @@ export const useTabsStore = defineStore('tabs', {
     isDirty(): (id: string) => boolean {
       return (id: string) => {
         const t = this.tabs.find((x) => x.id === id);
-        return !!t && t.content !== t.savedContent;
+        if (!t) return false;
+        if (t.ephemeral && !t.filePath) return false;
+        return t.content !== t.savedContent;
       };
     },
   },
@@ -504,6 +517,25 @@ export const useTabsStore = defineStore('tabs', {
       const target = Math.max(0, Math.min(adjusted, this.tabs.length));
       if (target === fromIdx) { this.tabs.splice(fromIdx, 0, moved); return; }
       this.tabs.splice(target, 0, moved);
+    },
+    togglePin(tabId: string) {
+      const idx = this.tabs.findIndex((t) => t.id === tabId);
+      if (idx < 0) return;
+      const tab = this.tabs[idx];
+      tab.pinned = !tab.pinned;
+      const [moved] = this.tabs.splice(idx, 1);
+      if (tab.pinned) {
+        let lastPinned = -1;
+        for (let i = 0; i < this.tabs.length; i++) {
+          if (this.tabs[i].pinned) lastPinned = i;
+        }
+        this.tabs.splice(lastPinned + 1, 0, moved);
+      } else {
+        let firstUnpinned = this.tabs.findIndex((t) => !t.pinned);
+        if (firstUnpinned < 0) firstUnpinned = this.tabs.length;
+        this.tabs.splice(firstUnpinned, 0, moved);
+      }
+      this.persist();
     },
     toggleOutline(id: string) {
       const t = this.tabs.find((x) => x.id === id);

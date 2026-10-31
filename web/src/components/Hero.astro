@@ -5,7 +5,7 @@ interface Props { lang: Lang }
 const { lang } = Astro.props;
 const tr = getT(lang);
 
-const VERSION = '5.0.4';
+const VERSION = '5.0.10';
 const REPO = 'zhitongblog/solomd';
 const baseUrl = `https://github.com/${REPO}/releases/download/v${VERSION}`;
 const GITHUB_URL = `https://github.com/${REPO}`;
@@ -141,10 +141,14 @@ const initialDownloadsText = initialDownloads > 0 ? fmtDownloads(initialDownload
         data-mac-text={tr.hero.ctaForMac}
         data-win-text={tr.hero.ctaForWindows}
         data-linux-text={tr.hero.ctaForLinux}
+        data-android-text={lang === 'zh' ? '下载 Android 版本 (.apk)' : 'Download for Android (.apk)'}
+        data-ios-text={lang === 'zh' ? '在 App Store 获取 (iOS)' : 'Get on App Store (iOS)'}
         data-mac-href={`${baseUrl}/SoloMD_${VERSION}_universal.dmg`}
         data-win-href={`${baseUrl}/SoloMD_${VERSION}_x64_en-US.msi`}
         data-win-arm-href={`${baseUrl}/SoloMD_${VERSION}_arm64_en-US.msi`}
         data-linux-href={`${baseUrl}/SoloMD_${VERSION}_amd64.AppImage`}
+        data-android-href={`${baseUrl}/SoloMD_${VERSION}_arm64-v8a.apk`}
+        data-ios-href="https://apps.apple.com/app/id6762498874"
       >
         ⬇ {tr.hero.ctaPrimary}
       </a>
@@ -333,13 +337,15 @@ const initialDownloadsText = initialDownloads > 0 ? fmtDownloads(initialDownload
     var ua = navigator.userAgent || '';
     var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
     var os = 'mac';
-    if (/Win/i.test(ua) || /Windows/i.test(platform)) os = 'win';
+    if (/Android/i.test(ua)) os = 'android';
+    else if (/iPhone|iPad|iPod/i.test(ua) || (/Mac/i.test(platform) && navigator.maxTouchPoints > 1)) os = 'ios';
+    else if (/Win/i.test(ua) || /Windows/i.test(platform)) os = 'win';
     else if (/Linux/i.test(ua) && !/Android/i.test(ua)) os = 'linux';
-    else if (/Mac|iPhone|iPad/i.test(ua) || /Mac/i.test(platform)) os = 'mac';
+    else if (/Mac/i.test(ua) || /Mac/i.test(platform)) os = 'mac';
     var href = btn.getAttribute('data-' + os + '-href');
     var text = btn.getAttribute('data-' + os + '-text');
     if (href) btn.setAttribute('href', href);
-    if (text) btn.innerHTML = '⬇ ' + text;
+    if (text) btn.innerHTML = (os === 'ios' ? '↗ ' : '⬇ ') + text;
 
     // Also switch the one-line install block to Windows if user is on Windows
     if (os === 'win') {

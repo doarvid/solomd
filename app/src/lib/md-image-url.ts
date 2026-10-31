@@ -37,3 +37,86 @@ export function encodeImageDestination(path: string): string {
 export function markdownImage(path: string, alt = ''): string {
   return `![${alt}](${encodeImageDestination(path)})`;
 }
+
+export interface ParsedImageAltSize {
+  alt: string;
+  width: string | null;
+  height: string | null;
+}
+
+const ALT_SIZE_RE = /^(.*?)\|\s*(\d{1,4}(?:%|px)?)(?:\s*[x×]\s*(\d{1,4}(?:%|px)?))?\s*$/i;
+
+function normalizeImageDimension(dim: string): string {
+  const trimmed = dim.trim();
+  return /^\d+$/.test(trimmed) ? `${trimmed}px` : trimmed.toLowerCase();
+}
+
+/**
+ * #446 — Parse optional Obsidian/Markdown pipe size syntax at the end of an
+ * image's alt text: `![alt|50%](url)`, `![|300](url)`, `![alt|400x300](url)`.
+ */
+export function parseImageAltSize(rawAlt: string): ParsedImageAltSize {
+  const m = ALT_SIZE_RE.exec(rawAlt);
+  if (!m) {
+    return { alt: rawAlt, width: null, height: null };
+  }
+  return {
+    alt: m[1].trimEnd(),
+    width: normalizeImageDimension(m[2]),
+    height: m[3] ? normalizeImageDimension(m[3]) : null,
+  };
+}
+
+const MD_IMAGE_RESIZE_RE = /^(\s*!\[)([^\]]*)(\]\([^\n]+\)\s*)$/;
+const HTML_IMG_TAG_RE = /<img\b([^>]*?)(\/?)>/i;
+
+/**
+ * #446 — Update the display width of a Markdown image (`![alt](url)` ->
+ * `![alt|50%](url)`) or HTML `<img ...>` line. Passing `'100%'` or `''`
+ * restores the natural/default 100% size by removing the size override.
+ * Returns the updated line text, or `null` if the line is not an image line.
+ */
+export function resizeMarkdownImageLine(line: string, size: string): string | null {
+  const normalizedSize = size.trim();
+  const isReset = !normalizedSize || normalizedSize === '100%';
+  const mdMatch = MD_IMAGE_RESIZE_RE.exec(line);
+  if (mdMatch) {
+    const baseAlt = parseImageAltSize(mdMatch[2]).alt;
+    const nextAlt = isReset
+      ? baseAlt
+      : baseAlt
+        ? `${baseAlt}|${normalizedSize}`
+        : `|${normalizedSize}`;
+    return `${mdMatch[1]}${nextAlt}${mdMatch[3]}`;
+  }
+
+  const htmlMatch = HTML_IMG_TAG_RE.exec(line);
+  if (htmlMatch) {
+    let attrs = htmlMatch[1]
+      .replace(/\s+width\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/\s+height\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    if (/\bstyle\s*=\s*"([^"]*)"/i.test(attrs)) {
+      attrs = attrs.replace(/\bstyle\s*=\s*"([^"]*)"/i, (_m, styleBody: string) => {
+        const cleaned = styleBody
+          .replace(/(?:^|;)\s*(?:width|height|zoom)\s*:[^;]*/gi, '')
+          .replace(/^;\s*|\s*;$/g, '')
+          .trim();
+        if (isReset) return cleaned ? `style="${cleaned}"` : '';
+        const dim = normalizeImageDimension(normalizedSize);
+        return `style="${cleaned ? `${cleaned}; ` : ''}width: ${dim};"`;
+      });
+    } else if (!isReset) {
+      const dim = normalizeImageDimension(normalizedSize);
+      attrs = `${attrs.trimEnd()} width="${dim.endsWith('px') ? dim.slice(0, -2) : dim}" style="width: ${dim};"`;
+    }
+    const cleanAttrs = attrs.replace(/\s{2,}/g, ' ').trim();
+    const selfClose = htmlMatch[2] ? ' /' : '';
+    return line.replace(
+      HTML_IMG_TAG_RE,
+      `<img${cleanAttrs ? ` ${cleanAttrs}` : ''}${selfClose}>`,
+    );
+  }
+
+  return null;
+}
+

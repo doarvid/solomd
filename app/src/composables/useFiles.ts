@@ -15,6 +15,7 @@ import { useToastsStore } from '../stores/toasts';
 import { useRecentEditsStore } from '../stores/recentEdits';
 import { useWindowsStore } from '../stores/windows';
 import { openImageOverlay, type OverlayStrings } from '../lib/image-overlay';
+import { loadSafImageDataUrl } from '../lib/image-resolve';
 import { openPath as openWithSystemDefault } from '@tauri-apps/plugin-opener';
 import { useI18n } from '../i18n';
 import type { FileReadResult, Tab } from '../types';
@@ -179,12 +180,20 @@ export function useFiles() {
     const fileName = path.split(/[\\/]/).pop() ?? path;
     try {
       const img = new Image();
-      img.src = convertFileSrc(path);
+      const safDataUrl = isSafPath(path) ? await loadSafImageDataUrl(path) : null;
+      img.src = safDataUrl || convertFileSrc(path);
       img.alt = fileName;
       await new Promise<void>((resolve, reject) => {
         if (img.complete && img.naturalWidth > 0) return resolve();
         img.onload = () => resolve();
-        img.onerror = () => reject(new Error('image failed to load'));
+        img.onerror = async () => {
+          const fallbackUrl = await loadSafImageDataUrl(path);
+          if (fallbackUrl && img.src !== fallbackUrl) {
+            img.src = fallbackUrl;
+            return;
+          }
+          reject(new Error('image failed to load'));
+        };
       });
       openImageOverlay({ source: img, title: fileName, strings: overlayStrings() });
       workspace.pushRecent(path);
@@ -897,12 +906,22 @@ export function useFiles() {
       return true;
     } catch (e) {
       console.error('save failed', e);
-      toasts.error(t('toast.saveFailed', { error: String(e) }));
+      const errStr = String(e);
+      if (!opts.silent) {
+        toasts.warning(
+          settings.language === 'zh'
+            ? `无法直接保存「${tab.fileName}」（可能为只读文件），请选择另存为位置`
+            : `Cannot overwrite "${tab.fileName}" (read-only or permission denied) — choose where to Save As`,
+          6500,
+        );
+        return await saveTabAs(tab, { suggestCopyName: true });
+      }
+      toasts.error(t('toast.saveFailed', { error: errStr }), 6000);
       return false;
     }
   }
 
-  async function saveTabAs(tab: Tab): Promise<boolean> {
+  async function saveTabAs(tab: Tab, opts: { suggestCopyName?: boolean } = {}): Promise<boolean> {
     const defaultName =
       deriveNameFromHeading(tab) ||
       tab.fileName ||
@@ -922,8 +941,12 @@ export function useFiles() {
       const dir = tab.filePath
         ? null
         : await pickerStartDir(newFileDirFor(treeSelection(), tabs.activeTab?.filePath));
+      const suggestedExistingPath =
+        tab.filePath && opts.suggestCopyName
+          ? tab.filePath.replace(/(\.[^./\\]+)?$/, '-copy$1')
+          : tab.filePath;
       path = await saveDialog({
-        defaultPath: tab.filePath ?? (dir ? joinInFolder(dir, defaultName) : defaultName),
+        defaultPath: suggestedExistingPath ?? (dir ? joinInFolder(dir, defaultName) : defaultName),
         filters: SAVE_FILTERS,
       });
       if (!path) return false;

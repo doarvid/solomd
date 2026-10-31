@@ -229,6 +229,35 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
   dom.addEventListener('keydown', (e) => {
     // An Enter that confirms an IME candidate is not "next match".
     if (e.isComposing || e.keyCode === 229) return;
+    // #389 — pressing Ctrl+F / Cmd+F again while the search box is focused
+    // closes the search panel and returns focus to the editor.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'f' || e.code === 'KeyF') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.target === replaceField) {
+          findField.focus();
+          findField.select();
+        } else {
+          closeSearchPanel(view);
+          view.focus();
+        }
+        return;
+      }
+      if (k === 'h' || e.code === 'KeyH') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.target === replaceField) {
+          closeSearchPanel(view);
+          view.focus();
+        } else {
+          replaceField.focus();
+          replaceField.select();
+        }
+        return;
+      }
+    }
     if (runScopeHandlers(view, e, 'search-panel')) {
       e.preventDefault();
       return;

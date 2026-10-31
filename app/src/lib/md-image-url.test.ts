@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import MarkdownIt from 'markdown-it';
 
-import { encodeImageDestination, markdownImage } from './md-image-url.ts';
+import {
+  encodeImageDestination,
+  markdownImage,
+  parseImageAltSize,
+  resizeMarkdownImageLine,
+} from './md-image-url.ts';
 
 const md = new MarkdownIt();
 const srcOf = (markdown: string): string | null => {
@@ -58,3 +63,50 @@ test('remote URLs keep their encoding; only whitespace is touched', () => {
 test('alt text is kept', () => {
   assert.equal(markdownImage('a b.png', 'logo'), '![logo](a%20b.png)');
 });
+
+test('#446: parseImageAltSize parses pipe width/height in alt text', () => {
+  assert.deepEqual(parseImageAltSize('screenshot|50%'), {
+    alt: 'screenshot',
+    width: '50%',
+    height: null,
+  });
+  assert.deepEqual(parseImageAltSize('|300'), {
+    alt: '',
+    width: '300px',
+    height: null,
+  });
+  assert.deepEqual(parseImageAltSize('diagram | 400x250'), {
+    alt: 'diagram',
+    width: '400px',
+    height: '250px',
+  });
+  assert.deepEqual(parseImageAltSize('plain caption'), {
+    alt: 'plain caption',
+    width: null,
+    height: null,
+  });
+});
+
+test('#446: resizeMarkdownImageLine updates Markdown and HTML image lines', () => {
+  assert.equal(
+    resizeMarkdownImageLine('![photo](_assets/a.png)', '50%'),
+    '![photo|50%](_assets/a.png)',
+  );
+  assert.equal(
+    resizeMarkdownImageLine('![](_assets/a.png)', '25%'),
+    '![|25%](_assets/a.png)',
+  );
+  assert.equal(
+    resizeMarkdownImageLine('![photo|50%](_assets/a.png)', '100%'),
+    '![photo](_assets/a.png)',
+  );
+  assert.equal(
+    resizeMarkdownImageLine('<img src="a.png" alt="pic">', '75%'),
+    '<img src="a.png" alt="pic" width="75%" style="width: 75%;">',
+  );
+  assert.equal(
+    resizeMarkdownImageLine('<img src="a.png" width="75%" style="width: 75%;">', '100%'),
+    '<img src="a.png">',
+  );
+});
+

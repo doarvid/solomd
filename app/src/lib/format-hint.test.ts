@@ -17,8 +17,9 @@ test('italic is not confused with bold', () => {
   assert.equal(at('2 * 3 *'), null); // arithmetic, space-padded
 });
 
-test('strike, inline code, link', () => {
+test('strike, highlight, inline code, link', () => {
   assert.equal(at('~~gone~~'), 'strike');
+  assert.equal(at('==marked=='), 'highlight');
   assert.equal(at('run `npm i`'), 'code');
   assert.equal(at('see [docs]('), 'link');
   assert.equal(at('f('), null);

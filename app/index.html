@@ -11,6 +11,8 @@
          `user-scalable=no` because the app provides its own ⌘+/⌘-/⌘0
          zoom controls; pinch-zoom would break editor selection. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <!-- #493 — omit Referer (http://tauri.localhost/) on remote image/asset requests so CDNs with anti-hotlink filters (e.g. Gitee) do not return HTTP 403 on Windows WebView2. -->
+    <meta name="referrer" content="no-referrer" />
     <title>SoloMD</title>
   </head>
 

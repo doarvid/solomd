@@ -248,6 +248,10 @@ defineProps<{ name: string; size?: number }>();
     <template v-else-if="name === 'italic'">
       <path d="M14 5h-4M14 19h-4M14 5l-4 14" />
     </template>
+    <template v-else-if="name === 'highlight'">
+      <path d="m9 11-6 6v3h9l3-3" />
+      <path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4" />
+    </template>
     <template v-else-if="name === 'code'">
       <path d="M8 8l-4 4 4 4M16 8l4 4-4 4" />
     </template>

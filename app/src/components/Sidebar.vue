@@ -579,7 +579,7 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--ui-font-size, 13px);
   text-align: left;
   cursor: default;
 }
@@ -942,7 +942,7 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   background: var(--bg);
   border-right: 0;
-  font-size: 15px;
+  font-size: calc(var(--ui-font-size, 13px) + 2px);
 }
 .sb__title {
   margin: 0;
@@ -1007,7 +1007,7 @@ onBeforeUnmount(() => {
 /* (0,3,0) — beats FileTree's own scoped `.ftree[data-v] .ftree__item`. */
 .sb.sb--phone :deep(.ftree .ftree__item) {
   min-height: 44px;
-  font-size: 15px;
+  font-size: calc(var(--ui-font-size, 13px) + 2px);
   border-radius: var(--r-md);
 }
 .sb--phone .sb__scroll {

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.util.Base64
 import androidx.activity.enableEdgeToEdge
 import com.android.billingclient.api.AcknowledgePurchaseParams
 import com.android.billingclient.api.BillingClient
@@ -390,6 +391,70 @@ class MainActivity : TauriActivity() {
       envelope { put("v", text) }
     } catch (e: Exception) { err(e) } }
 
+    /** Resolve a child documentId by walking path segments from rootDocId when direct docId lookup fails. */
+    private fun resolveChildDocIdBySegments(tree: Uri, startDocId: String, segments: List<String>): String? {
+      val r = resolver() ?: return null
+      var curDocId = startDocId
+      for (seg in segments) {
+        if (seg.isEmpty() || seg == ".") continue
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, curDocId)
+        var found: String? = null
+        var ciFound: String? = null
+        r.query(
+          children,
+          arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME
+          ),
+          null, null, null
+        )?.use { c ->
+          while (c.moveToNext()) {
+            val cid = c.getString(0)
+            val name = if (c.isNull(1)) cid.substringAfterLast('/') else c.getString(1)
+            if (name == seg) {
+              found = cid
+              break
+            } else if (ciFound == null && name.equals(seg, ignoreCase = true)) {
+              ciFound = cid
+            }
+          }
+        }
+        curDocId = found ?: ciFound ?: return null
+      }
+      return curDocId
+    }
+
+    /** #476 — Read binary document bytes as Base64 for local images inside a SAF folder. */
+    @JvmStatic
+    fun readBase64(treeUri: String, docId: String): String { return try {
+      val tree = Uri.parse(treeUri)
+      val r = resolver() ?: return err2("no resolver")
+      var bytes: ByteArray? = try {
+        val uri = DocumentsContract.buildDocumentUriUsingTree(tree, docId)
+        r.openInputStream(uri)?.use { it.readBytes() }
+      } catch (_: Exception) {
+        null
+      }
+      if (bytes == null) {
+        val rootDocId = DocumentsContract.getTreeDocumentId(tree)
+        val relPath = when {
+          docId.startsWith("$rootDocId/") -> docId.removePrefix("$rootDocId/")
+          docId.contains(':') && rootDocId.contains(':') &&
+            docId.substringAfter(':').startsWith(rootDocId.substringAfter(':') + "/") ->
+            docId.substringAfter(':').removePrefix(rootDocId.substringAfter(':') + "/")
+          else -> docId.substringAfter(':')
+        }
+        val segments = relPath.split('/').filter { it.isNotEmpty() && it != "." }
+        val resolvedDocId = resolveChildDocIdBySegments(tree, rootDocId, segments)
+        if (resolvedDocId != null) {
+          val uri = DocumentsContract.buildDocumentUriUsingTree(tree, resolvedDocId)
+          bytes = r.openInputStream(uri)?.use { it.readBytes() }
+        }
+      }
+      val data = bytes ?: return err2("openInputStream null")
+      envelope { put("v", Base64.encodeToString(data, Base64.NO_WRAP)) }
+    } catch (e: Exception) { err(e) } }
+
     /** Overwrite a document with UTF-8 text ("wt" truncates). */
     @JvmStatic
     fun writeText(treeUri: String, docId: String, content: String): String { return try {
@@ -398,6 +463,38 @@ class MainActivity : TauriActivity() {
       r.openOutputStream(uri, "wt")?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
         ?: return err2("openOutputStream null")
       envelope { put("v", true) }
+    } catch (e: Exception) { err(e) } }
+
+    /** #502 — Overwrite a SAF document with binary Base64 bytes (e.g. pasted/inserted image in _assets). */
+    @JvmStatic
+    fun writeBase64(treeUri: String, docId: String, b64: String): String { return try {
+      val uri = DocumentsContract.buildDocumentUriUsingTree(Uri.parse(treeUri), docId)
+      val r = resolver() ?: return err2("no resolver")
+      val bytes = Base64.decode(b64, Base64.DEFAULT)
+      val stream = try {
+        r.openOutputStream(uri, "wt")
+      } catch (_: Exception) {
+        try {
+          r.openOutputStream(uri, "w")
+        } catch (_: Exception) {
+          r.openOutputStream(uri)
+        }
+      }
+      stream?.use {
+        it.write(bytes)
+        it.flush()
+      } ?: return err2("openOutputStream null")
+      envelope { put("v", true) }
+    } catch (e: Exception) { err(e) } }
+
+    /** #502 — Read binary bytes from a standalone content:// URI (e.g. Android photo picker). */
+    @JvmStatic
+    fun readContentUriBase64(uriStr: String): String { return try {
+      val uri = Uri.parse(uriStr)
+      val r = resolver() ?: return err2("no resolver")
+      val bytes = r.openInputStream(uri)?.use { it.readBytes() }
+        ?: return err2("openInputStream null")
+      envelope { put("v", Base64.encodeToString(bytes, Base64.NO_WRAP)) }
     } catch (e: Exception) { err(e) } }
 
     /** Create a new document under parentDocId; returns its documentId. */
@@ -409,6 +506,110 @@ class MainActivity : TauriActivity() {
         ?: return err2("createDocument null")
       envelope { put("v", DocumentsContract.getDocumentId(created)) }
     } catch (e: Exception) { err(e) } }
+
+    /** Write Base64-encoded bytes to a standalone content:// URI (e.g. from ACTION_CREATE_DOCUMENT). */
+    @JvmStatic
+    fun writeContentUriBase64(uriStr: String, b64: String): String { return try {
+      val uri = Uri.parse(uriStr)
+      val r = resolver() ?: return err2("no resolver")
+      val bytes = Base64.decode(b64, Base64.DEFAULT)
+      val stream = try {
+        r.openOutputStream(uri, "wt")
+      } catch (_: Exception) {
+        try {
+          r.openOutputStream(uri, "w")
+        } catch (_: Exception) {
+          r.openOutputStream(uri)
+        }
+      }
+      stream?.use {
+        it.write(bytes)
+        it.flush()
+      } ?: return err2("openOutputStream null")
+      envelope { put("v", true) }
+    } catch (e: Exception) { err(e) } }
+
+    @JvmStatic
+    private val printFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun findWebView(view: android.view.View?): android.webkit.WebView? {
+      if (view is android.webkit.WebView) return view
+      if (view is android.view.ViewGroup) {
+        for (i in 0 until view.childCount) {
+          val found = findWebView(view.getChildAt(i))
+          if (found != null) return found
+        }
+      }
+      return null
+    }
+
+    /** Trigger Android's native Print / Save-as-PDF dialog for the active WebView. */
+    @JvmStatic
+    fun printWebView(jobName: String): String {
+      val act = instance ?: return err2("no activity")
+      printFinished.set(false)
+      val errRef = AtomicReference<String?>(null)
+      val latch = java.util.concurrent.CountDownLatch(1)
+      act.runOnUiThread {
+        try {
+          val wv = findWebView(act.window?.decorView)
+          if (wv == null) {
+            errRef.set("no WebView found")
+            latch.countDown()
+            return@runOnUiThread
+          }
+          val pm = act.getSystemService(Context.PRINT_SERVICE) as? android.print.PrintManager
+          if (pm == null) {
+            errRef.set("PrintManager unavailable")
+            latch.countDown()
+            return@runOnUiThread
+          }
+          val safeName = jobName.ifEmpty { "SoloMD" }
+          val delegate = wv.createPrintDocumentAdapter(safeName)
+          val wrapper = object : android.print.PrintDocumentAdapter() {
+            override fun onStart() {
+              delegate.onStart()
+            }
+            override fun onLayout(
+              oldAttributes: android.print.PrintAttributes?,
+              newAttributes: android.print.PrintAttributes?,
+              cancellationSignal: android.os.CancellationSignal?,
+              callback: LayoutResultCallback?,
+              extras: Bundle?
+            ) {
+              delegate.onLayout(oldAttributes, newAttributes, cancellationSignal, callback, extras)
+            }
+            override fun onWrite(
+              pages: Array<out android.print.PageRange>?,
+              destination: android.os.ParcelFileDescriptor?,
+              cancellationSignal: android.os.CancellationSignal?,
+              callback: WriteResultCallback?
+            ) {
+              delegate.onWrite(pages, destination, cancellationSignal, callback)
+            }
+            override fun onFinish() {
+              try {
+                delegate.onFinish()
+              } finally {
+                printFinished.set(true)
+              }
+            }
+          }
+          pm.print(safeName, wrapper, android.print.PrintAttributes.Builder().build())
+          latch.countDown()
+        } catch (e: Exception) {
+          errRef.set(e.message ?: e.toString())
+          latch.countDown()
+        }
+      }
+      latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+      val errMsg = errRef.get()
+      if (errMsg != null) return err2(errMsg)
+      return envelope { put("v", true) }
+    }
+
+    @JvmStatic
+    fun pollPrintFinished(): String = if (printFinished.getAndSet(false)) "1" else "0"
 
     /** Delete a document (file or empty dir). */
     @JvmStatic

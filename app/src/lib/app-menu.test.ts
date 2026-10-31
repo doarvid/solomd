@@ -77,6 +77,7 @@ const PALETTE_MENU_IDS = [
   'export.copyPlain', 'export.copyImage', 'inbox.open', 'inbox.organizeAndAdvance',
   'sync.pullNow', 'sync.pushNow', 'sync.copyShareLink', 'note.copyGitUrl',
   'history.commitNow', 'history.initWorkspace', 'history.toggleAutoGit',
+  'sync.webdavPush', 'sync.webdavPull', 'sync.webdavSettings',
   // Edit
   'editor.caseUpper', 'editor.caseLower', 'editor.caseTitle', 'cn.s2t', 'cn.t2s', 'cn.copyPinyin',
   'clean.stripMarkdown',

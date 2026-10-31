@@ -122,6 +122,21 @@ pub fn saf_read(tree_uri: String, doc_id: String) -> Result<String, String> {
     }
 }
 
+/// #476 — Read a document as Base64-encoded bytes (used for images and binary
+/// assets inside SAF folders on Android).
+#[tauri::command]
+pub fn saf_read_base64(tree_uri: String, doc_id: String) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        imp::read_base64(&tree_uri, &doc_id)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (tree_uri, doc_id);
+        Err("SAF is Android-only".into())
+    }
+}
+
 /// Overwrite a document with UTF-8 text.
 #[tauri::command]
 pub fn saf_write(tree_uri: String, doc_id: String, content: String) -> Result<(), String> {
@@ -132,6 +147,36 @@ pub fn saf_write(tree_uri: String, doc_id: String, content: String) -> Result<()
     #[cfg(not(target_os = "android"))]
     {
         let _ = (tree_uri, doc_id, content);
+        Err("SAF is Android-only".into())
+    }
+}
+
+/// #502 — Overwrite a SAF document with Base64-encoded binary bytes (used for
+/// saving pasted/picked images into `_assets` inside an Android SAF vault).
+#[tauri::command]
+pub fn saf_write_base64(tree_uri: String, doc_id: String, base64: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        imp::write_base64(&tree_uri, &doc_id, &base64)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (tree_uri, doc_id, base64);
+        Err("SAF is Android-only".into())
+    }
+}
+
+/// #502 — Read a standalone `content://` URI (e.g. from Android photo picker)
+/// as Base64-encoded bytes via `MainActivity.readContentUriBase64`.
+#[tauri::command]
+pub fn saf_read_content_uri_base64(uri: String) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        imp::read_content_uri_base64(&uri)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = uri;
         Err("SAF is Android-only".into())
     }
 }
@@ -167,6 +212,26 @@ pub fn saf_delete(tree_uri: String, doc_id: String) -> Result<(), String> {
         let _ = (tree_uri, doc_id);
         Err("SAF is Android-only".into())
     }
+}
+
+/// Write raw bytes to a standalone `content://` URI (e.g. returned by Android's
+/// SAF `ACTION_CREATE_DOCUMENT` save dialog) via `MainActivity.writeContentUriBase64`.
+#[cfg(target_os = "android")]
+pub fn write_content_uri_bytes(uri: &str, data: &[u8]) -> Result<(), String> {
+    imp::write_content_uri_bytes(uri, data)
+}
+
+/// Trigger Android's native `PrintManager` ("Save as PDF" / system print dialog)
+/// on the active WebView.
+#[cfg(target_os = "android")]
+pub fn android_print_webview(job_name: &str) -> Result<(), String> {
+    imp::print_webview(job_name)
+}
+
+/// Poll whether the Android `PrintDocumentAdapter.onFinish()` has fired.
+#[cfg(target_os = "android")]
+pub fn android_poll_print_finished() -> Result<bool, String> {
+    imp::poll_print_finished()
 }
 
 #[cfg(target_os = "android")]
@@ -314,6 +379,22 @@ mod imp {
         })
     }
 
+    pub fn read_base64(tree: &str, doc: &str) -> Result<String, String> {
+        with_env(|env| {
+            let a = jstr(env, tree)?;
+            let b = jstr(env, doc)?;
+            let json = call_str(
+                "readBase64",
+                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&a), JValue::Object(&b)],
+            )?;
+            unwrap_env(&json)?
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "readBase64: not a string".into())
+        })
+    }
+
     pub fn write(tree: &str, doc: &str, content: &str) -> Result<(), String> {
         with_env(|env| {
             let a = jstr(env, tree)?;
@@ -325,6 +406,35 @@ mod imp {
                 &[JValue::Object(&a), JValue::Object(&b), JValue::Object(&c)],
             )?;
             unwrap_env(&json).map(|_| ())
+        })
+    }
+
+    pub fn write_base64(tree: &str, doc: &str, b64: &str) -> Result<(), String> {
+        with_env(|env| {
+            let a = jstr(env, tree)?;
+            let b = jstr(env, doc)?;
+            let c = jstr(env, b64)?;
+            let json = call_str(
+                "writeBase64",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&a), JValue::Object(&b), JValue::Object(&c)],
+            )?;
+            unwrap_env(&json).map(|_| ())
+        })
+    }
+
+    pub fn read_content_uri_base64(uri: &str) -> Result<String, String> {
+        with_env(|env| {
+            let a = jstr(env, uri)?;
+            let json = call_str(
+                "readContentUriBase64",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&a)],
+            )?;
+            unwrap_env(&json)?
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "readContentUriBase64: not a string".into())
         })
     }
 
@@ -362,5 +472,37 @@ mod imp {
             )?;
             unwrap_env(&json).map(|_| ())
         })
+    }
+
+    pub fn write_content_uri_bytes(uri: &str, data: &[u8]) -> Result<(), String> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let b64 = STANDARD.encode(data);
+        with_env(|env| {
+            let a = jstr(env, uri)?;
+            let b = jstr(env, &b64)?;
+            let json = call_str(
+                "writeContentUriBase64",
+                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&a), JValue::Object(&b)],
+            )?;
+            unwrap_env(&json).map(|_| ())
+        })
+    }
+
+    pub fn print_webview(job_name: &str) -> Result<(), String> {
+        with_env(|env| {
+            let a = jstr(env, job_name)?;
+            let json = call_str(
+                "printWebView",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&a)],
+            )?;
+            unwrap_env(&json).map(|_| ())
+        })
+    }
+
+    pub fn poll_print_finished() -> Result<bool, String> {
+        let s = call_str("pollPrintFinished", "()Ljava/lang/String;", &[])?;
+        Ok(s == "1")
     }
 }

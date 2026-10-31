@@ -225,6 +225,7 @@
     "clipboard-manager:allow-read-text",
     "deep-link:default",
     "fs:allow-read-file",
+    "fs:allow-write-file",
     "fs:allow-write-text-file",
     {
       "identifier": "fs:allow-exists",

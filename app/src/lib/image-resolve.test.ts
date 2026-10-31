@@ -13,7 +13,12 @@ import { test } from 'node:test';
 
 // Explicit `.ts` extension: Node's ESM resolver needs it, and tsconfig excludes
 // `*.test.ts` from vue-tsc. See the build-conventions note in repo memory.
-import { inlineLocalImages, type BinaryReader } from './image-resolve.ts';
+import {
+  inlineLocalImages,
+  resolveImagePath,
+  rewriteImageUrls,
+  type BinaryReader,
+} from './image-resolve.ts';
 
 const NOTE = 'D:/notes/结算/月度对账.md';
 
@@ -130,4 +135,27 @@ test('html without images is returned untouched', async () => {
   const html = '<p>没有图片</p>';
   assert.equal(await inlineLocalImages(html, null, NOTE, read), html);
   assert.deepEqual(reads, []);
+});
+
+test('Android SAF relative and shared-storage image paths resolve cleanly (#476)', async () => {
+  const safNote = 'saf:primary:MyNotes/笔记.md';
+  assert.equal(
+    resolveImagePath('./assets/pic.png', null, safNote),
+    'saf:primary:MyNotes/assets/pic.png',
+  );
+  assert.equal(
+    resolveImagePath('../other/pic.png', null, 'saf:primary:MyNotes/sub/笔记.md'),
+    'saf:primary:MyNotes/other/pic.png',
+  );
+  assert.equal(
+    resolveImagePath('pic.png', null, 'saf:primary:笔记.md'),
+    'saf:primary:pic.png',
+  );
+  assert.equal(
+    resolveImagePath('/storage/emulated/0/MyNotes/assets/pic.png', null, safNote),
+    'saf:primary:MyNotes/assets/pic.png',
+  );
+
+  const rewritten = rewriteImageUrls('<img src="./assets/pic.png">', null, safNote);
+  assert.match(rewritten, /data-solomd-local-src="saf:primary:MyNotes\/assets\/pic\.png"/);
 });

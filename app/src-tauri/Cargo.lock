@@ -4977,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "solomd"
-version = "5.0.4"
+version = "5.0.10"
 dependencies = [
  "agent-client-protocol",
  "argon2",

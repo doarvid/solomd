@@ -14,7 +14,13 @@ import { hasKatex, standaloneKatexCss } from './katex-standalone';
 import { loadRenderDeps } from './render-deps';
 import { buildExportCustomCss, getActiveCustomCss } from './custom-theme';
 
-export const HTML_TEMPLATE = (title: string, body: string, headCss = '', customCss = '') => `<!doctype html>
+export const HTML_TEMPLATE = (
+  title: string,
+  body: string,
+  headCss = '',
+  customCss = '',
+  bodyClasses = '',
+) => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -171,9 +177,48 @@ ${headCss ? `<style>${headCss}</style>\n` : ''}<style>
   .mermaid-block svg, .plantuml-block svg { max-width: 100%; height: auto; }
   .plantuml-block img { box-shadow: none; border-radius: 0; margin: 0; }
   pre.mermaid-error { color: #b42318; white-space: pre-wrap; }
+  /* #454 — code block soft-wrap & line numbers in standalone HTML export */
+  .preview-content.cb-wrap-on pre {
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    overflow-x: visible;
+  }
+  .preview-content.cb-numbered-on pre.cb-numbered {
+    counter-reset: cb-line;
+    padding-left: 0;
+  }
+  .preview-content.cb-numbered-on pre.cb-numbered code {
+    display: block;
+    white-space: normal;
+  }
+  .preview-content.cb-numbered-on pre.cb-numbered code .cb-line {
+    counter-increment: cb-line;
+    display: block;
+    padding-left: 3.4em;
+    position: relative;
+    white-space: pre;
+  }
+  .preview-content.cb-wrap-on.cb-numbered-on pre.cb-numbered code .cb-line {
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+  .preview-content.cb-numbered-on pre.cb-numbered code .cb-line::before {
+    content: counter(cb-line);
+    position: absolute;
+    left: 0;
+    width: 2.6em;
+    padding-right: 0.6em;
+    text-align: right;
+    color: var(--ink-muted, #59636e);
+    border-right: 1px solid var(--rule, #e4e6e9);
+    user-select: none;
+    -webkit-user-select: none;
+  }
 </style>${customCss ? `\n<style id="solomd-custom-theme">\n${customCss}\n</style>` : ''}
 </head>
-<body class="preview-content">
+<body class="${['preview-content', bodyClasses].filter(Boolean).join(' ')}">
 ${body}
 </body>
 </html>`;
@@ -195,6 +240,10 @@ export interface StandaloneHtmlInput {
   readBytes?: BinaryReader;
   /** #439 — optional custom CSS override; defaults to active `<style id="solomd-custom-theme">`. */
   customCss?: string;
+  /** #454 — render line numbers inside fenced code blocks when enabled. */
+  codeBlockLineNumbers?: boolean;
+  /** #454 — soft-wrap long lines inside fenced code blocks when enabled. */
+  codeBlockWrap?: boolean;
 }
 
 export async function buildStandaloneHtml(input: StandaloneHtmlInput): Promise<string> {
@@ -228,5 +277,11 @@ export async function buildStandaloneHtml(input: StandaloneHtmlInput): Promise<s
   const headCss = hasKatex(body) ? await standaloneKatexCss() : '';
   const rawCustomCss = input.customCss !== undefined ? input.customCss : getActiveCustomCss();
   const customCss = buildExportCustomCss(rawCustomCss, 'body.preview-content');
-  return HTML_TEMPLATE(input.title, body, headCss, customCss);
+  const bodyClasses = [
+    input.codeBlockLineNumbers ? 'cb-numbered-on' : '',
+    input.codeBlockWrap ? 'cb-wrap-on' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return HTML_TEMPLATE(input.title, body, headCss, customCss, bodyClasses);
 }

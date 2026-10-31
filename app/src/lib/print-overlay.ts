@@ -20,11 +20,55 @@ export interface MountedPrintOverlay {
   cleanup(): void;
 }
 
+const PRINT_CODE_NUMBER_CSS = `
+.solomd-print-content.cb-wrap-on pre {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  overflow-x: visible;
+}
+.solomd-print-content.cb-numbered-on pre.cb-numbered {
+  counter-reset: cb-line;
+  padding-left: 0;
+}
+.solomd-print-content.cb-numbered-on pre.cb-numbered code {
+  display: block;
+  white-space: normal;
+}
+.solomd-print-content.cb-numbered-on pre.cb-numbered code .cb-line {
+  counter-increment: cb-line;
+  display: block;
+  padding-left: 3.4em;
+  position: relative;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.solomd-print-content.cb-numbered-on pre.cb-numbered code .cb-line::before {
+  content: counter(cb-line);
+  position: absolute;
+  left: 0;
+  width: 2.6em;
+  padding-right: 0.6em;
+  text-align: right;
+  color: var(--text-faint, #6e7781);
+  border-right: 1px solid var(--border, #d0d7de);
+  user-select: none;
+  -webkit-user-select: none;
+}
+`;
+
+export interface PrintOverlayOptions {
+  codeBlockLineNumbers?: boolean;
+  codeBlockWrap?: boolean;
+}
+
 export function mountPrintOverlay(
   bodyHtml: string,
   printTheme: PrintTheme,
   styleCss: string,
   customCss?: string,
+  opts?: PrintOverlayOptions,
 ): MountedPrintOverlay {
   let overlay = document.getElementById('solomd-print-overlay') as HTMLDivElement | null;
   if (!overlay) {
@@ -32,14 +76,13 @@ export function mountPrintOverlay(
     overlay.id = 'solomd-print-overlay';
     document.body.appendChild(overlay);
   }
-  // KaTeX styling comes from the bundle — `main.ts` imports
-  // `katex/dist/katex.min.css` and its selectors (`.katex`, `.katex-display`)
-  // are global, so the overlay picks them up even though it lives outside
-  // `#app`. This used to <link> katex.min.css off jsDelivr, which meant every
-  // print silently hit the network: math came out unstyled with no
-  // connection, and an offline-first app with no telemetry leaked a request
-  // per print.
-  overlay.innerHTML = `<div class="solomd-print-content preview-content">${bodyHtml}</div>`;
+  const extraClasses = [
+    opts?.codeBlockLineNumbers ? 'cb-numbered-on' : '',
+    opts?.codeBlockWrap ? 'cb-wrap-on' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  overlay.innerHTML = `<div class="${['solomd-print-content', 'preview-content', extraClasses].filter(Boolean).join(' ')}">${bodyHtml}</div>`;
   // Print palette, independent of the app theme. The overlay sits outside
   // #app but still inherits :root's tokens, so a dark theme used to put a
   // dark code slab on paper. `follow` adds no class and keeps that.
@@ -58,7 +101,13 @@ export function mountPrintOverlay(
     customCss !== undefined ? customCss : getActiveCustomCss(),
     '#solomd-print-overlay, .solomd-print-content',
   );
-  const combinedCss = [styleCss, activeCustomCss].filter(Boolean).join('\n');
+  const combinedCss = [
+    opts?.codeBlockLineNumbers || opts?.codeBlockWrap ? PRINT_CODE_NUMBER_CSS : '',
+    styleCss,
+    activeCustomCss,
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   let styleEl: HTMLStyleElement | null = null;
   if (combinedCss) {

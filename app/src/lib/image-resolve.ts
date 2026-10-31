@@ -16,6 +16,22 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 export function normalizePath(p: string): string {
   if (!p) return p;
   let s = p.replace(/\\/g, '/');
+  if (s.startsWith('saf:')) {
+    const rest = s.slice(4);
+    const colonIdx = rest.indexOf(':');
+    const prefix = colonIdx >= 0 ? `saf:${rest.slice(0, colonIdx + 1)}` : 'saf:';
+    const body = colonIdx >= 0 ? rest.slice(colonIdx + 1) : rest;
+    const out: string[] = [];
+    for (const seg of body.split('/')) {
+      if (seg === '' || seg === '.') continue;
+      if (seg === '..') {
+        if (out.length > 0) out.pop();
+        continue;
+      }
+      out.push(seg);
+    }
+    return prefix + out.join('/');
+  }
   const driveMatch = s.match(/^([a-zA-Z]):\/(.*)$/);
   let prefix = '';
   let body = s;
@@ -103,8 +119,35 @@ export function svgTextToDataUrl(svg: string): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
+const TRANSPARENT_PIXEL =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+/** In-memory cache of resolved SAF image data URLs (`saf:...` → `data:image/...;base64,...`). */
+const safImageDataUrlCache = new Map<string, string>();
+
+function isAndroidSharedStoragePath(p: string): boolean {
+  return /^\/(?:storage\/emulated\/0|sdcard)\//i.test(p);
+}
+
+function androidSharedStorageToSafPath(p: string): string {
+  const rel = p.replace(/^\/(?:storage\/emulated\/0|sdcard)\/+/i, '');
+  return normalizePath(`saf:primary:${rel}`);
+}
+
+function activeSafTreeUri(): string | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem('solomd.workspace.v1');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { safTreeUri?: unknown };
+    return typeof parsed.safTreeUri === 'string' && parsed.safTreeUri ? parsed.safTreeUri : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Resolve a local image src to an absolute filesystem path.
+ * Resolve a local image src to an absolute filesystem path (or `saf:<docId>` on Android SAF).
  * Returns the original src unchanged for remote/data/blob/asset URLs.
  */
 export function resolveImagePath(
@@ -117,7 +160,40 @@ export function resolveImagePath(
 
   let p = cleanLocalImageSrc(src);
 
-  const isAbsolute = p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p);
+  // #476 — Android SAF workspace (`filePath = "saf:primary:MyNotes/note.md"`).
+  if (filePath && filePath.startsWith('saf:')) {
+    const cleanP = p.replace(/\\/g, '/');
+    if (cleanP.startsWith('saf:')) {
+      return normalizePath(cleanP);
+    }
+    if (isAndroidSharedStoragePath(cleanP)) {
+      return androidSharedStorageToSafPath(cleanP);
+    }
+    const isAbs = cleanP.startsWith('/') || /^[a-zA-Z]:\//.test(cleanP);
+    if (!isAbs) {
+      const docId = filePath.slice(4).replace(/\\/g, '/');
+      const colonIdx = docId.indexOf(':');
+      const volPrefix = colonIdx >= 0 ? `saf:${docId.slice(0, colonIdx + 1)}` : 'saf:';
+      const docRel = colonIdx >= 0 ? docId.slice(colonIdx + 1) : docId;
+      const slashIdx = docRel.lastIndexOf('/');
+      const docDir = slashIdx >= 0 ? docRel.slice(0, slashIdx) : '';
+      let baseDir = docDir;
+      if (imageRoot) {
+        const cleanRoot = imageRoot.replace(/\\/g, '/');
+        if (isAndroidSharedStoragePath(cleanRoot)) {
+          baseDir = cleanRoot.replace(/^\/(?:storage\/emulated\/0|sdcard)\/+/i, '');
+        } else if (cleanRoot.startsWith('/')) {
+          baseDir = cleanRoot.slice(1);
+        } else {
+          baseDir = docDir ? `${docDir}/${cleanRoot}` : cleanRoot;
+        }
+      }
+      const joined = baseDir ? `${baseDir}/${cleanP}` : cleanP;
+      return normalizePath(`${volPrefix}${joined}`);
+    }
+  }
+
+  const isAbsolute = p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('saf:');
   if (!isAbsolute) {
     let base: string | null = null;
     if (imageRoot) {
@@ -142,7 +218,8 @@ export function resolveImagePath(
 
 /**
  * Resolve a single image src into something the webview can load.
- * Converts local paths to `asset://` URLs via Tauri's convertFileSrc().
+ * Converts local paths to `asset://` URLs via Tauri's convertFileSrc(), or cached
+ * data URLs for Android SAF paths (#476).
  */
 export function resolveImageSrc(
   src: string,
@@ -152,6 +229,9 @@ export function resolveImageSrc(
   const resolved = resolveImagePath(src, imageRoot, filePath);
   // If it's still a remote/data/blob URL, return as-is
   if (/^(https?|data|blob|asset|tauri):/i.test(resolved)) return resolved;
+  if (resolved.startsWith('saf:')) {
+    return safImageDataUrlCache.get(resolved) ?? TRANSPARENT_PIXEL;
+  }
   try {
     return convertFileSrc(resolved);
   } catch {
@@ -170,6 +250,12 @@ export function resolveImageSrcWithMeta(
   const localPath = resolveImagePath(src, imageRoot, filePath);
   if (/^(https?|data|blob|asset|tauri):/i.test(localPath)) {
     return { src: localPath, localPath: null };
+  }
+  if (localPath.startsWith('saf:')) {
+    return {
+      src: safImageDataUrlCache.get(localPath) ?? TRANSPARENT_PIXEL,
+      localPath,
+    };
   }
   try {
     return { src: convertFileSrc(localPath), localPath };
@@ -197,7 +283,12 @@ export function rewriteImageUrls(
         return `${prefix}${q}${src}${q}`;
       }
       const resolved = resolveImageSrcWithMeta(src, imageRoot, filePath);
-      const nextPrefix = resolved.localPath && isLocalSvgPath(resolved.localPath)
+      const needsLocalSrcAttr =
+        !!resolved.localPath &&
+        (isLocalSvgPath(resolved.localPath) ||
+          resolved.localPath.startsWith('saf:') ||
+          isAndroidSharedStoragePath(resolved.localPath));
+      const nextPrefix = needsLocalSrcAttr && resolved.localPath
         ? prefix.replace(/^<img\b/i, `<img data-solomd-local-src="${encodeHtmlAttr(resolved.localPath)}"`)
         : prefix;
       return `${nextPrefix}${q}${resolved.src}${q}`;
@@ -260,13 +351,77 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * #476 — Load an image from an Android SAF path (`saf:<docId>`) or Android
+ * shared storage (`/storage/emulated/0/…`) via `saf_read_base64` and return a
+ * `data:image/…;base64,…` URL. Cached in memory so repeat renders are instant.
+ */
+export async function loadSafImageDataUrl(localPath: string): Promise<string | null> {
+  const safPath = localPath.startsWith('saf:')
+    ? normalizePath(localPath)
+    : isAndroidSharedStoragePath(localPath)
+      ? androidSharedStorageToSafPath(localPath)
+      : null;
+  if (!safPath) return null;
+  const cached = safImageDataUrlCache.get(safPath);
+  if (cached) return cached;
+  const treeUri = activeSafTreeUri();
+  if (!treeUri) return null;
+  const mime = imageMimeForPath(safPath);
+  if (!mime) return null;
+  const docId = safPath.slice(4);
+  try {
+    const b64 = await invoke<string>('saf_read_base64', { treeUri, docId });
+    if (!b64) return null;
+    const dataUrl = `data:${mime};base64,${b64}`;
+    safImageDataUrlCache.set(safPath, dataUrl);
+    if (localPath !== safPath) {
+      safImageDataUrlCache.set(localPath, dataUrl);
+    }
+    return dataUrl;
+  } catch {
+    return null;
+  }
+}
+
 /** Reads a file's bytes — injectable so the inlining can be unit tested. */
 export type BinaryReader = (path: string) => Promise<Uint8Array | null>;
 
 const readBinaryViaTauri: BinaryReader = async (path) => {
+  if (path.startsWith('saf:')) {
+    const treeUri = activeSafTreeUri();
+    if (!treeUri) return null;
+    try {
+      const b64 = await invoke<string>('saf_read_base64', { treeUri, docId: path.slice(4) });
+      return b64 ? base64ToBytes(b64) : null;
+    } catch {
+      return null;
+    }
+  }
   try {
     return new Uint8Array(await invoke<number[]>('read_binary_file', { path }));
   } catch {
+    if (isAndroidSharedStoragePath(path)) {
+      const treeUri = activeSafTreeUri();
+      if (treeUri) {
+        try {
+          const safPath = androidSharedStorageToSafPath(path);
+          const b64 = await invoke<string>('saf_read_base64', { treeUri, docId: safPath.slice(4) });
+          return b64 ? base64ToBytes(b64) : null;
+        } catch {
+          return null;
+        }
+      }
+    }
     return null;
   }
 };
@@ -326,12 +481,38 @@ export function installSvgImageFallbacks(root: ParentNode): void {
   for (const img of Array.from(images)) {
     if (img.dataset.solomdSvgFallbackBound === '1') continue;
     const path = img.dataset.solomdLocalSrc || '';
-    if (!isLocalSvgPath(path)) continue;
+    if (!path) continue;
+    const isSaf = path.startsWith('saf:');
+    const isAndroidStorage = isAndroidSharedStoragePath(path);
+    const isSvg = isLocalSvgPath(path);
+    if (!isSaf && !isAndroidStorage && !isSvg) continue;
     img.dataset.solomdSvgFallbackBound = '1';
+
+    if (isSaf) {
+      const cached = safImageDataUrlCache.get(path);
+      if (cached) {
+        img.src = cached;
+      } else {
+        void loadSafImageDataUrl(path).then((dataUrl) => {
+          if (dataUrl) img.src = dataUrl;
+        });
+      }
+      continue;
+    }
+
     const fallback = async () => {
-      if (img.src.startsWith('data:image/svg+xml')) return;
-      const dataUrl = await loadLocalSvgDataUrl(path);
-      if (dataUrl) img.src = dataUrl;
+      if (img.src.startsWith('data:image/')) return;
+      if (isAndroidStorage) {
+        const safDataUrl = await loadSafImageDataUrl(path);
+        if (safDataUrl) {
+          img.src = safDataUrl;
+          return;
+        }
+      }
+      if (isSvg) {
+        const dataUrl = await loadLocalSvgDataUrl(path);
+        if (dataUrl) img.src = dataUrl;
+      }
     };
     img.addEventListener('error', fallback, { once: true });
     if (img.complete && img.naturalWidth === 0) {

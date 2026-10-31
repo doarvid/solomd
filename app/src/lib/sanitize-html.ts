@@ -132,6 +132,13 @@ function getPurifier(): DOMPurifyInstance | null {
       el.setAttribute('referrerpolicy', 'no-referrer');
     }
 
+    if (tag === 'img') {
+      // #493 — prevent WebView2 from sending `Referer: http://tauri.localhost/`
+      // to external image hosts (e.g. Gitee) that reject non-matching referrers
+      // with HTTP 403.
+      el.setAttribute('referrerpolicy', 'no-referrer');
+    }
+
     // `target="_blank"` without `rel` is a reverse-tabnabbing hole.
     if (tag === 'a' && el.getAttribute('target')) {
       el.setAttribute('rel', 'noopener noreferrer');
@@ -172,7 +179,9 @@ function fallbackStrip(html: string): string {
         .replace(
           /((?:href|src|xlink:href|action|formaction|background|poster)\s*=\s*)(["']?)\s*(?:javascript|vbscript|data:text\/html)[^"'\s>]*\2/gi,
           '$1$2#$2',
-        ),
+        )
+        // #493 — ensure raw HTML <img> tags carry referrerpolicy="no-referrer"
+        .replace(/^<img\b(?![^>]*\breferrerpolicy\s*=)/i, '<img referrerpolicy="no-referrer"'),
     );
 }
 

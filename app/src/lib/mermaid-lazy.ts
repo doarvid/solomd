@@ -137,3 +137,34 @@ export async function initMermaid(config: MermaidConfig): Promise<SafeMermaid> {
   mermaid.initialize({ ...config, suppressErrorRendering: true });
   return { render: (id, code) => safeRender(mermaid, id, code) };
 }
+
+/**
+ * #462 — Wire Mermaid interactive tooltips & click callbacks on a rendered
+ * diagram container, and ensure SVG nodes with `[title]` attributes also have
+ * a native `<svg:title>` child so browser hover tooltips work reliably across
+ * all diagram types and security levels.
+ */
+export function bindMermaidInteractions(
+  container: Element,
+  bindFunctions?: ((el: Element) => void) | null,
+): void {
+  try {
+    bindFunctions?.(container);
+  } catch {
+    /* ignore d3 binding errors on detached/partial nodes */
+  }
+  const doc = container.ownerDocument ?? document;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  for (const el of Array.from(container.querySelectorAll('[title]'))) {
+    const tip = el.getAttribute('title')?.trim();
+    if (!tip) continue;
+    const hasTitleChild = Array.from(el.children).some(
+      (c) => c.tagName.toLowerCase() === 'title',
+    );
+    if (!hasTitleChild) {
+      const titleEl = doc.createElementNS(SVG_NS, 'title');
+      titleEl.textContent = tip;
+      el.insertBefore(titleEl, el.firstChild);
+    }
+  }
+}

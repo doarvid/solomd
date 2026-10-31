@@ -677,6 +677,10 @@ function onCloudKeyKey(e: KeyboardEvent) {
 .wiz__sel,
 .wiz__inp {
   box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
   height: 32px;
   font: inherit;
   font-size: 13px;

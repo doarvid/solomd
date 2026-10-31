@@ -61,3 +61,28 @@
 # 4.9.2/4.9.3 release builds (debug builds unaffected — minify off).
 -keep class app.solomd.MainActivity { *; }
 -keep class app.solomd.MainActivity$Companion { *; }
+
+# Keep AndroidX EdgeToEdge entrypoints and parameter types un-obfuscated so
+# Google Play Console's static analyzer recognizes enableEdgeToEdge() in
+# MainActivity.onCreate, while stripping deprecated pre-API-30 status/nav bar
+# color setters and SHORT_EDGES cutout mode that trigger Play Console's
+# "deprecated edge-to-edge API" warning.
+-keep class androidx.activity.EdgeToEdge { *; }
+-keep class androidx.activity.ComponentActivity { *; }
+-keep class androidx.activity.SystemBarStyle** { *; }
+-keep class androidx.core.view.WindowCompat { *; }
+
+-assumenosideeffects class android.view.Window {
+    public void setStatusBarColor(int);
+    public void setNavigationBarColor(int);
+    public android.view.WindowManager$LayoutParams getAttributes() return null;
+}
+-assumenosideeffects class androidx.activity.EdgeToEdge** {
+    void adjustLayoutInDisplayCutoutMode(android.view.Window);
+}
+-assumenosideeffects interface androidx.activity.EdgeToEdge** {
+    void adjustLayoutInDisplayCutoutMode(android.view.Window);
+}
+-assumenosideeffects class android.graphics.BitmapFactory {
+    public static android.graphics.Bitmap decodeStream(java.io.InputStream) return null;
+}

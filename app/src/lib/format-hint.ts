@@ -21,6 +21,8 @@ export function detectTypedFormat(lineBeforeCaret: string, typed: string): Forma
       return null;
     case '~':
       return /(^|[^~])~~[^~\s](?:[^~]*[^~\s])?~~$/.test(s) ? 'strike' : null;
+    case '=':
+      return /(^|[^=])==[^=\s](?:[^=]*[^=\s])?==$/.test(s) ? 'highlight' : null;
     case '`':
       if (/^\s*```$/.test(s)) return 'codeblock';
       return /(^|[^`])`[^`\s](?:[^`]*[^`\s])?`$/.test(s) ? 'code' : null;

@@ -17,7 +17,7 @@ import { sanitizeModernColors } from './export-colors';
 import { renderMarkdown, extractImageRoot } from './markdown';
 import { loadRenderDeps } from './render-deps';
 import type { ResolvedPdfOptions } from './pdf-options';
-import { rewriteImageUrls, rewriteLinkUrls } from './image-resolve';
+import { inlineLocalImages, rewriteImageUrls, rewriteLinkUrls } from './image-resolve';
 import { blobToPng, loadImageBlob } from './image-clipboard';
 import { renderPlantumlForExport } from './plantuml';
 import { buildPagedCanvas, searchWindowPx } from './pdf-paginate';
@@ -123,6 +123,36 @@ const PDF_CSS = `
   :where(.pdf-page) pre code .hljs-keyword,
   :where(.pdf-page) pre code .hljs-built_in,
   :where(.pdf-page) pre code .hljs-tag { color: var(--syn-keyword, #116329); }
+  /* #454 — code block line numbers in PDF export when enabled */
+  .pdf-page.cb-numbered-on pre.cb-numbered {
+    counter-reset: cb-line;
+    padding-left: 0;
+  }
+  .pdf-page.cb-numbered-on pre.cb-numbered code {
+    display: block;
+    white-space: normal;
+  }
+  .pdf-page.cb-numbered-on pre.cb-numbered code .cb-line {
+    counter-increment: cb-line;
+    display: block;
+    padding-left: 3.4em;
+    position: relative;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+  .pdf-page.cb-numbered-on pre.cb-numbered code .cb-line::before {
+    content: counter(cb-line);
+    position: absolute;
+    left: 0;
+    width: 2.6em;
+    padding-right: 0.6em;
+    text-align: right;
+    color: var(--text-faint, #59636e);
+    border-right: 1px solid var(--border, #e4e6e9);
+    user-select: none;
+    -webkit-user-select: none;
+  }
   :where(.pdf-page) blockquote {
     border-left: 4px solid var(--accent, #3d444d);
     margin: 1.3em 0;
@@ -331,14 +361,16 @@ export async function capturePdfRaster(
   pdfOpts?: ResolvedPdfOptions,
   filePath?: string,
   plantumlServer?: string | null,
+  codeBlockLineNumbers?: boolean,
 ): Promise<PdfRasterCapture> {
   await loadRenderDeps(); // rendered once — no placeholder math / plain code
   const rawHtml = renderMarkdown(source || '');
   // v4.3.0 issue #77 — also rewrite link hrefs so local-file links
   // don't bake in `http://tauri.localhost/...` URLs.
   const imageRoot = extractImageRoot(source || '');
+  const withLocalImages = await inlineLocalImages(rawHtml, imageRoot, filePath);
   const html = rewriteLinkUrls(
-    rewriteImageUrls(rawHtml, imageRoot, filePath),
+    rewriteImageUrls(withLocalImages, imageRoot, filePath),
     imageRoot,
     filePath,
   );
@@ -378,7 +410,9 @@ export async function capturePdfRaster(
   root.style.zIndex = '-1';
 
   const page = document.createElement('article');
-  page.className = 'pdf-page preview-content';
+  page.className = ['pdf-page', 'preview-content', codeBlockLineNumbers ? 'cb-numbered-on' : '']
+    .filter(Boolean)
+    .join(' ');
   page.innerHTML = html;
 
   root.appendChild(styleEl);
@@ -491,6 +525,7 @@ export async function markdownToPdfBlob(
   pdfOpts?: ResolvedPdfOptions,
   filePath?: string,
   plantumlServer?: string | null,
+  codeBlockLineNumbers?: boolean,
 ): Promise<Blob> {
   // Timeout guard — prevents the export from hanging the UI indefinitely
   // if html2pdf.js or Mermaid gets stuck. It sweeps html2pdf's leftovers on
@@ -504,20 +539,31 @@ export async function markdownToPdfBlob(
   );
 
   const render = async (): Promise<Blob> => {
-    const capture = await capturePdfRaster(source, title, pdfOpts, filePath, plantumlServer);
+    const capture = await capturePdfRaster(
+      source,
+      title,
+      pdfOpts,
+      filePath,
+      plantumlServer,
+      codeBlockLineNumbers,
+    );
     try {
       // jsPDF slices the raster at a fixed page height, which shears whatever
       // line of text sits on the boundary. Re-lay the raster as whole pages
       // first, so every slice lands on a row with no ink in it.
-      const paged = capture.canvas
-        ? buildPagedCanvas(
+      if (capture.canvas) {
+        try {
+          const paged = buildPagedCanvas(
             capture.canvas,
             capture.pageHeightPx,
             capture.searchUpPx,
             capture.lineHeightPx,
-          )
-        : null;
-      if (paged) capture.useCanvas(paged.canvas);
+          );
+          if (paged) capture.useCanvas(paged.canvas);
+        } catch (e) {
+          console.warn('[pdf] pagination skipped', e);
+        }
+      }
       return await capture.finish();
     } finally {
       capture.dispose();

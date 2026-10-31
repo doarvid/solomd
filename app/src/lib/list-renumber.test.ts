@@ -67,3 +67,37 @@ test('crossing 9 → 10 and back maps the caret', () => {
   // A caret at the end of the old "10. x" line moves back one character.
   assert.equal(mapPos(next.length, r.changes), r.value.length);
 });
+
+test('headings and block constructs split ordered lists even without blank lines (#466)', () => {
+  // Heading directly between two ordered lists (no blank line before/after heading)
+  assert.equal(
+    after(
+      '1. 第一项\n2. 第二项\n# 标题\n1. 新第一项\n2. 新第二项',
+      '1. 第一项\n2. 第二项\n# 标题\n1. 新第一项\n2. 新第二项\n3. 新第三项',
+    ),
+    '1. 第一项\n2. 第二项\n# 标题\n1. 新第一项\n2. 新第二项\n3. 新第三项',
+  );
+  // Heading with blank line after it but no blank line before it
+  assert.equal(
+    after(
+      '1. 第一项\n2. 第二项\n### 子标题\n\n1. 新第一项\n2. 新第二项',
+      '1. 第一项\n2. 第二项\n### 子标题\n\n1. 新第一项\n2. 新第二项\n',
+    ),
+    '1. 第一项\n2. 第二项\n### 子标题\n\n1. 新第一项\n2. 新第二项\n',
+  );
+  // Horizontal rule, code fence, or unindented paragraph before a new `1.` list
+  assert.equal(
+    after(
+      '1. a\n2. b\n---\n1. c\n2. d',
+      '1. a\n2. b\n---\n1. c\n2. d\n',
+    ),
+    '1. a\n2. b\n---\n1. c\n2. d\n',
+  );
+  assert.equal(
+    after(
+      '1. a\n2. b\n说明段落\n1. c\n2. d',
+      '1. a\n2. b\n说明段落\n1. c\n2. d\n',
+    ),
+    '1. a\n2. b\n说明段落\n1. c\n2. d\n',
+  );
+});

@@ -32,9 +32,19 @@ export function openWelcomeTour(): void {
       ];
   let firstId: string | undefined;
   for (const d of docs) {
+    const normalized = d.content.replace(/\r\n/g, '\n');
+    const existing = tabs.tabs.find((t) => !t.filePath && t.fileName === d.name);
+    if (existing) {
+      existing.content = normalized;
+      existing.savedContent = normalized;
+      existing.ephemeral = true;
+      if (!firstId) firstId = existing.id;
+      continue;
+    }
     const tab = tabs.newTab({ fileName: d.name, language: 'markdown' });
-    tab.content = d.content;
-    tab.savedContent = d.content;
+    tab.content = normalized;
+    tab.savedContent = normalized;
+    tab.ephemeral = true;
     if (!firstId) firstId = tab.id;
   }
   if (firstId) tabs.activate(firstId);

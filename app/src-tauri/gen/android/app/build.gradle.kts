@@ -21,7 +21,8 @@ android {
         applicationId = "app.solomd"
         minSdk = 24
         targetSdk = 36
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
+        versionCode = System.getenv("ANDROID_VERSION_CODE")?.toIntOrNull()
+            ?: tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
 
@@ -58,15 +59,7 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
-            // v4.3.0 issue #73 — resource shrinking is DISABLED because of
-            // https://issuetracker.google.com/402800800: AGP 8.x errors out
-            // with "Multiple shrunk-resources files found" when
-            // `isShrinkResources = true` is combined with `splits.abi.enable
-            // = true` and the `bundle*` task is invoked. R8 fullMode +
-            // minifyEnabled still strip dead code and most resource refs;
-            // we lose only the ~1-3 MB of orphan-drawable/string pruning.
-            // Re-enable once AGP ships the fix (tracked upstream).
-            // isShrinkResources = true
+            isShrinkResources = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
@@ -121,11 +114,15 @@ android {
 
     // Per-architecture APK splits — gives us a separate, smaller APK for
     // arm64 / armv7 / x86_64 sideloads (Play Store consumes the AAB and
-    // does the splitting server-side regardless). Without splits the
-    // universal APK is ~200MB; per-ABI release APKs come in at ~30-50MB.
+    // does the splitting server-side regardless). Disabled during `bundle*`
+    // tasks so `isShrinkResources = true` does not hit AGP issue #402800800
+    // ("Multiple shrunk-resources files found").
+    val isBundleTask = gradle.startParameter.taskNames.any {
+        it.contains("bundle", ignoreCase = true)
+    }
     splits {
         abi {
-            isEnable = true
+            isEnable = !isBundleTask
             reset()
             include("arm64-v8a", "armeabi-v7a", "x86_64")
             isUniversalApk = true
@@ -148,7 +145,6 @@ dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
-    implementation("com.google.android.material:material:1.12.0")
     implementation("com.android.billingclient:billing:8.0.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")

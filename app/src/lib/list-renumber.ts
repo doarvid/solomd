@@ -52,6 +52,10 @@ interface Line {
   blank: boolean;
   /** Any list marker (bullet or ordered) at this line's indent. */
   listMarker: boolean;
+  /** ATX heading (`# ...`), which interrupts lists even at 0–3 spaces indent. */
+  heading: boolean;
+  /** Block construct (fence, heading, hr, table, math, HTML block) that cannot be lazy list continuation. */
+  blockBreak: boolean;
   item: { num: number; delim: string; numFrom: number; numTo: number } | null;
 }
 
@@ -59,6 +63,11 @@ const QUOTE = /^((?:[ \t]*>[ \t]?)*)/;
 const ORDERED = /^([ \t]*)(\d{1,9})([.)])(?=[ \t]|$)/;
 const BULLET = /^[ \t]*[-*+](?=[ \t]|$)/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const ATX_HEADING = /^[ \t]{0,3}#{1,6}(?!#)/;
+const THEMATIC_BREAK = /^[ \t]{0,3}(?:[-*_][ \t]*){3,}$/;
+const TABLE_ROW = /^[ \t]*\|.*\|[ \t]*$/;
+const MATH_BLOCK = /^[ \t]*(\$\$|\\\[)/;
+const HTML_BLOCK = /^[ \t]{0,3}<(?:\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|script|search|section|style|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)\b|!--)/i;
 
 function indentWidth(ws: string): number {
   let w = 0;
@@ -85,14 +94,21 @@ function parseLines(text: string): Line[] {
       indent: indentWidth(ws),
       blank: rest.trim() === '',
       listMarker: false,
+      heading: false,
+      blockBreak: false,
       item: null,
     };
     const f = rest.match(FENCE);
     if (fence) {
       // Inside a code block nothing is a list item.
+      line.blockBreak = true;
       if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = null;
     } else if (f) {
       fence = f[1];
+      line.blockBreak = true;
+    } else if (ATX_HEADING.test(rest)) {
+      line.heading = true;
+      line.blockBreak = true;
     } else {
       const m = rest.match(ORDERED);
       if (m) {
@@ -101,6 +117,13 @@ function parseLines(text: string): Line[] {
         line.listMarker = true;
       } else if (BULLET.test(rest)) {
         line.listMarker = true;
+      } else if (
+        THEMATIC_BREAK.test(rest) ||
+        TABLE_ROW.test(rest) ||
+        MATH_BLOCK.test(rest) ||
+        HTML_BLOCK.test(rest)
+      ) {
+        line.blockBreak = true;
       }
     }
     out.push(line);
@@ -138,14 +161,20 @@ export function renumberChanges(text: string, from: number, to: number): TextCha
     const items: number[] = [i];
     let last = i;
     let prevBlank = false;
+    let sawLazyText = false;
     for (let j = i + 1; j < lines.length; j++) {
       const l = lines[j];
       if (l.quote !== head.quote) break;
+      if (l.heading) break;
       if (l.item && l.indent === head.indent) {
         if (l.item.delim !== head.item.delim) break;
+        // If an unindented line or blank line sat between the previous item and
+        // a new `1.` item, treat the new `1.` as the start of a separate list.
+        if ((sawLazyText || prevBlank) && l.item.num === 1) break;
         items.push(j);
         last = j;
         prevBlank = false;
+        sawLazyText = false;
         continue;
       }
       if (l.blank) {
@@ -158,9 +187,11 @@ export function renumberChanges(text: string, from: number, to: number): TextCha
         prevBlank = false;
         continue;
       }
+      if (l.blockBreak) break;
       // A lazy continuation line right under item text keeps the list going.
       if (!prevBlank && !l.listMarker) {
         last = j;
+        sawLazyText = true;
         continue;
       }
       break;

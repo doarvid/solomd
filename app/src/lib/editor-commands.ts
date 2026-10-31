@@ -17,7 +17,8 @@ export type EditorCommand =
   | 'jumpToSelection'
   | 'headingPromote'
   | 'headingDemote'
-  | 'headingParagraph';
+  | 'headingParagraph'
+  | 'headingAutoNumber';
 
 export const EDITOR_COMMANDS: EditorCommand[] = [
   'selectWord',
@@ -27,6 +28,7 @@ export const EDITOR_COMMANDS: EditorCommand[] = [
   'headingPromote',
   'headingDemote',
   'headingParagraph',
+  'headingAutoNumber',
 ];
 
 /** Commands that change the text (the rest only move the selection). */
@@ -35,6 +37,7 @@ export const EDITING_COMMANDS = new Set<EditorCommand>([
   'headingPromote',
   'headingDemote',
   'headingParagraph',
+  'headingAutoNumber',
 ]);
 
 /** Commands that only make sense in a Markdown document. */
@@ -42,6 +45,7 @@ export const MARKDOWN_ONLY_COMMANDS = new Set<EditorCommand>([
   'headingPromote',
   'headingDemote',
   'headingParagraph',
+  'headingAutoNumber',
 ]);
 
 export interface Range {
@@ -169,6 +173,67 @@ export function selectLine(doc: string, from: number, to: number = from): Range 
 
 const HEADING = /^( {0,3})(#{1,6})([ \t]+|$)/;
 const NOT_PARAGRAPH = /^\s*(?:[-*+]\s|\d+[.)]\s|>|\||```|~~~|<|\$\$|---\s*$|\*\*\*\s*$|___\s*$)/;
+const FENCE_LINE = /^[ \t]*(?:>[ \t]?)*(`{3,}|~{3,})(.*)$/;
+
+/**
+ * When the caret or selection sits inside a fenced code block, return the
+ * character range of the block's inner body (excluding the opening and closing
+ * fence lines) so `Ctrl/Cmd+A` selects just the code block first.
+ *
+ * Returns `null` when the selection is outside any fenced block, when the code
+ * block has no body lines, or when the selection already covers the entire
+ * code block body (so pressing `Ctrl/Cmd+A` a second time selects the whole
+ * document).
+ */
+export function selectCodeBlockBody(doc: string, from: number, to: number = from): Range | null {
+  const selFrom = Math.max(0, Math.min(from, to));
+  const selTo = Math.min(doc.length, Math.max(from, to));
+  const lines = doc.split('\n');
+
+  let offset = 0;
+  let openFence: { ch: string; len: number; openStart: number; bodyStart: number } | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineStart = offset;
+    const lineEnd = offset + line.length;
+    const m = FENCE_LINE.exec(line);
+
+    if (!openFence) {
+      if (m) {
+        openFence = {
+          ch: m[1][0],
+          len: m[1].length,
+          openStart: lineStart,
+          bodyStart: Math.min(doc.length, lineEnd + 1),
+        };
+      }
+    } else if (m && m[1][0] === openFence.ch && m[1].length >= openFence.len && m[2].trim() === '') {
+      const closeStart = lineStart;
+      const closeEnd = lineEnd;
+      if (selFrom >= openFence.openStart && selTo <= closeEnd) {
+        const bodyFrom = Math.min(openFence.bodyStart, closeStart);
+        const bodyTo = Math.max(bodyFrom, closeStart > openFence.bodyStart ? closeStart - 1 : closeStart);
+        if (bodyTo <= bodyFrom) return null;
+        if (selFrom === bodyFrom && selTo === bodyTo) return null;
+        return { from: bodyFrom, to: bodyTo };
+      }
+      openFence = null;
+    }
+
+    offset = lineEnd + 1;
+  }
+
+  if (openFence && selFrom >= openFence.openStart && selTo <= doc.length) {
+    const bodyFrom = openFence.bodyStart;
+    const bodyTo = doc.length;
+    if (bodyTo <= bodyFrom) return null;
+    if (selFrom === bodyFrom && selTo === bodyTo) return null;
+    return { from: bodyFrom, to: bodyTo };
+  }
+
+  return null;
+}
 
 /** Which lines sit inside a fenced code block (so ⌘= there does nothing). */
 function fencedLines(lines: string[]): boolean[] {
@@ -275,3 +340,128 @@ function contentStart(line: string): number {
   const m = HEADING.exec(line);
   return m ? m[0].length : line.length - line.trimStart().length;
 }
+
+const HEADING_NUM_PREFIX = /^(\d+(?:\.\d+)*\.?[ \t]+)/;
+
+/**
+ * #474 — Automatically number (or renumber / unnumber) multi-level ATX
+ * headings (`# 1. Title`, `## 1.1 Section`, `### 1.1.1 Subsection`).
+ *
+ * - Skips YAML front matter and fenced code blocks.
+ * - Normalizes the top-most heading level present in the document to depth 0
+ *   (so documents starting at `##` still begin at `1.`, `1.1`, etc.).
+ * - If every heading in the document already carries the exact up-to-date
+ *   hierarchical number prefix, running `toggle` strips the numbers cleanly;
+ *   otherwise it adds or updates all heading numbers.
+ */
+export function autoNumberHeadings(
+  doc: string,
+  from: number,
+  to: number,
+  mode: 'toggle' | 'add' | 'remove' = 'toggle',
+): TextEdit | null {
+  const lines = doc.split('\n');
+  const fenced = fencedLines(lines);
+
+  // Skip leading YAML front matter if present on line 0.
+  let bodyStartIdx = 0;
+  if (lines[0]?.trim() === '---') {
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].trim() === '---' || lines[i].trim() === '...') {
+        bodyStartIdx = i + 1;
+        break;
+      }
+    }
+  }
+
+  const numberedLines = [...lines];
+  const unnumberedLines = [...lines];
+  let hasOrphanNumber = false;
+  const headingIndices: Array<{ idx: number; indent: string; hashes: string; level: number; rest: string; cleanRest: string }> = [];
+  for (let i = bodyStartIdx; i < lines.length; i++) {
+    if (fenced[i]) continue;
+    const m = HEADING.exec(lines[i]);
+    if (!m) continue;
+    const rest = lines[i].slice(m[0].length);
+    if (!rest.trim()) continue;
+    const numMatch = HEADING_NUM_PREFIX.exec(rest);
+    const cleanRest = numMatch ? rest.slice(numMatch[0].length) : rest;
+    if (!cleanRest.trim()) {
+      if (numMatch) {
+        numberedLines[i] = `${m[1]}${m[2]} ${cleanRest}`;
+        unnumberedLines[i] = `${m[1]}${m[2]} ${cleanRest}`;
+        hasOrphanNumber = true;
+      }
+      continue;
+    }
+    headingIndices.push({
+      idx: i,
+      indent: m[1],
+      hashes: m[2],
+      level: m[2].length,
+      rest,
+      cleanRest,
+    });
+  }
+
+  if (headingIndices.length === 0 && !hasOrphanNumber) return null;
+
+  const minLevel = headingIndices.length > 0 ? Math.min(...headingIndices.map((h) => h.level)) : 1;
+  const counters = [0, 0, 0, 0, 0, 0];
+  let allAlreadyMatchNumbered = !hasOrphanNumber;
+
+  for (const h of headingIndices) {
+    const depth = Math.max(0, Math.min(5, h.level - minLevel));
+    for (let d = 0; d < depth; d++) {
+      if (counters[d] === 0) counters[d] = 1;
+    }
+    counters[depth] += 1;
+    for (let d = depth + 1; d < 6; d++) {
+      counters[d] = 0;
+    }
+    const prefix =
+      depth === 0
+        ? `${counters[0]}. `
+        : `${counters.slice(0, depth + 1).join('.')} `;
+    const numbered = `${h.indent}${h.hashes} ${prefix}${h.cleanRest}`;
+    const unnumbered = `${h.indent}${h.hashes} ${h.cleanRest}`;
+    numberedLines[h.idx] = numbered;
+    unnumberedLines[h.idx] = unnumbered;
+    if (lines[h.idx] !== numbered) {
+      allAlreadyMatchNumbered = false;
+    }
+  }
+
+  const targetLines =
+    mode === 'remove' || (mode === 'toggle' && allAlreadyMatchNumbered)
+      ? unnumberedLines
+      : numberedLines;
+
+  const nextDoc = targetLines.join('\n');
+  if (nextDoc === doc) return null;
+  // #489 — compute the minimal changed span rather than replacing 0..doc.length
+  // so CodeMirror does not tear down and re-measure every line/widget in the
+  // document (which caused the viewport to jump when typing headings).
+  let diffStart = 0;
+  const minLen = Math.min(doc.length, nextDoc.length);
+  while (diffStart < minLen && doc.charCodeAt(diffStart) === nextDoc.charCodeAt(diffStart)) {
+    diffStart++;
+  }
+  let oldEnd = doc.length;
+  let newEnd = nextDoc.length;
+  while (
+    oldEnd > diffStart &&
+    newEnd > diffStart &&
+    doc.charCodeAt(oldEnd - 1) === nextDoc.charCodeAt(newEnd - 1)
+  ) {
+    oldEnd--;
+    newEnd--;
+  }
+  return {
+    from: diffStart,
+    to: oldEnd,
+    insert: nextDoc.slice(diffStart, newEnd),
+    ...mapSelection(lines, targetLines, 0, from, to),
+  };
+}
+

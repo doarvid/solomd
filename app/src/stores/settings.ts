@@ -1,5 +1,6 @@
 import { isTreeSortMode, type TreeSortMode } from '../lib/tree-sort';
 import { clampStoredDockHeight } from '../lib/agent-dock';
+import { cleanFontFamilyFromFilename } from '../lib/custom-font';
 import { defineStore } from 'pinia';
 import type { Theme, ViewMode } from '../types';
 import type { WindowsEditorEngine } from '../lib/platform';
@@ -23,6 +24,16 @@ export function buildEditorFontStack(face: string): string {
   // If user pasted a full stack already (contains comma), use as-is but still
   // append CJK fallback for safety.
   if (trimmed.includes(',')) return `${trimmed}, ${CJK_FALLBACK}`;
+  const isFileOrPath = /\.(ttf|otf|woff2|woff|ttc)$/i.test(trimmed) || /[\\/]/.test(trimmed);
+  if (isFileOrPath) {
+    const { stem, family } = cleanFontFamilyFromFilename(trimmed);
+    const names = Array.from(new Set([family, stem].filter(Boolean))).map((n) =>
+      /\s/.test(n) && !/^["']/.test(n) ? `"${n}"` : n,
+    );
+    if (names.length > 0) {
+      return `${names.join(', ')}, ${CJK_FALLBACK}, "JetBrains Mono", Menlo, Consolas, monospace`;
+    }
+  }
   const needsQuote = /[\s/.\\]/.test(trimmed) && !/^["']/.test(trimmed);
   const quoted = needsQuote ? `"${trimmed}"` : trimmed;
   return `${quoted}, ${CJK_FALLBACK}, "JetBrains Mono", Menlo, Consolas, monospace`;
@@ -57,6 +68,13 @@ interface Settings {
   alwaysShowMarkers: boolean;
   // #344 — tint the caret line's background in the CodeMirror editor.
   highlightCurrentLine: boolean;
+  /** Use the document's first non-empty line as the tab title instead of the
+   *  on-disk filename (off by default). Useful when a 3rd-party tool opens
+   *  temporary/UUID-named files in SoloMD. */
+  tabTitleFromFirstLine: boolean;
+  /** #484 — automatically maintain hierarchical 1–6 heading numbers (`1.`, `1.1`, `1.1.1`)
+   *  when headings are added, deleted, or modified (off by default). */
+  autoNumberHeadings: boolean;
   // #190 — dedicated code font (code blocks / inline code / mono UI).
   // Empty = built-in monospace stack.
   codeFontFamily: string;
@@ -272,6 +290,15 @@ interface Settings {
   // Persisted so Esc / the close-button restores their previous workspace
   // even across reloads. Never set to 'reading' — sentinel only.
   lastNonReadingViewMode: ViewMode;
+  // #459: last view mode the user was in before entering preview mode, so
+  // `view.togglePreview` flips back to their editing mode (`liveEdit`/`edit`/`split`).
+  lastNonPreviewViewMode: ViewMode;
+  // #458: WebDAV workspace sync configuration (Nutstore / Nextcloud / AList / Synology).
+  webdavEnabled: boolean;
+  webdavUrl: string;
+  webdavUsername: string;
+  webdavPassword: string;
+  webdavRemotePath: string;
   // v2.5 F2: writing stats — show the per-doc word/char goal pill in the
   // status bar. Off-by-default-ish: the pill stays inert unless the doc's
   // YAML front matter sets a `goal:` key, so this toggle is a hard kill
@@ -353,6 +380,9 @@ interface Settings {
   // like an IDE's "always select opened file". Default on. It never re-roots
   // the workspace: a file outside it is simply not followed.
   explorerFollowActive: boolean;
+  explorerDoubleClickFiles: boolean;
+  explorerShowFolderCount: boolean;
+  v507HighlightLineMigrated: boolean;
   // Show dot-files / dot-folders in the Explorer tree. Off by default: a
   // vault's `.git`, `.obsidian` and friends are noise for most people. On,
   // they're reachable from inside the app instead of only from Finder.
@@ -634,7 +664,10 @@ function defaults(): Settings {
     solidCursor: false,
     selectionBubble: true,
     alwaysShowMarkers: false,
-    highlightCurrentLine: false,
+    highlightCurrentLine: true,
+    tabTitleFromFirstLine: false,
+    autoNumberHeadings: false,
+    v507HighlightLineMigrated: true,
     codeFontFamily: '',
     // 大纲默认开着：它是首屏就能看出这份笔记结构的地方，而"打开笔记先
     // 手动开一个大纲"这件事没人会做第二遍。只影响**新开**的标签页 ——
@@ -757,6 +790,12 @@ function defaults(): Settings {
     // 笔记, the bottom bar). Saved settings keep the user's choice.
     readingByDefaultOnMobile: false,
     lastNonReadingViewMode: 'liveEdit',
+    lastNonPreviewViewMode: 'liveEdit',
+    webdavEnabled: false,
+    webdavUrl: '',
+    webdavUsername: '',
+    webdavPassword: '',
+    webdavRemotePath: '/SoloMD',
     showWritingStats: true,
     showWorkspaceDailyTotal: false,
     pdfDefaults: defaultPdfDefaults(),
@@ -777,6 +816,8 @@ function defaults(): Settings {
     codeBlockWrap: false,
     explorerFullNames: false,
     explorerDoubleClickFolders: false,
+    explorerDoubleClickFiles: false,
+    explorerShowFolderCount: true,
     explorerFollowActive: true,
     explorerShowHidden: false,
     explorerExtFilter: [] as string[],
@@ -1004,6 +1045,10 @@ function load(): Settings {
         merged.livePreview = false;
         merged.v503SourceModeMigrated = true;
       }
+      if (!parsed.v507HighlightLineMigrated) {
+        merged.highlightCurrentLine = true;
+        merged.v507HighlightLineMigrated = true;
+      }
       // D6 — a theme outside the built-in list (e.g. a hand-edited or
       // MCP-written 'system') rendered as a bare white page; reset it to the
       // default, and treat a literal 'system' as the follow-OS option.
@@ -1090,6 +1135,9 @@ export const useSettingsStore = defineStore('settings', {
       } else if (mode !== 'reading') {
         this.lastNonReadingViewMode = mode;
       }
+      if (mode !== 'preview' && mode !== 'reading') {
+        this.lastNonPreviewViewMode = mode;
+      }
       this.viewMode = mode;
       this.persist();
     },
@@ -1107,6 +1155,22 @@ export const useSettingsStore = defineStore('settings', {
      *  From any other view (split, preview, reading) it lands in live edit. */
     toggleLiveEditSource() {
       this.setViewMode(this.viewMode === 'liveEdit' ? 'edit' : 'liveEdit');
+    },
+    /** #459 - Toggle Preview mode on/off, restoring the previous editing mode. */
+    togglePreviewMode() {
+      if (this.viewMode === 'preview') {
+        const next =
+          this.lastNonPreviewViewMode === 'preview' || this.lastNonPreviewViewMode === 'reading'
+            ? 'liveEdit'
+            : this.lastNonPreviewViewMode;
+        this.setViewMode(next);
+      } else {
+        if (this.viewMode !== 'reading') {
+          this.lastNonPreviewViewMode = this.viewMode;
+        }
+        this.viewMode = 'preview';
+        this.persist();
+      }
     },
     /**
      * Toggle reading mode on/off. If the user is currently in reading mode
@@ -1182,6 +1246,14 @@ export const useSettingsStore = defineStore('settings', {
     },
     toggleHighlightCurrentLine() {
       this.highlightCurrentLine = !this.highlightCurrentLine;
+      this.persist();
+    },
+    toggleTabTitleFromFirstLine() {
+      this.tabTitleFromFirstLine = !this.tabTitleFromFirstLine;
+      this.persist();
+    },
+    toggleAutoNumberHeadings() {
+      this.autoNumberHeadings = !this.autoNumberHeadings;
       this.persist();
     },
     setCodeFontFamily(f: string) {
@@ -1690,6 +1762,14 @@ export const useSettingsStore = defineStore('settings', {
     },
     toggleExplorerDoubleClickFolders() {
       this.explorerDoubleClickFolders = !this.explorerDoubleClickFolders;
+      this.persist();
+    },
+    toggleExplorerDoubleClickFiles() {
+      this.explorerDoubleClickFiles = !this.explorerDoubleClickFiles;
+      this.persist();
+    },
+    toggleExplorerShowFolderCount() {
+      this.explorerShowFolderCount = !this.explorerShowFolderCount;
       this.persist();
     },
     toggleExplorerFollowActive() {

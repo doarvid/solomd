@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cleanFontFamilyFromFilename,
+  expandAndroidFontPath,
   normalizeFontKey,
   fontMatchesFile,
   discoverLocalFontFiles,
@@ -113,3 +114,9 @@ test('ensureCustomFontLoaded registers FontFace for matched local font (#438)', 
   assert.ok(addedFaces.some((f) => f.family === '霞鹜文楷'));
   assert.ok(addedFaces.some((f) => f.family === 'LXGWWenKai'));
 });
+
+test('expandAndroidFontPath normalizes ColorOS /storage/0/ paths (#451)', () => {
+  const paths = expandAndroidFontPath('/storage/0/Fonts/MyFont.ttf');
+  assert.ok(paths.includes('/storage/emulated/0/Fonts/MyFont.ttf'));
+});
+

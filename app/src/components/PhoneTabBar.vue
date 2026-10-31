@@ -83,7 +83,7 @@ function openInbox() {
   background: transparent;
   color: var(--text-3);
   font: inherit;
-  font-size: 10px;
+  font-size: calc(var(--ui-font-size, 13px) - 3px);
   -webkit-tap-highlight-color: transparent;
 }
 .ptab__btn.is-on {

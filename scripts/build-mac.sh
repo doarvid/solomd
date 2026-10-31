@@ -68,10 +68,12 @@ APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/SoloMD.app"
 echo "==> Injecting file-type icon into Info.plist"
 cp src-tauri/icons/file_icon.icns "$APP/Contents/Resources/file_icon.icns"
 PLIST="$APP/Contents/Info.plist"
-# CFBundleDocumentTypes has two entries (md + txt). Add CFBundleTypeIconFile to each.
+# CFBundleDocumentTypes entries: add CFBundleTypeIconFile to each existing entry.
 for i in 0 1; do
-  /usr/libexec/PlistBuddy -c "Delete :CFBundleDocumentTypes:${i}:CFBundleTypeIconFile" "$PLIST" 2>/dev/null || true
-  /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:${i}:CFBundleTypeIconFile string file_icon.icns" "$PLIST"
+  if /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:${i}" "$PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Delete :CFBundleDocumentTypes:${i}:CFBundleTypeIconFile" "$PLIST" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:${i}:CFBundleTypeIconFile string file_icon.icns" "$PLIST"
+  fi
 done
 
 echo "==> Embedding the Quick Look extension (#351)"
@@ -121,12 +123,20 @@ rm -f "$DMG"
 hdiutil create -volname SoloMD -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 
 echo "==> Signing dmg"
-codesign --force --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
+codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
+
+echo "==> Notarizing + stapling dmg"
+xcrun notarytool submit "$DMG" \
+  "${ASC_NOTARY_AUTH[@]}" \
+  --wait
+xcrun stapler staple "$DMG"
 
 echo ""
 echo "==> Verifying"
-spctl -a -vvv "$APP" || echo "(spctl: check above)"
+spctl -a -vvv "$APP" || echo "(spctl app: check above)"
+spctl -a -t open --context context:primary-signature -vvv "$DMG" || echo "(spctl dmg: check above)"
 xcrun stapler validate "$APP"
+xcrun stapler validate "$DMG"
 
 echo ""
 echo "==> Done: $DMG"

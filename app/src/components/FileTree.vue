@@ -19,7 +19,7 @@ import { useOverlayPresenceOf } from '../lib/overlay-presence';
 import { useI18n } from '../i18n';
 import { isIOS, isMobile, revealLabelKey, usesCommandKey } from '../lib/platform';
 import { usePendingDeletes, isDeletePending, UNDO_WINDOW_MS } from '../composables/usePendingDeletes';
-import { isSafPath, fromSafPath, safList, safCreate } from '../lib/saf-fs';
+import { isSafPath, fromSafPath, safList, safCreate, safCreateDir } from '../lib/saf-fs';
 import {
   revealRequest,
   revealedPath,
@@ -469,15 +469,22 @@ async function toggle(node: Node, how: 'click' | 'dblclick' | 'caret' = 'click')
   // ignored — and files open on the first click either way.
   // #401 — clicking the caret/chevron directly always toggles expand/collapse.
   const dblFolders = node.is_dir && settings.explorerDoubleClickFolders && how !== 'caret';
+  // #403 — optional double-click to open files (single click only selects).
+  const dblFiles = !node.is_dir && settings.explorerDoubleClickFiles && !isMobile();
   // #355 — a single click on a file keeps the keyboard in the tree (F2 / Del
   // act on it, as in VS Code); a double click means "I want to write in it".
   if (how === 'dblclick' && !node.is_dir) {
+    if (dblFiles) {
+      selected.value = { path: node.path, isDir: false };
+      await files.openPath(node.path, { fromTree: true });
+    }
     focusEditor();
     return;
   }
   if (how === 'dblclick' && !dblFolders) return;
   selected.value = { path: node.path, isDir: !!node.is_dir };
   if (!node.is_dir) {
+    if (dblFiles && how === 'click') return;
     await files.openPath(node.path, { fromTree: true });
     // #355 — the editor takes focus when a document opens; a click in the
     // tree gives it back, so F2 / Delete act on the row just clicked.
@@ -506,6 +513,31 @@ async function expandDir(node: Node) {
     node.loading = false;
   }
   node.expanded = true;
+}
+
+/** #400 — Recursively expand or collapse all subfolders under a directory node. */
+async function expandSubtree(node: Node, maxDepth = 4) {
+  closeCtx();
+  async function walk(n: Node, depth: number) {
+    if (!n.is_dir || depth > maxDepth) return;
+    await expandDir(n);
+    for (const child of n.children ?? []) {
+      if (child.is_dir) await walk(child, depth + 1);
+    }
+  }
+  await walk(node, 0);
+}
+
+function collapseSubtree(node: Node) {
+  closeCtx();
+  function walk(n: Node) {
+    if (!n.is_dir) return;
+    n.expanded = false;
+    for (const child of n.children ?? []) {
+      if (child.is_dir) walk(child);
+    }
+  }
+  walk(node);
 }
 
 watch(
@@ -1604,6 +1636,12 @@ async function commitEdit() {
       scheduleRefresh();
       await files.openPath(target, { bypassNewWindow: true });
     } else if (e.kind === 'new-dir') {
+      if (isSafPath(e.parent) && workspace.safTreeUri) {
+        await safCreateDir(workspace.safTreeUri, fromSafPath(e.parent), name);
+        editing.value = null;
+        scheduleRefresh();
+        return;
+      }
       await pendingDeletes.flushUnder(joinPath(e.parent, name));
       await invoke('fs_create_dir', { path: joinPath(e.parent, name) });
       editing.value = null;
@@ -2048,6 +2086,15 @@ onBeforeUnmount(() => {
           <span class="ftree__menu-check"></span>
           <span class="ftree__menu-name">{{ t('explorer.closeFolder') }}</span>
         </button>
+        <button
+          v-if="workspace.recentFolders.length > 0"
+          class="ftree__menu-item"
+          role="menuitem"
+          @click="workspace.clearRecentFolders(); closeSwitcher()"
+        >
+          <span class="ftree__menu-check"></span>
+          <span class="ftree__menu-name">{{ t('explorer.clearRecentFolders') || '清除最近文件夹记录' }}</span>
+        </button>
       </div>
       <div
         v-if="sortOpen"
@@ -2265,6 +2312,15 @@ onBeforeUnmount(() => {
       >
         🤖 {{ t('explorer.agent') }}
       </button>
+      <template v-if="ctx.node && ctx.node.is_dir">
+        <div class="ftree__ctx-sep"></div>
+        <button class="ftree__ctx-item" @click="expandSubtree(ctx.node)">
+          {{ t('explorer.expandSubtree') || '展开全部子目录' }}
+        </button>
+        <button class="ftree__ctx-item" @click="collapseSubtree(ctx.node)">
+          {{ t('explorer.collapseSubtree') || '折叠全部子目录' }}
+        </button>
+      </template>
       <!-- Only between the "new file / folder" section (folders) and the rest:
            on a file the menu would otherwise open with an empty divider. -->
       <div v-if="ctx.node && ctx.node.is_dir" class="ftree__ctx-sep"></div>
@@ -2452,6 +2508,7 @@ export const FileTreeNode = defineComponent({
     // #182 — the full-names toggle lives in settings; this inner component is
     // module-scoped so it can't close over <script setup>'s store instance.
     const nodeSettings = useSettingsStore();
+    const nodeTabs = useTabsStore();
     const edit = inject<FtreeEditApi | null>(FTREE_EDIT, null);
     const subtreeHasInbox = (node: any): boolean => {
       if (!node.is_dir) return props.inboxPaths.has(node.path);
@@ -2567,6 +2624,20 @@ export const FileTreeNode = defineComponent({
             }, n.is_dir ? [h(Icon, { name: 'chevron-right', size: 12 })] : []),
             h('span', { class: 'ftree__icon' }, [h(Icon, { name: n.is_dir ? 'folder-sm' : 'file', size: 16 })]),
             nameNode,
+            n.is_dir && nodeSettings.explorerShowFolderCount && Array.isArray(n.children)
+              ? h('span', { class: 'ftree__dir-count', title: `${n.children.length}` }, String(n.children.length))
+              : null,
+            !n.is_dir && nodeTabs.tabs.some((t: any) => t.filePath && samePath(t.filePath, n.path))
+              ? h('span', {
+                  class: [
+                    'ftree__open-dot',
+                    nodeTabs.tabs.some((t: any) => t.filePath && samePath(t.filePath, n.path) && t.dirty)
+                      ? 'ftree__open-dot--dirty'
+                      : '',
+                  ],
+                  title: 'Open in tab',
+                })
+              : null,
             !n.is_dir && props.inboxPaths.has(n.path)
               ? h('span', { class: 'ftree__inbox-dot', title: 'inbox' })
               : null,
@@ -2626,7 +2697,7 @@ export const FileTreeNode = defineComponent({
   flex-direction: column;
   user-select: none;
   position: relative;
-  font-size: 13px;
+  font-size: var(--ui-font-size, 13px);
   color: var(--text);
 }
 /* Inside Sidebar.vue: the sidebar owns width, background, border and the
@@ -3183,6 +3254,25 @@ export const FileTreeNode = defineComponent({
   overflow-wrap: break-word;
   word-break: break-word;
   line-height: 1.3;
+}
+:deep(.ftree__dir-count) {
+  flex: none;
+  margin-left: auto;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+:deep(.ftree__open-dot) {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 65%, transparent);
+}
+:deep(.ftree__open-dot--dirty) {
+  background: var(--accent);
 }
 :deep(.ftree__inbox-dot) {
   flex: none;

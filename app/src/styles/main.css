@@ -586,10 +586,11 @@ button:disabled {
   /* Hide desktop window titlebar on iOS */
   .titlebar { display: none !important; }
 
-  /* Larger editor text on touch */
+  /* Touch editor padding: preserve generous bottom scroll room so lines near
+     the end of a note can scroll above the software keyboard and KeyboardBar
+     (#451). Do NOT hardcode font-size here — that overrode settings.fontSize. */
   .cm-editor .cm-content {
-    font-size: 16px !important;
-    padding: 16px 20px;
+    padding: 16px 20px calc(45vh + var(--kb-covered-bottom, 0px));
   }
 
   /* iOS-friendly select/range inputs */
@@ -767,6 +768,26 @@ mark {
   text-decoration: none;
   margin-left: 0.3em;
   color: var(--accent);
+}
+
+/* #462 — Mermaid interactive tooltip (`click Node callback "Tooltip"` /
+   `click Node "url" "Tooltip"`). Mermaid appends `div.mermaidTooltip` directly
+   under `document.body`, outside the SVG's `#mmd-*` scoped stylesheet. */
+div.mermaidTooltip {
+  position: absolute;
+  text-align: center;
+  max-width: 260px;
+  padding: 4px 8px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.4;
+  background: var(--bg-pop, #27272a);
+  color: var(--text, #f4f4f5);
+  border: var(--bd-hair, 1px solid rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  pointer-events: none;
+  z-index: 99999;
+  box-shadow: var(--sh-pop, 0 4px 14px rgba(0, 0, 0, 0.2));
 }
 
 /* Print: hide the app shell and show the #solomd-print-overlay instead. */

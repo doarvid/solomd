@@ -53,12 +53,15 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   (e: 'action', id: EditorMenuAction): void;
+  (e: 'resize-image', size: string): void;
   (e: 'replace', word: string): void;
   (e: 'add-word', word: string): void;
   (e: 'lt-ignore'): void;
   (e: 'lt-disable-rule'): void;
   (e: 'close'): void;
 }>();
+
+const IMAGE_SIZE_PRESETS = ['25%', '50%', '75%', '100%'] as const;
 
 const { t } = useI18n();
 const root = ref<HTMLElement | null>(null);
@@ -221,6 +224,25 @@ onBeforeUnmount(() => {
         <span class="editor-ctx__label">{{ item.label }}</span>
         <span class="editor-ctx__key">{{ item.key }}</span>
       </button>
+      <div
+        v-if="item.id === 'copyImage'"
+        class="editor-ctx__image-sizes"
+        role="group"
+        :aria-label="t('overlay.imageSize')"
+      >
+        <span class="editor-ctx__size-label">{{ t('overlay.imageSize') }}</span>
+        <div class="editor-ctx__size-pills">
+          <button
+            v-for="sz in IMAGE_SIZE_PRESETS"
+            :key="sz"
+            type="button"
+            class="editor-ctx__size-btn"
+            :data-size="sz"
+            @mousedown.prevent
+            @click="emit('resize-image', sz)"
+          >{{ sz }}</button>
+        </div>
+      </div>
     </template>
   </div>
 </template>
@@ -278,5 +300,35 @@ onBeforeUnmount(() => {
   height: 1px;
   margin: 4px 6px;
   background: var(--border);
+}
+.editor-ctx__image-sizes {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px 6px;
+}
+.editor-ctx__size-label {
+  color: var(--text-muted, var(--text));
+  font-size: 12px;
+  white-space: nowrap;
+}
+.editor-ctx__size-pills {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.editor-ctx__size-btn {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.editor-ctx__size-btn:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent);
 }
 </style>

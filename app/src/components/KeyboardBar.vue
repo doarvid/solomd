@@ -50,6 +50,8 @@ function onFocusOut(e: FocusEvent) {
   // is not a blur.
   if (isEditorTarget(e.relatedTarget)) return;
   editorFocused.value = false;
+  measure();
+  window.setTimeout(measure, 60);
 }
 
 /** App switch and back: the editor never lost focus inside the page, so no
@@ -57,6 +59,32 @@ function onFocusOut(e: FocusEvent) {
 function onWindowFocus() {
   editorFocused.value = isEditorTarget(document.activeElement);
   measure();
+}
+
+function ensureCaretAboveBar() {
+  if (!keyboardOpen.value || !editorFocused.value) return;
+  const limitBottom = top.value - 12;
+  if (limitBottom <= 40) return;
+  const scroller = document.querySelector('.cm-editor .cm-scroller') as HTMLElement | null;
+  if (!scroller) return;
+  const cursorEl =
+    (scroller.querySelector('.cm-cursor-primary') as HTMLElement | null) ??
+    (scroller.querySelector('.cm-activeLine') as HTMLElement | null);
+  let caretBottom = 0;
+  if (cursorEl) {
+    const r = cursorEl.getBoundingClientRect();
+    if (r.height > 0) caretBottom = r.bottom;
+  }
+  if (!caretBottom) {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const r = sel.getRangeAt(0).getBoundingClientRect();
+      if (r.height > 0) caretBottom = r.bottom;
+    }
+  }
+  if (caretBottom > limitBottom) {
+    scroller.scrollTop += caretBottom - limitBottom + 16;
+  }
 }
 
 function measure() {
@@ -73,6 +101,11 @@ function measure() {
   const covered = Math.max(layoutH - (vvTop + vvH), baseline - layoutH);
   keyboardOpen.value = preview || covered > KEYBOARD_MIN;
   top.value = Math.round(vvTop + vvH - BAR_H);
+  const bottomInset = keyboardOpen.value ? Math.max(BAR_H, layoutH - top.value) : 0;
+  document.documentElement.style.setProperty('--kb-covered-bottom', `${bottomInset}px`);
+  if (keyboardOpen.value && editorFocused.value) {
+    requestAnimationFrame(ensureCaretAboveBar);
+  }
 }
 function onOrientation() {
   baseline = 0;
@@ -82,6 +115,7 @@ function onOrientation() {
 onMounted(() => {
   document.addEventListener('focusin', onFocusIn);
   document.addEventListener('focusout', onFocusOut);
+  document.addEventListener('input', ensureCaretAboveBar, true);
   window.visualViewport?.addEventListener('resize', measure);
   window.visualViewport?.addEventListener('scroll', measure);
   window.addEventListener('resize', measure);
@@ -94,11 +128,13 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('focusin', onFocusIn);
   document.removeEventListener('focusout', onFocusOut);
+  document.removeEventListener('input', ensureCaretAboveBar, true);
   window.visualViewport?.removeEventListener('resize', measure);
   window.visualViewport?.removeEventListener('scroll', measure);
   window.removeEventListener('resize', measure);
   window.removeEventListener('orientationchange', onOrientation);
   window.removeEventListener('focus', onWindowFocus);
+  document.documentElement.style.removeProperty('--kb-covered-bottom');
 });
 
 const visible = computed(

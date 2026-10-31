@@ -239,6 +239,10 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
             item('history.commitNow', t('menubar.historyCommitNow')),
             item('history.initWorkspace', t('menubar.historyInit')),
             item('history.toggleAutoGit', t('menubar.autoCommit'), { checked: state.autoGit }),
+            sep,
+            item('sync.webdavPush', t('menubar.webdavPush')),
+            item('sync.webdavPull', t('menubar.webdavPull')),
+            item('sync.webdavSettings', t('menubar.webdavSettings')),
           ],
         }]
       : []),
@@ -316,6 +320,7 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
     item('heading.promote', t('cmd.heading.promote')),
     item('heading.demote', t('cmd.heading.demote')),
     item('heading.paragraph', t('cmd.heading.paragraph')),
+    item('heading.autoNumber', t('cmd.heading.autoNumber')),
     sep,
     // In chord order: ⌘⌥7 / 8 / 9.
     fmt('ol'), fmt('ul'), fmt('task'),
@@ -335,7 +340,7 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
 
   // ---- 格式 Format ----
   const format: MenuNode[] = [
-    fmt('bold'), fmt('italic'), fmt('strike'),
+    fmt('bold'), fmt('italic'), fmt('underline'), fmt('strike'), fmt('highlight'),
     sep,
     fmt('code'),
     item('insert.mathInline', t('toolbar.insertMathInline')),
@@ -382,12 +387,12 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
       items: VIEW_MODES.map((m) =>
         item(`view.mode:${m}`, modeLabel[m], {
           checked: state.viewMode === m,
-          // Reading mode has its own toggle chord; the others are reached by
-          // cycling.
-          action: m === 'reading' ? 'view.toggleReading' : undefined,
+          // Reading and preview modes have their own toggle chords; the others
+          // are reached by cycling.
+          action: m === 'reading' ? 'view.toggleReading' : m === 'preview' ? 'view.togglePreview' : undefined,
           // The item sets the mode, the chord toggles it — the native menu
-          // must not run "set reading" on the toggle key.
-          noNativeAccel: m === 'reading',
+          // must not run "set reading/preview" on the toggle key.
+          noNativeAccel: m === 'reading' || m === 'preview',
         }),
       ),
     },

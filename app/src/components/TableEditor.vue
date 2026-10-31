@@ -176,7 +176,50 @@ function chooseAlign(a: TableAlign) {
   model.value = setAlign(model.value, focused.value.col, a);
 }
 
+/** #387 — Quickly resize the table to targetCols × targetRows via direct numeric input. */
+function setColCount(raw: Event) {
+  syncDomCellsToModel();
+  const target = Math.max(1, Math.min(20, Math.round(Number((raw.target as HTMLInputElement).value) || colCount.value)));
+  let m = model.value;
+  while (m.header.length < target) m = insertColumn(m, m.header.length);
+  while (m.header.length > target && m.header.length > 1) m = deleteColumn(m, m.header.length - 1);
+  model.value = m;
+  focused.value = { row: focused.value.row, col: Math.min(focused.value.col, m.header.length - 1) };
+}
+function setRowCount(raw: Event) {
+  syncDomCellsToModel();
+  const target = Math.max(1, Math.min(200, Math.round(Number((raw.target as HTMLInputElement).value) || model.value.rows.length)));
+  let m = model.value;
+  while (m.rows.length < target) m = insertRow(m, m.rows.length);
+  while (m.rows.length > target && m.rows.length > 1) m = deleteRow(m, m.rows.length - 1);
+  model.value = m;
+  focused.value = { row: Math.min(focused.value.row, m.rows.length - 1), col: focused.value.col };
+}
+
+function syncDomCellsToModel() {
+  const root = gridEl.value;
+  if (!root) return;
+  const cells = root.querySelectorAll<HTMLElement>('[data-cell]');
+  cells.forEach((el) => {
+    const key = el.getAttribute('data-cell');
+    if (!key) return;
+    const [rStr, cStr] = key.split(':');
+    const r = Number(rStr);
+    const c = Number(cStr);
+    if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+    const text = cellText(el);
+    if (r === -1) {
+      if (model.value.header[c] !== undefined && model.value.header[c] !== text) {
+        model.value = setCell(model.value, -1, c, text);
+      }
+    } else if (model.value.rows[r]?.[c] !== undefined && model.value.rows[r][c] !== text) {
+      model.value = setCell(model.value, r, c, text);
+    }
+  });
+}
+
 function apply() {
+  syncDomCellsToModel();
   emit('apply', serializeTable(model.value));
   emit('close');
 }
@@ -195,8 +238,22 @@ function onKeydown(e: KeyboardEvent) {
     return;
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if ((e.target as HTMLElement | null)?.tagName === 'INPUT') {
+      (e.target as HTMLElement).blur();
+      return;
+    }
     e.preventDefault();
     if (e.metaKey || e.ctrlKey) apply();
+    return;
+  }
+  // #383 — keyboard shortcuts for inserting rows/columns inside the table editor.
+  if (e.key === 'Insert') {
+    e.preventDefault();
+    syncDomCellsToModel();
+    if ((e.ctrlKey || e.metaKey) && e.altKey) addColLeft();
+    else if (e.ctrlKey || e.metaKey) addColRight();
+    else if (e.altKey) addRowAbove();
+    else addRowBelow();
     return;
   }
   if (e.key !== 'Tab') return;
@@ -215,23 +272,43 @@ function onKeydown(e: KeyboardEvent) {
     <div class="tbl" role="dialog" aria-modal="true" :inert="closeConfirm">
       <header class="tbl__head">
         <span class="tbl__title">{{ t('tableEditor.heading') }}</span>
-        <span class="tbl__size">{{ colCount }} × {{ model.rows.length }}</span>
+        <span class="tbl__size">
+          <input
+            class="tbl__size-input"
+            type="number"
+            min="1"
+            max="20"
+            :value="colCount"
+            :title="t('tableEditor.column')"
+            @change="setColCount"
+          />
+          <span>×</span>
+          <input
+            class="tbl__size-input"
+            type="number"
+            min="1"
+            max="200"
+            :value="model.rows.length"
+            :title="t('tableEditor.row')"
+            @change="setRowCount"
+          />
+        </span>
         <button class="tbl__x" :title="t('tableEditor.cancel')" @click="requestClose">×</button>
       </header>
 
       <div class="tbl__toolbar">
         <div class="tbl__group">
           <span class="tbl__grouplabel">{{ t('tableEditor.row') }}</span>
-          <button @click="addRowAbove" :title="t('tableEditor.rowAbove')">↑+</button>
-          <button @click="addRowBelow" :title="t('tableEditor.rowBelow')">↓+</button>
+          <button @click="addRowAbove" :title="`${t('tableEditor.rowAbove')} (Alt+Insert)`">↑+</button>
+          <button @click="addRowBelow" :title="`${t('tableEditor.rowBelow')} (Insert)`">↓+</button>
           <button @click="rowUp" :title="t('tableEditor.rowUp')">⤒</button>
           <button @click="rowDown" :title="t('tableEditor.rowDown')">⤓</button>
           <button class="tbl__danger" @click="removeRow" :title="t('tableEditor.rowDelete')">✕</button>
         </div>
         <div class="tbl__group">
           <span class="tbl__grouplabel">{{ t('tableEditor.column') }}</span>
-          <button @click="addColLeft" :title="t('tableEditor.colLeft')">+←</button>
-          <button @click="addColRight" :title="t('tableEditor.colRight')">+→</button>
+          <button @click="addColLeft" :title="`${t('tableEditor.colLeft')} (Ctrl+Alt+Insert)`">+←</button>
+          <button @click="addColRight" :title="`${t('tableEditor.colRight')} (Ctrl+Insert)`">+→</button>
           <button @click="colLeft" :title="t('tableEditor.colMoveLeft')">⇤</button>
           <button @click="colRight" :title="t('tableEditor.colMoveRight')">⇥</button>
           <button class="tbl__danger" @click="removeCol" :title="t('tableEditor.colDelete')">✕</button>
@@ -357,9 +434,28 @@ function onKeydown(e: KeyboardEvent) {
   flex: 1;
 }
 .tbl__size {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 11px;
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
+}
+.tbl__size-input {
+  width: 44px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  text-align: center;
+  outline: none;
+}
+.tbl__size-input:focus {
+  border-color: var(--accent, #ff9f40);
 }
 .tbl__x {
   border: 0;

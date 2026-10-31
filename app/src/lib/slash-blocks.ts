@@ -316,6 +316,25 @@ export function expandSnippet(snippet: string, selection: string): ExpandedSnipp
   return { text: template, cursorOffset: template.length };
 }
 
+/**
+ * When a multi-line slash snippet (such as `/code`, `/mermaid`, `/math_block`,
+ * `/table`) is inserted on a line that already carries leading indentation
+ * (e.g. after `Shift + Enter` inside a list item), indent every subsequent
+ * line of the expanded snippet by `indent` so the block stays nested in the
+ * list item and the cursor lands at the indented column rather than column 0.
+ */
+export function indentExpandedSnippet(expanded: ExpandedSnippet, indent: string): ExpandedSnippet {
+  if (!indent || !expanded.text.includes('\n')) return expanded;
+  const beforeCursor = expanded.text.slice(0, expanded.cursorOffset);
+  const newlinesBefore = beforeCursor.split('\n').length - 1;
+  const text = expanded.text.split('\n').join(`\n${indent}`);
+  return {
+    ...expanded,
+    text,
+    cursorOffset: expanded.cursorOffset + newlinesBefore * indent.length,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Filter / fuzzy-match scoring
 // ---------------------------------------------------------------------------

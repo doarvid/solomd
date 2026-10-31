@@ -30,6 +30,15 @@ import {
   applyTemplate,
   defaultDailyTemplate,
 } from '../lib/daily-notes';
+import {
+  isSafPath,
+  fromSafPath,
+  toSafPath,
+  safEnsureSubdir,
+  safList,
+  safCreate,
+  safWrite,
+} from '../lib/saf-fs';
 
 const DEFAULT_FOLDER = 'Daily';
 const DEFAULT_FORMAT = 'YYYY-MM-DD.md';
@@ -122,20 +131,50 @@ export function useDailyNotes() {
     }
     const { fullPath, filename } = resolved;
 
-    if (await fileExists(fullPath)) {
-      await files.openPath(fullPath, { bypassNewWindow: true });
-      return;
-    }
-
-    // Materialize template. Empty user template → fall back to the built-in.
     const cfg = readDailySettings();
     const tmpl = cfg.dailyNotesTemplate.trim()
       ? cfg.dailyNotesTemplate
       : defaultDailyTemplate(lang.value === 'zh' ? 'zh' : 'en');
-
     const prevStem = stem(formatDailyFilename(shiftDate(date, -1), cfg.dailyNotesFormat));
     const nextStem = stem(formatDailyFilename(shiftDate(date, 1), cfg.dailyNotesFormat));
     const body = applyTemplate(tmpl, date, prevStem, nextStem);
+
+    // #502 — Android SAF vault support: create the daily notes subfolder (and
+    // any date-formatted path segments in `filename`) via ContentResolver.
+    const ws = workspace.currentFolder;
+    if (ws && isSafPath(ws) && workspace.safTreeUri) {
+      try {
+        const treeUri = workspace.safTreeUri;
+        const rootDocId = fromSafPath(ws);
+        const relFile = filename.replace(/\\/g, '/').replace(/^\/+/, '');
+        const lastSlash = relFile.lastIndexOf('/');
+        const extraSubdir = lastSlash >= 0 ? relFile.slice(0, lastSlash) : '';
+        const baseFileName = lastSlash >= 0 ? relFile.slice(lastSlash + 1) : relFile;
+        const combinedSubdir = [cfg.dailyNotesFolder, extraSubdir]
+          .filter((s) => s && s.trim())
+          .join('/');
+        const dirDocId = await safEnsureSubdir(treeUri, rootDocId, combinedSubdir);
+        const children = await safList(treeUri, dirDocId);
+        const existing = children.find(
+          (c) => !c.is_dir && c.name.toLowerCase() === baseFileName.toLowerCase(),
+        );
+        if (existing) {
+          await files.openPath(existing.path, { bypassNewWindow: true });
+          return;
+        }
+        const newDocId = await safCreate(treeUri, dirDocId, baseFileName);
+        await safWrite(treeUri, newDocId, body);
+        await files.openPath(toSafPath(newDocId), { bypassNewWindow: true });
+      } catch (e) {
+        toasts.error(t('toast.createFileFailed', { name: filename, error: String(e) }));
+      }
+      return;
+    }
+
+    if (await fileExists(fullPath)) {
+      await files.openPath(fullPath, { bypassNewWindow: true });
+      return;
+    }
 
     try {
       // `write_binary_file` is used here (rather than `write_file`) because

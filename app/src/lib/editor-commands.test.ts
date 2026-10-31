@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { deleteWord, selectLine, selectWord, shiftHeading, type Range, type TextEdit } from './editor-commands.ts';
+import { autoNumberHeadings, deleteWord, selectCodeBlockBody, selectLine, selectWord, shiftHeading, type Range, type TextEdit } from './editor-commands.ts';
 
 /** `|` marks the selection ends (one `|` = a bare caret). */
 function parse(marked: string): { doc: string; from: number; to: number } {
@@ -94,4 +94,61 @@ test('heading commands leave lists, quotes, fences and blank lines alone', () =>
   assert.equal(up('```\n# not a he|ading\n```'), null);
   // A selection over several lines shifts each heading line.
   assert.equal(up('|## A\n\ntext\n### B|'), '|# A\n\n###### text\n## B|');
+});
+
+test('autoNumberHeadings numbers hierarchically, skips fences, and toggles off when already numbered (#474)', () => {
+  const doc = '# Intro\n## Part A\n### Detail\n## Part B\n```\n# Not a heading\n```\n# Outro';
+  const e1 = autoNumberHeadings(doc, 0, 0);
+  assert.ok(e1);
+  const numberedDoc = doc.slice(0, e1!.from) + e1!.insert + doc.slice(e1!.to);
+  assert.equal(
+    numberedDoc,
+    '# 1. Intro\n## 1.1 Part A\n### 1.1.1 Detail\n## 1.2 Part B\n```\n# Not a heading\n```\n# 2. Outro',
+  );
+  // Running again when already accurately numbered removes the numbers cleanly.
+  const e2 = autoNumberHeadings(numberedDoc, 0, 0);
+  assert.ok(e2);
+  const unnumberedDoc = numberedDoc.slice(0, e2!.from) + e2!.insert + numberedDoc.slice(e2!.to);
+  assert.equal(unnumberedDoc, doc);
+});
+
+test('autoNumberHeadings add-mode refreshes numbers with a minimal diff range (#484, #489)', () => {
+  // Adding a new heading between 1.1 and 1.2 renumbers 1.2 -> 1.3 and leaves
+  // the unchanged prefix (# 1. Intro\n## 1.1 Part A\n## ) outside [from, to].
+  const added = '# 1. Intro\n## 1.1 Part A\n## Inserted\n## 1.2 Part B';
+  const eAdd = autoNumberHeadings(added, 0, 0, 'add');
+  assert.ok(eAdd);
+  assert.ok(eAdd!.from > '# 1. Intro\n## 1.1 Part A\n'.length, 'unchanged prefix is excluded from diff');
+  const afterAdd = added.slice(0, eAdd!.from) + eAdd!.insert + added.slice(eAdd!.to);
+  assert.equal(
+    afterAdd,
+    '# 1. Intro\n## 1.1 Part A\n## 1.2 Inserted\n## 1.3 Part B',
+  );
+  // Deleting a heading's text leaving "## 1.1 " strips the orphan number and renumbers following headings
+  const cleared = '# 1. Intro\n## 1.1 \n## 1.2 Part B';
+  const eClear = autoNumberHeadings(cleared, 0, 0, 'add');
+  assert.ok(eClear);
+  const afterClear = cleared.slice(0, eClear!.from) + eClear!.insert + cleared.slice(eClear!.to);
+  assert.equal(afterClear, '# 1. Intro\n## \n## 1.1 Part B');
+});
+
+test('selectCodeBlockBody selects the code block body first and returns null when already selected', () => {
+  const doc = '# Title\n```js\nconst a = 1;\nconst b = 2;\n```\nFooter';
+  assert.equal(
+    sel('# Title\n```js\nconst |a = 1;\nconst b = 2;\n```\nFooter', selectCodeBlockBody),
+    '# Title\n```js\n|const a = 1;\nconst b = 2;|\n```\nFooter',
+  );
+  // Once the full body is selected, a second Ctrl+A returns null so the editor selects the whole document.
+  assert.equal(
+    sel('# Title\n```js\n|const a = 1;\nconst b = 2;|\n```\nFooter', selectCodeBlockBody),
+    null,
+  );
+  // Indented fenced code block inside a list item:
+  assert.equal(
+    sel('1. 列表一\n   ```ts\n   let |x = 1;\n   ```\n2. 列表二', selectCodeBlockBody),
+    '1. 列表一\n   ```ts\n|   let x = 1;|\n   ```\n2. 列表二',
+  );
+  // Outside a code block returns null:
+  assert.equal(sel('# Title|\n```js\na\n```', selectCodeBlockBody), null);
+  void doc;
 });

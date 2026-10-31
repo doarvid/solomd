@@ -1,0 +1,82 @@
+name: "📝 Feedback / 问题反馈"
+description: "Report a bug or suggest an improvement. 反馈问题或提出功能建议。"
+body:
+  - type: dropdown
+    id: type
+    attributes:
+      label: "Type / 类型"
+      description: "Bug = something is broken; Feature = an idea or improvement. Bug = 功能不正常；Feature = 新功能或改进建议。"
+      options:
+        - "🐛 Bug — something isn't working / 功能不正常"
+        - "✨ Feature — an idea or improvement / 新功能或改进建议"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem / 问题描述"
+      description: "One or two sentences is enough — details go below. 一两句话说清问题或需求，细节留在下面。"
+      placeholder: "e.g. Saving a read-only file fails with no visible warning. 如：只读文件保存失败时没有醒目提示。"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to reproduce / 复现步骤"
+      description: "Bugs only, numbered. Feature requests can skip this. 仅 Bug 填写，请按步骤编号；功能请求可跳过。"
+      placeholder: "1. Open … 2. Click … 3. …"
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected vs actual / 期望效果 vs 实际效果"
+      description: "What should happen vs what happens today (or what it should look like vs what it looks like). 应该是什么行为/样式，现在实际是什么。"
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: "Impact / use case / 影响或使用场景"
+      description: "Who runs into this, and when. 什么场景下会遇到，影响什么。"
+  - type: textarea
+    id: settings
+    attributes:
+      label: "Related settings (optional) / 相关设置（选填）"
+      description: "Only when a setting or integration is involved, e.g. Settings → Integrations. 仅当问题与某项设置或集成有关时填写，如：设置 → 集成。"
+  - type: input
+    id: version
+    attributes:
+      label: "SoloMD version / 版本"
+      placeholder: "V5.0.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: "Platform / 平台"
+      description: "Every platform where you've seen it. 在哪些平台上出现过都选上。"
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - iOS / iPadOS
+        - Android
+      multiple: true
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: "OS version (optional) / 系统版本（选填）"
+      placeholder: "Windows 11, macOS 15, Ubuntu 24.04, …"
+  - type: textarea
+    id: media
+    attributes:
+      label: "Screenshots / logs (optional) / 截图或日志（选填）"
+      description: "Drag images straight into the box. 截图直接拖入即可。"
+  - type: checkboxes
+    id: search
+    attributes:
+      label: "Before submitting / 提交前"
+      options:
+        - label: "I searched existing issues and checked docs/roadmap.md. 我已搜索过已有 issue，并查看过 docs/roadmap.md。"
+          required: true

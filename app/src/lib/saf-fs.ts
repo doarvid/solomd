@@ -17,6 +17,8 @@ import { invoke } from '@tauri-apps/api/core';
 import type { FileReadResult, Language } from '../types';
 
 export const SAF_PREFIX = 'saf:';
+/** Standard Android DocumentsContract.Document.MIME_TYPE_DIR for creating SAF directories. */
+export const SAF_DIR_MIME = 'vnd.android.document/directory';
 
 export function isSafPath(p: string | null | undefined): boolean {
   return typeof p === 'string' && p.startsWith(SAF_PREFIX);
@@ -57,8 +59,22 @@ export async function safRead(treeUri: string, docId: string): Promise<FileReadR
   return { content, encoding: 'UTF-8', language: langFor(name), had_bom: false };
 }
 
+/** #476 — Read a binary file (e.g. image) from SAF as a base64 string. */
+export async function safReadBase64(treeUri: string, docId: string): Promise<string> {
+  return await invoke<string>('saf_read_base64', { treeUri, docId });
+}
+
 export async function safWrite(treeUri: string, docId: string, content: string): Promise<void> {
   await invoke('saf_write', { treeUri, docId, content });
+}
+
+/** #502 — Overwrite a SAF document with Base64-encoded binary bytes. */
+export async function safWriteBase64(
+  treeUri: string,
+  docId: string,
+  base64: string,
+): Promise<void> {
+  await invoke('saf_write_base64', { treeUri, docId, base64 });
 }
 
 /** Create a file under `parentDocId`; returns its documentId. */
@@ -69,6 +85,50 @@ export async function safCreate(
   mime = 'text/markdown',
 ): Promise<string> {
   return await invoke<string>('saf_create', { treeUri, parentDocId, mime, name });
+}
+
+/** #502 — Create a folder under `parentDocId`; returns its documentId. */
+export async function safCreateDir(
+  treeUri: string,
+  parentDocId: string,
+  name: string,
+): Promise<string> {
+  return await invoke<string>('saf_create', {
+    treeUri,
+    parentDocId,
+    mime: SAF_DIR_MIME,
+    name,
+  });
+}
+
+/**
+ * #502 — Ensure a relative subfolder path (e.g. `"_assets"` or `"daily/2026"`)
+ * exists under `parentDocId`, creating any missing segments via `safCreateDir`.
+ * Returns the final directory's `docId`.
+ */
+export async function safEnsureSubdir(
+  treeUri: string,
+  parentDocId: string,
+  relDir: string,
+): Promise<string> {
+  const segs = relDir
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s !== '.');
+  let curDocId = parentDocId;
+  for (const seg of segs) {
+    const children = await safList(treeUri, curDocId);
+    const existing = children.find(
+      (c) => c.is_dir && (c.name === seg || c.name.toLowerCase() === seg.toLowerCase()),
+    );
+    if (existing) {
+      curDocId = fromSafPath(existing.path);
+    } else {
+      curDocId = await safCreateDir(treeUri, curDocId, seg);
+    }
+  }
+  return curDocId;
 }
 
 export async function safPersistedTrees(): Promise<string[]> {

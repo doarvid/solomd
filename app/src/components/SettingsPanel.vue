@@ -48,6 +48,7 @@ import BookmarkSyncSettings from './BookmarkSyncSettings.vue';
 // than a brand-new top-level category.
 import RecipesSettings from './RecipesSettings.vue';
 import GithubSyncSettings from './GithubSyncSettings.vue';
+import WebdavSyncSettings from './WebdavSyncSettings.vue';
 import CloudFolderBanner from './CloudFolderBanner.vue';
 import ProxySettings from './ProxySettings.vue';
 import LanguageToolSettings from './LanguageToolSettings.vue';
@@ -430,7 +431,16 @@ function applySearch() {
     b.style.order = String((catOrder.get(cat) ?? 99) * 2 + 1);
     if (match) {
       cats.add(cat);
-      hits.push(b);
+      const subRows = Array.from(b.querySelectorAll<HTMLElement>('.kb-row, .kb-clash'));
+      const matchingSubRows = subRows.filter((row) => blockMatches(row.textContent || '', q, needles));
+      if (matchingSubRows.length > 0) {
+        for (const row of matchingSubRows) {
+          row.dataset.cat = cat;
+          hits.push(row);
+        }
+      } else {
+        hits.push(b);
+      }
     }
   }
   // Display order is category order (CSS `order`), then document order —
@@ -464,6 +474,37 @@ function clearCurrentHit() {
   currentHit.value = -1;
 }
 
+function findFirstMatchRect(root: HTMLElement, rawQuery: string): DOMRect | null {
+  const q = normalize(rawQuery);
+  if (!q) return null;
+  const { en, cur } = dictsFor(settings.language);
+  const fallback = englishFallbackNeedles(rawQuery, en, cur);
+  const hasQuery = queryMatcher(q);
+  const needles = hasQuery(root.textContent || '') ? [q] : fallback;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const parent = (node as Text).parentElement;
+    if (parent?.closest('select, option, textarea')) continue;
+    const text = (node.nodeValue || '').toLowerCase();
+    for (const n of needles) {
+      const latin = /^[a-z0-9 ._+#-]+$/.test(n);
+      let idx = n ? text.indexOf(n) : -1;
+      while (idx >= 0) {
+        if (!latin || idx === 0 || !/[a-z0-9]/.test(text[idx - 1])) {
+          const range = document.createRange();
+          range.setStart(node, idx);
+          range.setEnd(node, idx + n.length);
+          const rect = range.getBoundingClientRect();
+          if (rect.height > 0) return rect;
+        }
+        idx = text.indexOf(n, idx + n.length);
+      }
+    }
+  }
+  return null;
+}
+
 function stepHit(dir: 1 | -1) {
   const n = hitEls.length;
   const body = bodyEl.value;
@@ -482,11 +523,11 @@ function stepHit(dir: 1 | -1) {
   void el.offsetWidth;
   el.setAttribute('data-hit-flash', '');
   if (flashTimer) clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => el.removeAttribute('data-hit-flash'), 1200);
+  flashTimer = setTimeout(() => el.removeAttribute('data-hit-flash'), 1450);
   // Scroll only the one container that actually scrolls (scrollIntoView
-  // would also nudge the modal/page). Centre the match; a block taller than
-  // the viewport is aligned to its top instead, with room for the group
-  // heading above a category's first match.
+  // would also nudge the modal/page). Centre the match; if a container block
+  // is taller than the viewport, locate the first matched text range inside
+  // it so the match itself always lands in the visible viewport (#465).
   const sc = scrollerOf(body);
   const b = sc.getBoundingClientRect();
   const r = el.getBoundingClientRect();
@@ -495,8 +536,12 @@ function stepHit(dir: 1 | -1) {
   const bar = searchInput.value?.parentElement;
   const barH = bar && sc !== body && sc.contains(bar) ? bar.offsetHeight : 0;
   const visH = b.height - barH;
-  const offset = r.top - b.top + sc.scrollTop - barH;
-  const top = r.height + 48 < visH ? offset - (visH - r.height) / 2 : offset - 28;
+  const targetRect = r.height + 48 >= visH ? (findFirstMatchRect(el, searchQuery.value) ?? r) : r;
+  const offset = targetRect.top - b.top + sc.scrollTop - barH;
+  const top =
+    targetRect.height + 48 < visH
+      ? offset - (visH - targetRect.height) / 2
+      : offset - 28;
   const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   sc.scrollTo({ top: Math.max(0, top), behavior: reduced ? 'auto' : 'smooth' });
 }
@@ -807,8 +852,9 @@ const inCustomMode = ref(!fontFamilyPresetValues.value.has(settings.fontFamily))
 const customFontFamily = ref(
   inCustomMode.value ? settings.fontFamily : ''
 );
-void import('../lib/custom-font').then(async ({ discoverLocalFontFiles }) => {
-  const files = await discoverLocalFontFiles();
+async function refreshLocalFonts(force = false) {
+  const { discoverLocalFontFiles } = await import('../lib/custom-font');
+  const files = await discoverLocalFontFiles(undefined, force);
   const seen = new Set<string>();
   const list: Array<{ label: string; value: string }> = [];
   for (const f of files) {
@@ -821,7 +867,14 @@ void import('../lib/custom-font').then(async ({ discoverLocalFontFiles }) => {
   if (fontFamilyPresetValues.value.has(settings.fontFamily)) {
     inCustomMode.value = false;
   }
-});
+}
+void refreshLocalFonts(false);
+watch(
+  () => props.open,
+  (open) => {
+    if (open) void refreshLocalFonts(true);
+  },
+);
 function onSelectFontFamily(v: string) {
   if (v === '__custom__') {
     inCustomMode.value = true;
@@ -1172,6 +1225,22 @@ function onSelectPdfFont(v: string) {
 
         <section data-cat="basics">
           <label>
+            <input type="checkbox" :checked="settings.tabTitleFromFirstLine" @change="settings.toggleTabTitleFromFirstLine()" />
+            {{ t('settings.tabTitleFromFirstLine') }}
+          </label>
+          <div class="hint">{{ t('settings.tabTitleFromFirstLineHint') }}</div>
+        </section>
+
+        <section data-cat="basics">
+          <label>
+            <input type="checkbox" :checked="settings.autoNumberHeadings" @change="settings.toggleAutoNumberHeadings()" />
+            {{ t('settings.autoNumberHeadings') }}
+          </label>
+          <div class="hint">{{ t('settings.autoNumberHeadingsHint') }}</div>
+        </section>
+
+        <section data-cat="basics">
+          <label>
             <input type="checkbox" :checked="settings.showOutline" @change="onToggleOutlineGlobal()" />
             {{ t('settings.showOutline') }}
           </label>
@@ -1414,6 +1483,28 @@ function onSelectPdfFont(v: string) {
 
         <section data-cat="basics">
           <label>
+            <input
+              type="checkbox"
+              :checked="settings.explorerDoubleClickFiles"
+              @change="settings.toggleExplorerDoubleClickFiles()"
+            />
+            {{ settings.language === 'zh' ? '双击打开文件树中的文件（单击仅选中）' : 'Double-click to open files in file tree' }}
+          </label>
+        </section>
+
+        <section data-cat="basics">
+          <label>
+            <input
+              type="checkbox"
+              :checked="settings.explorerShowFolderCount"
+              @change="settings.toggleExplorerShowFolderCount()"
+            />
+            {{ settings.language === 'zh' ? '显示文件夹内的子项数量' : 'Show item count on folders in file tree' }}
+          </label>
+        </section>
+
+        <section data-cat="basics">
+          <label>
             <input type="checkbox" :checked="settings.showBacklinks" @change="settings.toggleBacklinks()" />
             {{ t('settings.showBacklinks') }}
           </label>
@@ -1494,6 +1585,9 @@ function onSelectPdfFont(v: string) {
         <!-- v2.6 GitHub sync — sits right under AutoGit since it pushes the
              same commits AutoGit produces; reads top-down as one story. -->
         <div v-if="gitBackend" data-cat="sync"><GithubSyncSettings /></div>
+
+        <!-- #458 — WebDAV workspace sync (Nextcloud /堅果云 / Synology / ownCloud). -->
+        <div data-cat="sync"><WebdavSyncSettings /></div>
 
         <!-- v3.0 — proxy URL (network-level, applies to libgit2 push/pull
              across GitHub / GitLab / Gitea). Pulled out of GithubSyncSettings
@@ -2563,7 +2657,7 @@ function onSelectPdfFont(v: string) {
   flex: 1;
   display: flex;
   min-height: 0;
-  height: min(600px, 78vh);
+  height: 100%;
 }
 .settings__nav {
   width: 220px;
@@ -2585,7 +2679,7 @@ function onSelectPdfFont(v: string) {
   min-height: 30px;
   padding: 0 10px;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--ui-font-size, 13px);
   font-weight: 450;
   color: var(--text);
   background: transparent;
@@ -2734,24 +2828,31 @@ function onSelectPdfFont(v: string) {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
-/* Stepping through matches: a quiet accent ring on the current match, and a
-   one-off pulse when it is reached. Reduced motion keeps the ring only. */
-.settings__body[data-searching] > [data-hit-current] {
+/* Stepping through matches: an accent ring on the current match, and a
+   multi-pulse blink when it is reached (#465). Descendant selector so
+   individual `.kb-row` / `.kb-clash` items inside `section[data-cat="keys"]`
+   highlight and flash too. Reduced motion keeps the ring only. */
+.settings__body[data-searching] [data-hit-current] {
   box-shadow: 0 0 0 2px var(--accent-ring);
+  border-radius: var(--r-sm);
 }
-.settings__body[data-searching] > [data-hit-flash] {
-  animation: settings-hit-pulse 1.1s ease-out;
+.settings__body[data-searching] [data-hit-flash] {
+  animation: settings-hit-pulse 1.35s ease-in-out;
 }
 @keyframes settings-hit-pulse {
-  0% {
-    box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 30%, transparent);
+  0%, 100% {
+    box-shadow: 0 0 0 2px var(--accent-ring);
   }
-  100% {
+  20%, 60% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 45%, transparent);
+    background-color: color-mix(in srgb, var(--accent) 16%, var(--bg-elev));
+  }
+  40%, 80% {
     box-shadow: 0 0 0 2px var(--accent-ring);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .settings__body[data-searching] > [data-hit-flash] {
+  .settings__body[data-searching] [data-hit-flash] {
     animation: none;
   }
 }
@@ -2854,7 +2955,7 @@ function onSelectPdfFont(v: string) {
   min-width: 0;
 }
 .settings__body > section > label {
-  font-size: 13px;
+  font-size: var(--ui-font-size, 13px);
   line-height: 1.4;
   color: var(--text);
   display: flex;
@@ -2991,7 +3092,7 @@ select {
   height: 28px;
   padding: 0 8px;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--ui-font-size, 13px);
   color: var(--text);
   background: var(--fill-1);
   border: 0;
@@ -3213,6 +3314,11 @@ input[type='range']:disabled {
    fill the panel edge-to-edge. */
 .ds-modal.settings-modal .ds-modal__panel {
   background: var(--bg);
+  border-radius: var(--r-md);
+}
+:root:not(.narrow-viewport) .ds-modal.settings-modal .ds-modal__panel {
+  height: clamp(480px, 68vh, 660px);
+  max-height: calc(100% - 32px);
 }
 .ds-modal.settings-modal .ds-modal__head {
   /* 10px total gap to the search row; 4px of it lives in .settings__search
@@ -3220,9 +3326,15 @@ input[type='range']:disabled {
   padding-bottom: 6px;
 }
 .ds-modal.settings-modal .ds-modal__body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
   padding: 0;
   display: flex;
   flex-direction: column;
+}
+:root.narrow-viewport .ds-modal.settings-modal .ds-modal__body {
+  overflow-y: auto;
 }
 
 /* Sub-panels (AISettings, GithubSyncSettings, ProxySettings, Integrations…)
@@ -3253,6 +3365,17 @@ input[type='range']:disabled {
   border-radius: var(--r-sm);
   outline: none;
   box-shadow: none;
+}
+.ds-modal.settings-modal .settings__body > div[data-cat] select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 26px;
+  min-width: 0;
+  max-width: 260px;
+  text-overflow: ellipsis;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M3 4.5l3 3 3-3'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
 }
 .ds-modal.settings-modal .settings__body > div[data-cat] :is(input, select, textarea)::placeholder {
   color: var(--text-3);

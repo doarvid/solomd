@@ -11,12 +11,15 @@
  * the format comes off. That is what makes one shortcut enough.
  */
 
+import { enclosingListContentIndent } from './list-continuation';
 import { applyChanges, renumberChanges } from './list-renumber';
 
 export type FormatKind =
   | 'bold'
   | 'italic'
+  | 'underline'
   | 'strike'
+  | 'highlight'
   | 'code'
   | 'link'
   | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
@@ -27,7 +30,7 @@ export type FormatKind =
   | 'codeblock';
 
 export const FORMAT_KINDS: FormatKind[] = [
-  'bold', 'italic', 'strike', 'code', 'link',
+  'bold', 'italic', 'underline', 'strike', 'highlight', 'code', 'link',
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'quote', 'ul', 'ol', 'task', 'codeblock',
 ];
@@ -145,7 +148,108 @@ function toggleWrap(doc: string, from: number, to: number, marker: string): Form
   if (doc.slice(s - w, s) === marker && doc.slice(e, e + w) === marker) {
     return { from: s - w, to: e + w, insert: inner, selFrom: s - w, selTo: e - w };
   }
+  if (from === to && w >= 2) {
+    const ls = from > 0 ? doc.lastIndexOf('\n', from - 1) + 1 : 0;
+    let le = doc.indexOf('\n', from);
+    if (le < 0) le = doc.length;
+    const line = doc.slice(ls, le);
+    let idx = 0;
+    while (idx < line.length) {
+      const o = line.indexOf(marker, idx);
+      if (o < 0) break;
+      const c = line.indexOf(marker, o + w);
+      if (c < 0) break;
+      const openEnd = ls + o + w;
+      const closeStart = ls + c;
+      if (closeStart > openEnd && from >= openEnd && from <= closeStart) {
+        return {
+          from: ls + o,
+          to: closeStart + w,
+          insert: doc.slice(openEnd, closeStart),
+          selFrom: from - w,
+          selTo: from - w,
+        };
+      }
+      idx = c + w;
+    }
+  }
   return { from: s, to: e, insert: marker + inner + marker, selFrom: s + w, selTo: e + w };
+}
+
+function toggleTagWrap(doc: string, from: number, to: number, openTag: string, closeTag: string): FormatEdit {
+  let [s, e] = targetRange(doc, from, to);
+  const ow = openTag.length;
+  const cw = closeTag.length;
+  if (
+    e - s >= ow + cw &&
+    doc.slice(s, s + ow).toLowerCase() === openTag &&
+    doc.slice(e - cw, e).toLowerCase() === closeTag
+  ) {
+    s += ow;
+    e -= cw;
+  }
+  const inner = doc.slice(s, e);
+  if (
+    s >= ow &&
+    doc.slice(s - ow, s).toLowerCase() === openTag &&
+    doc.slice(e, e + cw).toLowerCase() === closeTag
+  ) {
+    return { from: s - ow, to: e + cw, insert: inner, selFrom: s - ow, selTo: e - ow };
+  }
+  if (from === to) {
+    const ls = from > 0 ? doc.lastIndexOf('\n', from - 1) + 1 : 0;
+    let le = doc.indexOf('\n', from);
+    if (le < 0) le = doc.length;
+    const lineLower = doc.slice(ls, le).toLowerCase();
+    let idx = 0;
+    while (idx < lineLower.length) {
+      const o = lineLower.indexOf(openTag, idx);
+      if (o < 0) break;
+      const c = lineLower.indexOf(closeTag, o + ow);
+      if (c < 0) break;
+      const openEnd = ls + o + ow;
+      const closeStart = ls + c;
+      if (from >= openEnd && from <= closeStart) {
+        return {
+          from: ls + o,
+          to: closeStart + cw,
+          insert: doc.slice(openEnd, closeStart),
+          selFrom: from - ow,
+          selTo: from - ow,
+        };
+      }
+      idx = c + cw;
+    }
+  }
+  return { from: s, to: e, insert: openTag + inner + closeTag, selFrom: s + ow, selTo: e + ow };
+}
+
+function toggleTagLines(doc: string, from: number, to: number, openTag: string, closeTag: string): FormatEdit {
+  const ow = openTag.length;
+  const cw = closeTag.length;
+  const segs = doc.slice(from, to).split('\n');
+  const atLineStart = from === 0 || doc[from - 1] === '\n';
+  const parts = segs.map((seg, i) => {
+    const lineStart = i > 0 || atLineStart;
+    const pre = lineStart ? seg.match(LINE_PREFIX)?.[0] ?? '' : '';
+    const rest = seg.slice(pre.length);
+    const core = rest.replace(/\s+$/, '');
+    return { pre, core, post: rest.slice(core.length) };
+  });
+  const has = (c: string) =>
+    c.length >= ow + cw &&
+    c.slice(0, ow).toLowerCase() === openTag &&
+    c.slice(c.length - cw).toLowerCase() === closeTag;
+  const filled = parts.filter((p) => p.core);
+  const remove = filled.length > 0 && filled.every((p) => has(p.core));
+  const insert = parts
+    .map(({ pre, core, post }) => {
+      if (!core) return pre + post;
+      if (remove) return pre + core.slice(ow, core.length - cw) + post;
+      return pre + (has(core) ? core : openTag + core + closeTag) + post;
+    })
+    .join('\n');
+  return { from, to, insert, selFrom: from, selTo: from + insert.length };
 }
 
 function makeLink(doc: string, from: number, to: number): FormatEdit {
@@ -284,12 +388,32 @@ function toggleCodeBlock(doc: string, from: number, to: number): FormatEdit {
     const inner = lines.slice(1, -1).join('\n');
     return { from: s, to: e, insert: inner, selFrom: s, selTo: s + inner.length };
   }
-  const insert = '```\n' + body + '\n```';
+  let indent = /^[ \t]*/.exec(lines[0])![0];
+  const listIndent = enclosingListContentIndent(doc, s);
+  if (listIndent && (indent.length > 0 || body.trim() === '') && indent.length < listIndent.length) {
+    indent = listIndent;
+  }
+  const indentedBody =
+    indent.length === 0
+      ? body
+      : body.trim() === ''
+        ? indent
+        : lines
+            .map((l) => (l.trim() === '' ? indent : l.startsWith(indent) ? l : indent + l.replace(/^[ \t]*/, '')))
+            .join('\n');
+  const insert = `${indent}\`\`\`\n${indentedBody}\n${indent}\`\`\``;
   // Caret after the opening fence: the language is the next thing to type.
-  return { from: s, to: e, insert, selFrom: s + 3, selTo: s + 3 };
+  const caretPos = s + indent.length + 3;
+  return { from: s, to: e, insert, selFrom: caretPos, selTo: caretPos };
 }
 
-const INLINE_MARKERS: Partial<Record<FormatKind, string>> = { bold: '**', italic: '*', strike: '~~', code: '`' };
+const INLINE_MARKERS: Partial<Record<FormatKind, string>> = {
+  bold: '**',
+  italic: '*',
+  strike: '~~',
+  highlight: '==',
+  code: '`',
+};
 // What a line may start with that is structure, not content: indent, quote
 // markers, then a heading, bullet, number or task box.
 const LINE_PREFIX = /^[ \t]*(?:>[ \t]?)*(?:#{1,6}[ \t]+|(?:[-*+]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?/;
@@ -335,10 +459,13 @@ export function applyFormat(doc: string, from: number, to: number, kind: FormatK
   const b = Math.max(0, Math.min(Math.max(from, to), doc.length));
   const inline = INLINE_MARKERS[kind];
   if (inline && doc.slice(a, b).includes('\n')) return toggleInlineLines(doc, a, b, inline);
+  if (kind === 'underline' && doc.slice(a, b).includes('\n')) return toggleTagLines(doc, a, b, '<u>', '</u>');
   switch (kind) {
     case 'bold': return toggleStars(doc, a, b, 2);
     case 'italic': return toggleStars(doc, a, b, 1);
+    case 'underline': return toggleTagWrap(doc, a, b, '<u>', '</u>');
     case 'strike': return toggleWrap(doc, a, b, '~~');
+    case 'highlight': return toggleWrap(doc, a, b, '==');
     case 'code': return toggleWrap(doc, a, b, '`');
     case 'link': return makeLink(doc, a, b);
     case 'quote':
@@ -404,7 +531,39 @@ export function listIndentEdit(doc: string, from: number, to: number, outdent: b
   // A selection ending right after a newline does not include the next line.
   if (b > a && last > first && b === lines[last].start) last--;
   const head = LIST_ITEM.exec(lines[first].text);
-  if (!head || /^[ ]*\t/.test(lines[first].text)) return null;
+  if (!head || /^[ ]*\t/.test(lines[first].text)) {
+    // Allow Tab / Shift+Tab on the opening fence line of a fenced code block
+    // under a list item to indent/outdent the entire fenced block to the list
+    // item's content column.
+    const fence = enclosingFence(doc, a, b);
+    if (!fence || lines[first].start !== fence[0]) return null;
+    const fenceLast = lines.findIndex((l) => fence[3] <= l.end);
+    if (fenceLast < first) return null;
+    const fenceInd = leadingSpaces(lines[first].text);
+    const listIndent = enclosingListContentIndent(doc, lines[first].start);
+    if (!listIndent) return null;
+    const wantInd = outdent ? 0 : listIndent.length;
+    const fDelta = wantInd - fenceInd;
+    if (fDelta === 0 || (!outdent && fDelta < 0) || (outdent && fDelta > 0)) return null;
+    const movedFence = lines.slice(first, fenceLast + 1).map((l) => {
+      if (fDelta > 0) {
+        if (l.text.trim() === '') return ' '.repeat(wantInd);
+        return ' '.repeat(fDelta) + l.text;
+      }
+      return l.text.slice(Math.min(leadingSpaces(l.text), -fDelta));
+    });
+    const fSpanStart = lines[first].start;
+    const fSpanEnd = lines[fenceLast].end;
+    const fInsert = movedFence.join('\n');
+    const shiftPos = (p: number) => Math.max(fSpanStart, p + fDelta);
+    return {
+      from: fSpanStart,
+      to: fSpanEnd,
+      insert: fInsert,
+      selFrom: shiftPos(a),
+      selTo: shiftPos(b),
+    };
+  }
   const indent = head[1].length;
 
   // Tab nests under the nearest item above at the same indent; Shift+Tab

@@ -33,6 +33,7 @@
 | --- | --- |
 | `Ctrl+Shift+B` | 加粗(想用 `Ctrl+B`?见下方提示)|
 | `Ctrl+I` | 斜体 |
+| `Ctrl+U` | 下划线 |
 | `Ctrl+Shift+X` | 删除线 |
 | `Ctrl+Shift+M` | 行内代码 |
 | `Ctrl+K` | 链接 |

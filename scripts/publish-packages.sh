@@ -215,7 +215,6 @@ FileExtensions:
 - markdown
 - mdown
 - mkd
-- txt
 ReleaseDate: ${today}
 Installers:
 - Architecture: x64

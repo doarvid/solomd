@@ -1,7 +1,7 @@
 import { EditorView } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
-import { Extension, Prec } from '@codemirror/state';
+import { type Extension, Prec } from '@codemirror/state';
 
 function mkTheme(
   bg: string,
@@ -195,6 +195,32 @@ export function cmThemeFor(theme: Theme, customTheme = false): Extension {
     case 'dracula': return draculaTheme();
     default: return [];
   }
+}
+
+/**
+ * #344 / #467 / #477 — caret-line tint. Selector is one step more specific than
+ * the base theme's transparent `.cm-activeLine` so it wins regardless of order.
+ * In non-dark themes, uses the warm soft pink tint users expect on the active
+ * editing line; in dark themes, uses a subtle accent tint.
+ *
+ * IMPORTANT: must use `&.cm-dark` (NOT `&dark`, which is only valid inside
+ * `EditorView.baseTheme` and throws `RangeError: Unsupported selector: &dark`
+ * inside `EditorView.theme`).
+ */
+export function activeLineExtension(on: boolean): Extension {
+  if (!on) return [];
+  return EditorView.theme({
+    '.cm-content .cm-line.cm-activeLine': {
+      backgroundColor:
+        'color-mix(in srgb, #f48fb1 22%, color-mix(in srgb, var(--accent) 8%, transparent))',
+      borderRadius: '3px',
+    },
+    '&.cm-dark .cm-content .cm-line.cm-activeLine': {
+      backgroundColor:
+        'color-mix(in srgb, #f48fb1 14%, color-mix(in srgb, var(--accent) 11%, transparent))',
+      borderRadius: '3px',
+    },
+  });
 }
 
 // Each theme gets its own data-theme value so the UI shell (toolbar, tabs,

@@ -15,6 +15,7 @@ must hold one size only:
 
     1320x2868 / 1290x2796 / 1260x2736  -> APP_IPHONE_67  (the 6.9" slot; the
                                           API has no separate _69 type)
+    2007x2853 / 1398x2034 (+landscape) -> APP_IPHONE_DUO (iPhone Duo inner/outer)
     2064x2752 / 2048x2732 (+landscape) -> APP_IPAD_PRO_3GEN_129  (13")
     2880x1800 / 2560x1600 / 1440x900 / 1280x800 -> APP_DESKTOP
 
@@ -61,6 +62,7 @@ EDITABLE = {"PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED",
             "METADATA_REJECTED", "INVALID_BINARY"}
 
 _IPHONE_69 = {(1320, 2868), (1290, 2796), (1260, 2736)}
+_IPHONE_DUO = {(1398, 2034), (2007, 2853)}
 _IPAD_13 = {(2064, 2752), (2048, 2732)}
 _DESKTOP = {(2880, 1800), (2560, 1600), (1440, 900), (1280, 800)}
 
@@ -69,6 +71,8 @@ def display_type(w, h):
     size = (min(w, h), max(w, h))
     if size in _IPHONE_69:
         return "APP_IPHONE_67", "IOS"
+    if size in _IPHONE_DUO:
+        return "APP_IPHONE_DUO", "IOS"
     if size in _IPAD_13:
         return "APP_IPAD_PRO_3GEN_129", "IOS"
     if (w, h) in _DESKTOP:
@@ -237,6 +241,12 @@ def main():
                 set_id = sets[dtype]["id"]
                 old = client.get(f"/v1/appScreenshotSets/{set_id}/appScreenshots",
                                  limit=50)["data"]
+                if (len(old) == len(files) and all(
+                    (s["attributes"].get("assetDeliveryState") or {}).get("state") == "COMPLETE"
+                    for s in old
+                )):
+                    print(f"    existing set {set_id} already has {len(old)} COMPLETE screenshots — skipping")
+                    continue
                 print(f"    existing set {set_id}: {len(old)} screenshot(s) to delete")
                 for shot in old:
                     a = shot["attributes"]

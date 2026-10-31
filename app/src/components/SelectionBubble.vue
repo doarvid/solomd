@@ -378,6 +378,15 @@ defineExpose({ hide });
       ><Icon name="italic" :size="16" /></button>
       <button
         class="sel-bubble__btn"
+        :class="{ 'is-on': active('highlight') }"
+        :title="tip('cmd.fmt.highlight', 'fmt.highlight')"
+        :aria-label="t('cmd.fmt.highlight')"
+        :aria-pressed="active('highlight')"
+        data-kind="highlight"
+        @click="run('highlight')"
+      ><Icon name="highlight" :size="16" /></button>
+      <button
+        class="sel-bubble__btn"
         :class="{ 'is-on': active('code') }"
         :title="tip('cmd.fmt.code', 'fmt.code')"
         :aria-label="t('cmd.fmt.code')"

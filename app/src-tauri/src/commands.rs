@@ -133,10 +133,20 @@ pub async fn write_file(
 ) -> Result<(), String> {
     let path_for_dispatch = path.clone();
     let content_for_dispatch = content.clone();
+    let app_for_write = app.clone();
     tauri::async_runtime::spawn_blocking({
         let path = path.clone();
         let content = content.clone();
-        move || write_file_inner(path, content, encoding)
+        move || {
+            #[cfg(target_os = "android")]
+            if path.starts_with("content://") {
+                let bytes = encode_for_disk(&content, &encoding)?;
+                return write_android_content_uri(&app_for_write, &path, &bytes);
+            }
+            #[cfg(not(target_os = "android"))]
+            let _ = &app_for_write;
+            write_file_inner(path, content, encoding)
+        }
     })
     .await
     .map_err(|e| format!("join: {e}"))??;
@@ -321,10 +331,50 @@ pub async fn fetch_image_bytes(url: String) -> Result<Vec<u8>, String> {
 
 /// Write raw bytes to disk. Used for binary export targets like DOCX/PDF.
 #[tauri::command]
-pub async fn write_binary_file(path: String, data: Vec<u8>) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || write_binary_file_inner(path, data))
-        .await
-        .map_err(|e| format!("join: {e}"))?
+pub async fn write_binary_file(
+    app: tauri::AppHandle,
+    path: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "android")]
+        if path.starts_with("content://") {
+            return write_android_content_uri(&app, &path, &data);
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = &app;
+        write_binary_file_inner(path, data)
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+/// #148 / Android export fix — `saveDialog` on Android launches SAF's
+/// `Intent.ACTION_CREATE_DOCUMENT` and returns a `content://` URI, which
+/// `std::fs::write` / `std::fs::create_dir_all` cannot open (attempting to
+/// `mkdir("content:/...")` on Android's read-only `/` rootfs fails with
+/// `EROFS` / `ENOENT` and leaves a 0-byte file). Write through ContentResolver
+/// via `tauri_plugin_fs::FsExt`, falling back to `MainActivity.writeContentUriBase64`
+/// for providers that reject `"wt"` on `openAssetFileDescriptor`.
+#[cfg(target_os = "android")]
+fn write_android_content_uri(
+    app: &tauri::AppHandle,
+    uri: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::str::FromStr;
+    use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+
+    let Ok(fp) = FilePath::from_str(uri);
+    let mut opts = OpenOptions::new();
+    opts.read(false).write(true).create(true).truncate(true);
+    if let Ok(mut file) = app.fs().open(fp, opts) {
+        if file.write_all(data).and_then(|()| file.flush()).is_ok() {
+            return Ok(());
+        }
+    }
+    super::saf_android::write_content_uri_bytes(uri, data)
 }
 
 pub fn write_binary_file_inner(path: String, data: Vec<u8>) -> Result<(), String> {
@@ -496,10 +546,139 @@ pub async fn print_webview_to_pdf(
     Err("direct PDF export is macOS-only; use print_webview".into())
 }
 
-#[cfg(mobile)]
+#[cfg(target_os = "android")]
 #[tauri::command]
-pub fn print_webview(_window: tauri::WebviewWindow) -> Result<(), String> {
-    Err("print is not available on mobile".to_string())
+pub async fn print_webview(_window: tauri::WebviewWindow) -> Result<(), String> {
+    super::saf_android::android_print_webview("SoloMD")?;
+    tauri::async_runtime::spawn_blocking(|| {
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(300) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if super::saf_android::android_poll_print_finished().unwrap_or(false) {
+                return Ok(());
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+#[cfg(target_os = "ios")]
+mod ios_print {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, Bool, NSObject};
+    use objc2::{declare_class, msg_send, msg_send_id, mutability, ClassType, DeclaredClass};
+    use std::ptr::null_mut;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[link(name = "UIKit", kind = "framework")]
+    extern "C" {}
+
+    pub static PRINT_DONE: AtomicBool = AtomicBool::new(false);
+    static DELEGATE: AtomicUsize = AtomicUsize::new(0);
+
+    declare_class!(
+        struct PrintDelegate;
+
+        unsafe impl ClassType for PrintDelegate {
+            type Super = NSObject;
+            type Mutability = mutability::InteriorMutable;
+            const NAME: &'static str = "SoloMDPrintDelegate";
+        }
+
+        impl DeclaredClass for PrintDelegate {}
+
+        unsafe impl PrintDelegate {
+            #[method(printInteractionControllerDidDismissPrinterOptions:)]
+            fn did_dismiss(&self, _controller: *mut AnyObject) {
+                PRINT_DONE.store(true, Ordering::SeqCst);
+            }
+
+            #[method(printInteractionControllerDidFinishJob:)]
+            fn did_finish(&self, _controller: *mut AnyObject) {
+                PRINT_DONE.store(true, Ordering::SeqCst);
+            }
+        }
+    );
+
+    impl PrintDelegate {
+        fn new() -> Retained<Self> {
+            let this = Self::alloc().set_ivars(());
+            unsafe { msg_send_id![super(this), init] }
+        }
+    }
+
+    pub unsafe fn present(webview: *mut AnyObject) -> Result<(), String> {
+        if webview.is_null() {
+            return Err("no webview".into());
+        }
+        let Some(pic_cls) = AnyClass::get("UIPrintInteractionController") else {
+            return Err("UIPrintInteractionController unavailable".into());
+        };
+        let pic: *mut AnyObject = msg_send![pic_cls, sharedPrintController];
+        if pic.is_null() {
+            return Err("sharedPrintController returned null".into());
+        }
+        if let Some(info_cls) = AnyClass::get("UIPrintInfo") {
+            let info: *mut AnyObject = msg_send![info_cls, printInfo];
+            if !info.is_null() {
+                // UIPrintInfoOutputGeneral = 0
+                let _: () = msg_send![info, setOutputType: 0isize];
+                let _: () = msg_send![pic, setPrintInfo: info];
+            }
+        }
+        let formatter: *mut AnyObject = msg_send![webview, viewPrintFormatter];
+        if formatter.is_null() {
+            return Err("WKWebView returned no viewPrintFormatter".into());
+        }
+        let _: () = msg_send![pic, setPrintFormatter: formatter];
+
+        let mut delegate = DELEGATE.load(Ordering::SeqCst) as *mut AnyObject;
+        if delegate.is_null() {
+            delegate = Retained::into_raw(PrintDelegate::new()) as *mut AnyObject;
+            DELEGATE.store(delegate as usize, Ordering::SeqCst);
+        }
+        let _: () = msg_send![pic, setDelegate: delegate];
+        PRINT_DONE.store(false, Ordering::SeqCst);
+
+        let ok: Bool = msg_send![
+            pic,
+            presentAnimated: Bool::YES,
+            completionHandler: null_mut::<AnyObject>()
+        ];
+        if !ok.as_bool() {
+            return Err("failed to present UIPrintInteractionController".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub async fn print_webview(window: tauri::WebviewWindow) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    window
+        .with_webview(move |wv| unsafe {
+            let res = ios_print::present(wv.inner() as *mut objc2::runtime::AnyObject);
+            let _ = tx.send(res);
+        })
+        .map_err(|e| format!("with_webview: {e}"))?;
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "could not start the print operation".to_string())??;
+    tauri::async_runtime::spawn_blocking(|| {
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(300) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if ios_print::PRINT_DONE.swap(false, Ordering::SeqCst) {
+                return Ok(());
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
 }
 
 /// Copy a file from `src` to `dst`, creating parent dirs as needed.

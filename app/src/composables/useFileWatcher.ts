@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTabsStore } from '../stores/tabs';
 import { useSettingsStore } from '../stores/settings';
+import { useWorkspaceStore } from '../stores/workspace';
+import { isSafPath, fromSafPath, safRead, safWrite } from '../lib/saf-fs';
 import type { FileReadResult } from '../types';
 import {
   decideDiskChange,
@@ -18,6 +20,7 @@ type ShowDialog = (fileName: string) => Promise<FileChangedAction>;
 export function useFileWatcher(showDialog: ShowDialog) {
   const tabs = useTabsStore();
   const settings = useSettingsStore();
+  const workspace = useWorkspaceStore();
   const watchedPaths = new Set<string>();
   let unlisten: UnlistenFn | null = null;
   const pendingPaths = new Set<string>();
@@ -30,7 +33,10 @@ export function useFileWatcher(showDialog: ShowDialog) {
   async function syncWatchedPaths() {
     const currentPaths = new Set<string>();
     for (const tab of tabs.tabs) {
-      if (tab.filePath) {
+      // #488 — Android SAF virtual paths (`saf:<docId>`) are not real OS paths
+      // for notify::Watcher; they are revalidated on focus/visibilitychange via
+      // `revalidateOpenTabs` + `safRead`.
+      if (tab.filePath && !isSafPath(tab.filePath)) {
         currentPaths.add(tab.filePath);
       }
     }
@@ -57,8 +63,16 @@ export function useFileWatcher(showDialog: ShowDialog) {
     }
   }
 
+  async function readDiskOrSaf(filePath: string): Promise<FileReadResult> {
+    if (isSafPath(filePath)) {
+      if (!workspace.safTreeUri) throw new Error('No active SAF tree URI');
+      return await safRead(workspace.safTreeUri, fromSafPath(filePath));
+    }
+    return await invoke<FileReadResult>('read_file', { path: filePath });
+  }
+
   async function reloadTab(tabId: string, filePath: string) {
-    const result = await invoke<FileReadResult>('read_file', { path: filePath });
+    const result = await readDiskOrSaf(filePath);
     // CRLF→LF normalization, encoding, BOM and line-ending all live in
     // `applyDiskRead` so a reload and a fresh open cannot drift apart.
     tabs.applyDiskRead(tabId, {
@@ -70,7 +84,7 @@ export function useFileWatcher(showDialog: ShowDialog) {
 
   /** A file's current bytes, normalized the way a tab stores them. */
   async function readNormalized(filePath: string) {
-    const result = await invoke<FileReadResult>('read_file', { path: filePath });
+    const result = await readDiskOrSaf(filePath);
     return { result, normalized: normalizeDiskText(result.content) };
   }
 
@@ -155,11 +169,15 @@ export function useFileWatcher(showDialog: ShowDialog) {
             const payload =
               tab.lineEnding === 'crlf' ? tab.content.replace(/\n/g, '\r\n') : tab.content;
             noteOwnWrite(filePath, payload);
-            await invoke('write_file', {
-              path: tab.filePath,
-              content: payload,
-              encoding: tab.encoding || 'UTF-8',
-            });
+            if (isSafPath(tab.filePath) && workspace.safTreeUri) {
+              await safWrite(workspace.safTreeUri, fromSafPath(tab.filePath!), payload);
+            } else {
+              await invoke('write_file', {
+                path: tab.filePath,
+                content: payload,
+                encoding: tab.encoding || 'UTF-8',
+              });
+            }
             tabs.markSaved(tab.id, tab.filePath!);
           }
         } catch (e) {

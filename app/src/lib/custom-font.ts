@@ -34,6 +34,7 @@ export const DEFAULT_FONT_DIRS = [
   '/storage/emulated/0/fonts',
   '/sdcard/Fonts',
   '/storage/emulated/0/Download/Fonts',
+  '/storage/emulated/0/Download',
 ];
 
 const FONT_EXT_RE = /\.(ttf|otf|woff2|woff|ttc)$/i;
@@ -211,13 +212,20 @@ async function registerFontFile(
   if (typeof FontFace === 'undefined' || typeof document === 'undefined' || !document.fonts) {
     return false;
   }
-  const uniqueNames = Array.from(
-    new Set(
-      familyNames
-        .map((n) => n.trim().replace(/^["']+|["']+$/g, ''))
-        .filter(Boolean),
-    ),
-  );
+  const rawExpanded: string[] = [];
+  for (const raw of familyNames) {
+    const clean = raw.trim().replace(/^["']+|["']+$/g, '').trim();
+    if (!clean) continue;
+    const { stem, family } = cleanFontFamilyFromFilename(clean);
+    if (family) rawExpanded.push(family);
+    if (stem) rawExpanded.push(stem);
+    // Do not pass full filesystem paths (`/storage/...`) into `new FontFace`:
+    // Chromium's CSS Font Loading API rejects `/` or `\` in a family name.
+    if (!/[\\/]/.test(clean) && !FONT_EXT_RE.test(clean)) {
+      rawExpanded.push(clean);
+    }
+  }
+  const uniqueNames = Array.from(new Set(rawExpanded.filter(Boolean)));
   if (!uniqueNames.length) return false;
 
   const bytes = await invoker<number[]>('read_binary_file', { path });
@@ -237,11 +245,40 @@ async function registerFontFile(
       document.fonts.add(face);
       loadedSpecs.add(cacheKey);
       anyLoaded = true;
-    } catch (e) {
-      console.warn(`[custom-font] Failed to load FontFace "${family}" from ${path}:`, e);
+    } catch {
+      try {
+        const quotedFace = new FontFace(`"${family}"`, buffer);
+        await quotedFace.load();
+        document.fonts.add(quotedFace);
+        loadedSpecs.add(cacheKey);
+        anyLoaded = true;
+      } catch (e) {
+        console.warn(`[custom-font] Failed to load FontFace "${family}" from ${path}:`, e);
+      }
     }
   }
   return anyLoaded;
+}
+
+/**
+ * Normalize Android File Manager display paths (e.g. ColorOS `/storage/0/Fonts/...`
+ * or `内部共享存储空间/Fonts/...`) into real POSIX paths on Android.
+ */
+export function expandAndroidFontPath(rawPath: string): string[] {
+  const trimmed = rawPath.trim().replace(/^["']+|["']+$/g, '');
+  const out = new Set<string>();
+  if (/^\/storage\/0\//i.test(trimmed)) {
+    out.add(trimmed.replace(/^\/storage\/0\//i, '/storage/emulated/0/'));
+  }
+  if (/^(?:内部共享存储空间|内部存储|手机存储)[\\/]/.test(trimmed)) {
+    out.add(
+      trimmed
+        .replace(/^(?:内部共享存储空间|内部存储|手机存储)[\\/]/, '/storage/emulated/0/')
+        .replace(/\\/g, '/'),
+    );
+  }
+  out.add(trimmed);
+  return Array.from(out);
 }
 
 function isFilePathFontSpec(token: string): boolean {
@@ -289,8 +326,10 @@ export async function ensureCustomFontLoaded(
     // Case 1: User typed a direct file path or filename with extension (.ttf/.otf/...)
     if (isFilePathFontSpec(token)) {
       const candidatePaths =
-        token.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(token)
-          ? [token]
+        token.startsWith('/') ||
+        /^[a-zA-Z]:[\\/]/.test(token) ||
+        /^(?:内部共享存储空间|内部存储|手机存储)[\\/]/.test(token)
+          ? expandAndroidFontPath(token)
           : DEFAULT_FONT_DIRS.map((d) => `${d}/${token}`);
       const { stem, family } = cleanFontFamilyFromFilename(token);
       for (const p of candidatePaths) {
@@ -308,8 +347,14 @@ export async function ensureCustomFontLoaded(
     }
 
     // Case 2: Match against discovered font files in `/storage/emulated/0/Fonts`
-    const files = await discoverLocalFontFiles(DEFAULT_FONT_DIRS, false, invoker);
-    const matches = files.filter((f) => fontMatchesFile(token, f));
+    let files = await discoverLocalFontFiles(DEFAULT_FONT_DIRS, false, invoker);
+    let matches = files.filter((f) => fontMatchesFile(token, f));
+    if (matches.length === 0) {
+      // Force a rescan in case the user placed the font file into `Fonts/`
+      // after the app started (#451).
+      files = await discoverLocalFontFiles(DEFAULT_FONT_DIRS, true, invoker);
+      matches = files.filter((f) => fontMatchesFile(token, f));
+    }
     // Prefer Regular / Book weight first when a family has multiple weight files
     matches.sort((a, b) => {
       const aReg = /regular|normal|book|roman/i.test(a.stem) ? 0 : 1;

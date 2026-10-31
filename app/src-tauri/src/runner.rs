@@ -88,6 +88,11 @@ mod cloud_folder;
 #[path = "crypto.rs"]
 mod crypto;
 
+// #458 — WebDAV workspace sync. Same dual-root requirement as github_sync:
+// the desktop binary's handler list has to name the module too.
+#[path = "webdav_sync.rs"]
+mod webdav_sync;
+
 // v2.3 dev WebDriver bridge — debug builds only. Module file itself is
 // `#[cfg(debug_assertions)]`-gated, so this `mod` line is too.
 #[cfg(debug_assertions)]
@@ -818,6 +823,9 @@ pub fn run_with(initial_file: Option<String>) {
             cloud_folder::session_save,
             cloud_folder::session_load,
             cloud_folder::session_list_others,
+            webdav_sync::webdav_test_connection,
+            webdav_sync::webdav_push_workspace,
+            webdav_sync::webdav_pull_workspace,
             crypto::crypto_status,
             crypto::crypto_set_passphrase,
             crypto::crypto_clear_passphrase,
