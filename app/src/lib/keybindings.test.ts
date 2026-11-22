@@ -249,3 +249,153 @@ test('a chord the editor already handled runs only app-level commands', async ()
   // …but never on an editing chord, even when the user rebound one there.
   assert.equal(appRunsAfterEditor('file.save', 'Mod+Z', 'windows'), false);
 });
+
+test('#508: Ctrl+Tab and Ctrl+Shift+Tab map to MRU tab switching on all platforms', async () => {
+  const { eventToCombo, resolveBindings, appRunsAfterEditor } = await import('./keybindings.ts');
+  const ctrlTab = {
+    isComposing: false,
+    key: 'Tab',
+    code: 'Tab',
+    ctrlKey: true,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    keyCode: 9,
+  } as unknown as KeyboardEvent;
+  const ctrlShiftTab = {
+    ...ctrlTab,
+    shiftKey: true,
+  } as unknown as KeyboardEvent;
+  assert.equal(eventToCombo(ctrlTab), 'Mod+Tab');
+  assert.equal(eventToCombo(ctrlShiftTab), 'Mod+Shift+Tab');
+  for (const platform of ['windows', 'mac', 'linux'] as const) {
+    const bindings = resolveBindings({}, platform);
+    assert.equal(bindings.get('Mod+Tab'), 'tab.mru');
+    assert.equal(bindings.get('Mod+Shift+Tab'), 'tab.mruPrev');
+    assert.equal(appRunsAfterEditor('tab.mru', 'Mod+Tab', platform), true);
+  }
+});
+
+test('#508: useTabsStore MRU tab switching toggles between 2 most recent tabs and cycles through history when holding Ctrl', async () => {
+  const { createPinia, setActivePinia } = await import('pinia');
+  setActivePinia(createPinia());
+  const { useTabsStore } = await import('../stores/tabs.ts');
+  const tabs = useTabsStore();
+
+  // Open 4 tabs: A, B, C, D
+  const tabA = tabs.newTab({ fileName: 'A.md' });
+  const tabB = tabs.newTab({ fileName: 'B.md' });
+  const tabC = tabs.newTab({ fileName: 'C.md' });
+  const tabD = tabs.newTab({ fileName: 'D.md' });
+
+  // Explicitly activate A then C so the 2 most recently used tabs are [C, A, D, B]
+  tabs.activate(tabA.id);
+  tabs.activate(tabC.id);
+  assert.equal(tabs.activeId, tabC.id);
+
+  // 1. Single Ctrl+Tab press + release: toggles C -> A, and a second single Ctrl+Tab toggles A -> C
+  const next1 = tabs.nextMruTabId(1, false);
+  assert.equal(next1, tabA.id);
+  tabs.activate(next1!);
+  assert.equal(tabs.activeId, tabA.id);
+
+  const next2 = tabs.nextMruTabId(1, false);
+  assert.equal(next2, tabC.id);
+  tabs.activate(next2!);
+  assert.equal(tabs.activeId, tabC.id);
+
+  // 2. Holding Ctrl and pressing Tab multiple times (keepCycleOpen = true):
+  // MRU order at start of cycle is [C, A, D, B]
+  const step1 = tabs.nextMruTabId(1, true);
+  assert.equal(step1, tabA.id);
+  tabs.activate(step1!, { mruCycle: true });
+
+  const step2 = tabs.nextMruTabId(1, true);
+  assert.equal(step2, tabD.id);
+  tabs.activate(step2!, { mruCycle: true });
+
+  const step3 = tabs.nextMruTabId(1, true);
+  assert.equal(step3, tabB.id);
+  tabs.activate(step3!, { mruCycle: true });
+
+  // Ctrl+Shift+Tab while still holding Ctrl steps backwards (B -> D)
+  const stepBack = tabs.nextMruTabId(-1, true);
+  assert.equal(stepBack, tabD.id);
+  tabs.activate(stepBack!, { mruCycle: true });
+
+  // Release Ctrl: commits D to the front of MRU ([D, C, A, B])
+  tabs.endMruCycle();
+  assert.equal(tabs.activeId, tabD.id);
+
+  // Next single Ctrl+Tab now toggles between D and C
+  const afterCommit = tabs.nextMruTabId(1, false);
+  assert.equal(afterCommit, tabC.id);
+  tabs.activate(afterCommit!);
+
+  // 3. Closing a tab removes it from MRU history so nextMruTabId never returns the closed tab
+  tabs.closeTab(tabD.id);
+  const afterClose = tabs.nextMruTabId(1, false);
+  assert.notEqual(afterClose, tabD.id);
+  assert.equal(afterClose, tabA.id);
+});
+
+test('#610: German QWERTZ and non-US keyboard layouts match layout-printed keys and macOS Option / IME fallbacks', async () => {
+  const { eventToCombo, setLayoutMapForTest } = await import('./keybindings.ts');
+  const ev = (init: Partial<KeyboardEvent>) =>
+    ({
+      key: '',
+      code: '',
+      keyCode: 0,
+      isComposing: false,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      ...init,
+    }) as KeyboardEvent;
+
+  try {
+    // Simulate German QWERTZ layout map (`KeyZ` -> 'y', `KeyY` -> 'z')
+    setLayoutMapForTest(
+      new Map([
+        ['KeyZ', 'y'],
+        ['KeyY', 'z'],
+      ]),
+    );
+
+    // Y/Z swap on German QWERTZ (`Ctrl+Y`, `Ctrl+Z`, `Ctrl+Shift+Alt+Y`)
+    assert.equal(eventToCombo(ev({ key: 'y', code: 'KeyZ', ctrlKey: true })), 'Mod+Y');
+    assert.equal(eventToCombo(ev({ key: 'z', code: 'KeyY', ctrlKey: true })), 'Mod+Z');
+    assert.equal(
+      eventToCombo(ev({ key: 'Y', code: 'KeyZ', ctrlKey: true, altKey: true, shiftKey: true })),
+      'Mod+Alt+Shift+Y',
+    );
+
+    // macOS Option-composed non-ASCII glyph on German QWERTZ (`⌥Y` on physical `KeyZ` -> '¥')
+    assert.equal(eventToCombo(ev({ key: '¥', code: 'KeyZ', metaKey: true, altKey: true })), 'Mod+Alt+Y');
+
+    // Windows IME `Process` (`keyCode === 229`) on German QWERTZ (`KeyZ` -> 'Y')
+    assert.equal(
+      eventToCombo(ev({ key: 'Process', code: 'KeyZ', keyCode: 229, ctrlKey: true })),
+      'Mod+Y',
+    );
+
+    // German QWERTZ punctuation:
+    // - `-` is unshifted on physical `Slash` -> `Mod+Minus` (not `Mod+Slash`)
+    assert.equal(eventToCombo(ev({ key: '-', code: 'Slash', ctrlKey: true })), 'Mod+Minus');
+    // - `+` is unshifted on physical `BracketRight` -> `Mod+Equal` (zoom in)
+    assert.equal(eventToCombo(ev({ key: '+', code: 'BracketRight', ctrlKey: true })), 'Mod+Equal');
+    // - `=` is `Shift+0` -> `Mod+Equal`
+    assert.equal(
+      eventToCombo(ev({ key: '=', code: 'Digit0', ctrlKey: true, shiftKey: true })),
+      'Mod+Equal',
+    );
+    // - `/` is `Shift+7` -> `Mod+Slash` (toggle live/source mode)
+    assert.equal(
+      eventToCombo(ev({ key: '/', code: 'Digit7', ctrlKey: true, shiftKey: true })),
+      'Mod+Slash',
+    );
+  } finally {
+    setLayoutMapForTest(null);
+  }
+});

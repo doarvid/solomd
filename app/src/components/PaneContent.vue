@@ -13,7 +13,14 @@ import { isWindowsEditorRuntime, shouldUsePlainWindowsEditor } from '../lib/plat
 import { isBrowserTab } from '../lib/tab-kind';
 import { overlayDepth } from '../lib/overlay-presence';
 import { toLogicalBounds } from '../lib/browser-rect';
-import { previewScrollMemory, tabCaretMemory, tabTopLineMemory } from '../lib/scroll-memory';
+import { createLaunchCursorRestore } from '../lib/launch-cursor-restore';
+import {
+  previewScrollMemory,
+  tabCaretMemory,
+  tabTopLineMemory,
+  tabViewportAnchorMemory,
+  type ViewportLineAnchor,
+} from '../lib/scroll-memory';
 
 const props = defineProps<{
   paneId: string;
@@ -70,13 +77,17 @@ const previewSource = computed(() => {
 });
 
 const isFocused = computed(() => tiles.focusedPaneId === props.paneId);
-const windowsEditorRuntime = isWindowsEditorRuntime();
 // Preserve CodeMirror history/caret on macOS and Linux. Only Windows needs a
 // remount because toggling Vim or the editor engine changes the editor
 // implementation itself.
 const editorImplementationKey = computed(() => {
-  if (!windowsEditorRuntime) return `${props.paneId}:codemirror`;
-  const plain = shouldUsePlainWindowsEditor(true, settings.vimMode, settings.windowsEditorEngine);
+  const engine = settings.windowsEditorEngine;
+  const vim = settings.vimMode;
+  const plain = shouldUsePlainWindowsEditor(
+    isWindowsEditorRuntime(),
+    vim,
+    engine,
+  );
   return `${props.paneId}:${plain ? 'plain' : 'codemirror'}`;
 });
 
@@ -93,26 +104,21 @@ function onCursor(line: number, col: number) {
 // editor (preview-only mode keeps it pending until an editor shows it).
 // `setCaret(line, col)` is used when the editor exposes it; otherwise the
 // existing `gotoLine` lands on the right line (column 1).
-function restoreLaunchCursor() {
-  const tab = props.tab;
-  if (!tab || !isFocused.value || !showEditor.value) return;
-  const tabId = tab.id;
-  setTimeout(() => {
-    const ed = editorRef.value as unknown as {
+const launchCursorRestore = createLaunchCursorRestore({
+  getTabId: () => props.tab?.id,
+  canRestore: () => isFocused.value && showEditor.value && settings.viewMode !== 'reading',
+  getEditor: () =>
+    editorRef.value as unknown as {
       setCaret?: (line: number, col: number) => void;
       gotoLine?: (line: number) => void;
-    } | null;
-    if (!ed || props.tab?.id !== tabId) return;
-    const c = tabs.takeLaunchCursor(tabId);
-    if (!c) return;
-    if ((c.line <= 1 && c.col <= 1) || tabCaretMemory.has(tabId) || tabTopLineMemory.has(tabId)) {
-      return;
-    }
-    if (ed.setCaret) ed.setCaret(c.line, c.col);
-    else ed.gotoLine?.(c.line);
-  }, 150);
-}
-watch(() => [props.tab?.id, isFocused.value, showEditor.value], restoreLaunchCursor);
+    } | null,
+  takeCursor: (tabId) => tabs.takeLaunchCursor(tabId),
+  hasViewportMemory: (tabId) => tabCaretMemory.has(tabId) || tabTopLineMemory.has(tabId),
+});
+watch(
+  () => [props.tab?.id, isFocused.value, showEditor.value, settings.viewMode],
+  launchCursorRestore.schedule,
+);
 
 function onSelection(text: string) {
   if (isFocused.value) {
@@ -122,14 +128,14 @@ function onSelection(text: string) {
 
 let markScrollDriver: ((which: 'editor' | 'preview', ms?: number) => void) | null = null;
 
-function gotoLine(line: number) {
-  if (settings.viewMode === 'preview') {
-    previewRef.value?.scrollToLine(line);
+function gotoLine(line: number, highlightQuery?: string) {
+  if (settings.viewMode === 'preview' || settings.viewMode === 'reading') {
+    previewRef.value?.scrollToLine(line, highlightQuery);
   } else {
     markScrollDriver?.('editor', 400);
-    editorRef.value?.gotoLine(line);
+    editorRef.value?.gotoLine(line, highlightQuery);
     if (settings.viewMode === 'split') {
-      previewRef.value?.scrollToLine(line);
+      previewRef.value?.scrollToLine(line, highlightQuery);
     }
   }
 }
@@ -140,6 +146,79 @@ function gotoLine(line: number) {
 // the webview's native drag-drop handler swallows `draggable` drags.
 const isSplit = computed(() => showEditor.value && showPreview.value);
 const contentEl = ref<HTMLElement | null>(null);
+
+// #377 — Split mode hover line sync highlight between editor and preview.
+const editorHoverBand = ref<{ top: number; height: number } | null>(null);
+let lastHoveredPreviewEl: HTMLElement | null = null;
+
+function clearSplitHover() {
+  editorHoverBand.value = null;
+  if (lastHoveredPreviewEl) {
+    lastHoveredPreviewEl.classList.remove('split-hover-block');
+    lastHoveredPreviewEl = null;
+  }
+}
+
+function onEditorPointerMove(e: PointerEvent) {
+  if (!isSplit.value) return;
+  const ed = editorRef.value as unknown as {
+    lineAtCoords?: (x: number, y: number) => number | null;
+    lineBandRect?: (fromLine: number, toLine?: number) => { top: number; height: number } | null;
+  } | null;
+  if (!ed?.lineAtCoords || !ed.lineBandRect) return;
+  const line = ed.lineAtCoords(e.clientX, e.clientY);
+  if (!line) {
+    clearSplitHover();
+    return;
+  }
+  editorHoverBand.value = ed.lineBandRect(line, line);
+  const paneEl = contentEl.value;
+  const preview = paneEl?.querySelector('.pane--preview .preview-host') as HTMLElement | null;
+  if (!preview) return;
+  const previewLines = getPreviewElementsByLine(preview);
+  const idx = findAnchorIndex(previewLines, line);
+  const targetEl = idx >= 0 ? previewLines[idx].el : null;
+  if (targetEl !== lastHoveredPreviewEl) {
+    lastHoveredPreviewEl?.classList.remove('split-hover-block');
+    targetEl?.classList.add('split-hover-block');
+    lastHoveredPreviewEl = targetEl;
+  }
+}
+
+function onPreviewPointerMove(e: PointerEvent) {
+  if (!isSplit.value) return;
+  const target = (e.target as HTMLElement | null)?.closest?.('[data-source-line]') as HTMLElement | null;
+  if (!target) {
+    clearSplitHover();
+    return;
+  }
+  if (target !== lastHoveredPreviewEl) {
+    lastHoveredPreviewEl?.classList.remove('split-hover-block');
+    target.classList.add('split-hover-block');
+    lastHoveredPreviewEl = target;
+  }
+  const startLine = Number(target.getAttribute('data-source-line') || 0);
+  if (!startLine) {
+    editorHoverBand.value = null;
+    return;
+  }
+  const paneEl = contentEl.value;
+  const preview = paneEl?.querySelector('.pane--preview .preview-host') as HTMLElement | null;
+  let endLine = startLine;
+  if (preview) {
+    const previewLines = getPreviewElementsByLine(preview);
+    const next = previewLines.find((item) => item.line > startLine);
+    if (next) endLine = Math.max(startLine, next.line - 1);
+  }
+  const ed = editorRef.value as unknown as {
+    lineBandRect?: (fromLine: number, toLine?: number) => { top: number; height: number } | null;
+  } | null;
+  editorHoverBand.value = ed?.lineBandRect?.(startLine, endLine) ?? null;
+}
+
+watch(isSplit, (split) => {
+  if (!split) clearSplitHover();
+});
 // Live value while dragging; committed (and persisted) on pointerup so a drag
 // writes localStorage once instead of on every pointermove.
 const dragRatio = ref<number | null>(null);
@@ -233,17 +312,6 @@ function getPreviewElementsByLine(preview: HTMLElement): Array<{ line: number; e
   return list;
 }
 
-function findNearestEntry<T extends { line: number }>(list: T[], line: number): T | null {
-  if (!list.length) return null;
-  let lo = 0, hi = list.length - 1, best = list[0];
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (list[mid].line <= line) { best = list[mid]; lo = mid + 1; }
-    else hi = mid - 1;
-  }
-  return best;
-}
-
 // Index of the last anchor at/before `line` (-1 when none). The anchor AFTER
 // it brackets the viewport top, letting both sync directions interpolate
 // between the two instead of snapping to the earlier one. Snapping kept the
@@ -297,10 +365,13 @@ function bindScrollSync() {
   // momentum keep the same driver.
   let activePane: 'editor' | 'preview' | null = null;
   let activeTimer: ReturnType<typeof setTimeout> | null = null;
+  let pointerHeldIn: 'editor' | 'preview' | null = null;
   const markActive = (which: 'editor' | 'preview', ms = 250) => {
     activePane = which;
     if (activeTimer) clearTimeout(activeTimer);
-    activeTimer = setTimeout(() => { activePane = null; }, ms);
+    activeTimer = setTimeout(() => {
+      if (!pointerHeldIn) activePane = null;
+    }, ms);
   };
   markScrollDriver = markActive;
   const releaseSyncGuard = () => {
@@ -311,12 +382,32 @@ function bindScrollSync() {
     });
   };
   const intentEvents = ['wheel', 'pointerdown', 'touchstart', 'keydown'] as const;
-  const editorIntent = () => markActive('editor');
-  const previewIntent = () => markActive('preview');
+  const editorIntent = (e: Event) => {
+    if (e.type === 'pointerdown' && (e as PointerEvent).button === 0) {
+      pointerHeldIn = 'editor';
+    }
+    markActive('editor');
+  };
+  const previewIntent = (e: Event) => {
+    if (e.type === 'pointerdown' && (e as PointerEvent).button === 0) {
+      pointerHeldIn = 'preview';
+    }
+    markActive('preview');
+  };
+  const clearPointerHeld = () => {
+    if (pointerHeldIn) {
+      const held = pointerHeldIn;
+      pointerHeldIn = null;
+      markActive(held);
+    }
+  };
   for (const ev of intentEvents) {
     editor.addEventListener(ev, editorIntent, { passive: true });
     preview.addEventListener(ev, previewIntent, { passive: true });
   }
+  window.addEventListener('pointerup', clearPointerHeld, { passive: true });
+  window.addEventListener('pointercancel', clearPointerHeld, { passive: true });
+  window.addEventListener('blur', clearPointerHeld, { passive: true });
 
   const onEditorScroll = () => {
     if (syncGuard || activePane === 'preview') return;
@@ -437,6 +528,9 @@ function bindScrollSync() {
   syncEditorScroll = () => {
     editor.removeEventListener('scroll', onEditorScroll);
     for (const ev of intentEvents) editor.removeEventListener(ev, editorIntent);
+    window.removeEventListener('pointerup', clearPointerHeld);
+    window.removeEventListener('pointercancel', clearPointerHeld);
+    window.removeEventListener('blur', clearPointerHeld);
   };
   syncPreviewScroll = () => {
     preview.removeEventListener('scroll', onPreviewScroll);
@@ -452,7 +546,9 @@ function bindScrollSync() {
 // We snapshot the "current top line" from whichever view is leaving the DOM,
 // then scroll the newly mounted view(s) to that line so the cursor / reader
 // stays in roughly the same place.
-function getCurrentTopLine(paneEl: Element, fromMode: string): number | null {
+let lastSyncedPreviewScrollTop: number | null = null;
+
+function getCurrentViewportAnchor(paneEl: Element, fromMode: string): ViewportLineAnchor | null {
   if (fromMode === 'preview' || fromMode === 'reading') {
     const preview = paneEl.querySelector('.pane--preview .preview-host') as HTMLElement | null;
     if (preview) {
@@ -460,35 +556,64 @@ function getCurrentTopLine(paneEl: Element, fromMode: string): number | null {
       const wrapTop = preview.getBoundingClientRect().top;
       for (const { line, el } of list) {
         const r = el.getBoundingClientRect();
-        if (r.bottom >= wrapTop) return line;
+        if (r.bottom >= wrapTop + 4) {
+          return { line, offsetTop: Math.max(0, Math.round(r.top - wrapTop)) };
+        }
       }
     }
-    return props.tab?.id ? (tabTopLineMemory.get(props.tab.id) ?? null) : null;
+    const mem = props.tab?.id ? tabViewportAnchorMemory.get(props.tab.id) : undefined;
+    if (mem) return mem;
+    const savedLine = props.tab?.id ? (tabTopLineMemory.get(props.tab.id) ?? null) : null;
+    return savedLine != null ? { line: savedLine, offsetTop: 8 } : null;
   }
-  // edit / liveEdit / split — use the editor's top visible line
+  // edit / liveEdit / split — prefer the active caret line's viewport offset (#487)
   const cmRef = editorRef.value as any;
+  if (cmRef?.getViewportAnchor) {
+    const anchor = cmRef.getViewportAnchor() as ViewportLineAnchor | null;
+    if (anchor) return anchor;
+  }
   const edLine = cmRef?.getViewLine ? cmRef.getViewLine() : null;
-  if (edLine != null) return edLine;
-  return props.tab?.id ? (tabTopLineMemory.get(props.tab.id) ?? null) : null;
+  if (edLine != null) return { line: edLine, offsetTop: 8 };
+  const mem = props.tab?.id ? tabViewportAnchorMemory.get(props.tab.id) : undefined;
+  if (mem) return mem;
+  const savedLine = props.tab?.id ? (tabTopLineMemory.get(props.tab.id) ?? null) : null;
+  return savedLine != null ? { line: savedLine, offsetTop: 8 } : null;
 }
 
-function restoreToLine(paneEl: Element, toMode: string, line: number) {
+function restoreToLine(paneEl: Element, toMode: string, line: number, offsetTop = 8) {
   if (props.tab?.id && line >= 1) {
     tabTopLineMemory.set(props.tab.id, line);
+    tabViewportAnchorMemory.set(props.tab.id, { line, offsetTop });
   }
   if (toMode === 'edit' || toMode === 'liveEdit' || toMode === 'split') {
     const cmRef = editorRef.value as any;
-    if (cmRef?.scrollToLine) cmRef.scrollToLine(line);
+    if (cmRef?.scrollToLineAtOffset) cmRef.scrollToLineAtOffset(line, offsetTop);
+    else if (cmRef?.scrollToLine) cmRef.scrollToLine(line);
   }
   if (toMode === 'preview' || toMode === 'reading' || toMode === 'split') {
     const preview = paneEl.querySelector('.pane--preview .preview-host') as HTMLElement | null;
     if (preview) {
       const list = getPreviewElementsByLine(preview);
-      const entry = findNearestEntry(list, line);
+      const idx = findAnchorIndex(list, line);
+      const entry = idx >= 0 ? list[idx] : list[0];
       if (entry) {
         const elRect = entry.el.getBoundingClientRect();
         const wrapRect = preview.getBoundingClientRect();
-        preview.scrollTop = Math.max(0, preview.scrollTop + (elRect.top - wrapRect.top) - 8);
+        let inBlockOffset = 0;
+        if (line > entry.line) {
+          const next = idx >= 0 ? list.find((e, i) => i > idx && e.line > entry.line) : null;
+          if (next) {
+            const frac = Math.max(0, Math.min(1, (line - entry.line) / (next.line - entry.line)));
+            inBlockOffset = frac * Math.max(0, next.el.getBoundingClientRect().top - elRect.top);
+          } else {
+            const totalLines = Math.max(line, (props.tab?.content || '').split('\n').length);
+            const frac = Math.max(0, Math.min(1, (line - entry.line) / Math.max(1, totalLines - entry.line + 1)));
+            inBlockOffset = frac * elRect.height;
+          }
+        }
+        const safeOffset = Math.max(0, offsetTop);
+        preview.scrollTop = Math.max(0, preview.scrollTop + (elRect.top + inBlockOffset - wrapRect.top) - safeOffset);
+        lastSyncedPreviewScrollTop = preview.scrollTop;
         if (props.tab?.id) {
           previewScrollMemory.set(props.tab.id, preview.scrollTop);
         }
@@ -497,23 +622,61 @@ function restoreToLine(paneEl: Element, toMode: string, line: number) {
   }
 }
 
-watch(() => settings.viewMode, async (newMode, oldMode) => {
-  // Snapshot the logical position from the OLD view while it's still mounted.
-  const paneEl = document.querySelector(`[data-pane-id="${props.paneId}"]`);
-  const savedLine =
-    (paneEl ? getCurrentTopLine(paneEl, oldMode) : null) ??
-    (props.tab?.id ? (tabTopLineMemory.get(props.tab.id) ?? null) : null);
-  if (props.tab?.id && savedLine != null && savedLine >= 1) {
-    tabTopLineMemory.set(props.tab.id, savedLine);
-  }
-  // 100ms matches the existing settle window before bindScrollSync.
-  await new Promise((r) => setTimeout(r, 100));
-  if (savedLine != null && savedLine > 1) {
-    const newPaneEl = document.querySelector(`[data-pane-id="${props.paneId}"]`);
-    if (newPaneEl) restoreToLine(newPaneEl, newMode, savedLine);
-  }
-  bindScrollSync();
-});
+watch(
+  () => settings.viewMode,
+  async (newMode, oldMode) => {
+    // Snapshot the logical position + visual viewport offset from the OLD view
+    // synchronously BEFORE v-show hides it (#487, #516).
+    const paneEl = document.querySelector(`[data-pane-id="${props.paneId}"]`);
+    const fromEditor = oldMode === 'edit' || oldMode === 'liveEdit' || oldMode === 'split';
+    const toEditor = newMode === 'edit' || newMode === 'liveEdit' || newMode === 'split';
+    let userScrolledPreview = false;
+    if (oldMode === 'preview' && paneEl) {
+      const prevEl = paneEl.querySelector('.pane--preview .preview-host') as HTMLElement | null;
+      if (prevEl && lastSyncedPreviewScrollTop != null) {
+        userScrolledPreview = Math.abs(prevEl.scrollTop - lastSyncedPreviewScrollTop) > 16;
+      } else if (prevEl && prevEl.scrollTop > 16) {
+        userScrolledPreview = true;
+      }
+    }
+    const anchor =
+      (paneEl ? getCurrentViewportAnchor(paneEl, oldMode) : null) ??
+      (props.tab?.id ? (tabViewportAnchorMemory.get(props.tab.id) ?? null) : null);
+    if (props.tab?.id && anchor && anchor.line >= 1) {
+      tabTopLineMemory.set(props.tab.id, anchor.line);
+      tabViewportAnchorMemory.set(props.tab.id, anchor);
+      if (fromEditor && (newMode === 'preview' || newMode === 'reading')) {
+        // Clear stale preview pixel memory so Preview.vue aligns to the current
+        // editing line's viewport offset (#487).
+        previewScrollMemory.delete(props.tab.id);
+      }
+    }
+    // 100ms matches the existing settle window before bindScrollSync.
+    await new Promise((r) => setTimeout(r, 100));
+    if (!fromEditor && toEditor && !userScrolledPreview) {
+      // #516 — Returning from Preview or Reading mode when the user did not
+      // scroll away in Preview: restore the exact saved editor scroll + caret
+      // anchor so the editing focus never jumps out of view.
+      const cmRef = editorRef.value as any;
+      cmRef?.restoreSavedScroll?.();
+    } else if (anchor && anchor.line >= 1) {
+      const newPaneEl = document.querySelector(`[data-pane-id="${props.paneId}"]`);
+      if (newPaneEl) {
+        restoreToLine(newPaneEl, newMode, anchor.line, anchor.offsetTop);
+        if (newMode === 'preview') {
+          // Re-assert once after images/diagrams settle in Preview (#487).
+          setTimeout(() => {
+            if (settings.viewMode !== 'preview') return;
+            const pEl = document.querySelector(`[data-pane-id="${props.paneId}"]`);
+            if (pEl) restoreToLine(pEl, 'preview', anchor.line, anchor.offsetTop);
+          }, 160);
+        }
+      }
+    }
+    bindScrollSync();
+  },
+  { flush: 'sync' },
+);
 
 watch(() => settings.splitLiveSync, bindScrollSync);
 
@@ -664,7 +827,7 @@ onMounted(() => {
   });
   window.addEventListener('resize', onBrowserWindowResize);
   boundsRaf = requestAnimationFrame(browserBoundsTick);
-  restoreLaunchCursor();
+  launchCursorRestore.schedule();
   window.addEventListener('solomd:outline-goto', onOutlineGotoEvent);
   window.addEventListener('solomd:insert-markdown', onInsertMarkdownEvent);
   window.addEventListener('solomd:insert-image-path', onInsertImagePathEvent);
@@ -678,6 +841,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  launchCursorRestore.cancel();
   syncEditorScroll?.();
   syncPreviewScroll?.();
   cancelAnimationFrame(boundsRaf);
@@ -717,9 +881,9 @@ function onPreviewTopline(line: number) {
 }
 
 function onOutlineGotoEvent(e: Event) {
-  const { line, paneId } = (e as CustomEvent).detail;
+  const { line, paneId, query } = (e as CustomEvent).detail;
   if (paneId !== props.paneId) return;
-  gotoLine(line);
+  gotoLine(line, typeof query === 'string' ? query : undefined);
 }
 
 function onInsertMarkdownEvent(e: Event) {
@@ -789,6 +953,7 @@ function onFoldEvent(e: Event) {
 }
 
 function onPreviewSearchEvent(e: Event) {
+  if (settings.viewMode === 'reading') return;
   const { paneId } = (e as CustomEvent).detail;
   if (paneId !== props.paneId) return;
   (previewRef.value as unknown as { openSearch?: () => void } | null)?.openSearch?.();
@@ -807,10 +972,6 @@ function onPreviewSearchEvent(e: Event) {
       'pane-content--distinct': settings.distinctSplitPanes && showEditor && showPreview,
     }"
   >
-    <!-- Embedded browser tab. Must come FIRST: showEditor/showPreview are
-         both true for a browser tab (it is 'plaintext' with no path), so
-         without this branch it would fall into the editor arm and render an
-         empty CodeMirror over the native webview. -->
     <div class="pane pane--browser" v-if="isBrowser && tab">
       <BrowserToolbar :tab="tab" />
       <!-- The native child webview is positioned over this element, which is
@@ -819,7 +980,23 @@ function onPreviewSearchEvent(e: Event) {
       <div ref="browserAnchor" class="pane__browser-anchor"></div>
     </div>
     <template v-else>
-    <div class="pane pane--editor" v-if="showEditor && tab" :style="editorPaneStyle">
+    <div
+      class="pane pane--editor"
+      v-if="tab"
+      v-show="showEditor"
+      :style="editorPaneStyle"
+      @pointermove="onEditorPointerMove"
+      @pointerleave="clearSplitHover"
+      @pointerdown.capture="launchCursorRestore.userIntent"
+      @touchstart.capture.passive="launchCursorRestore.userIntent"
+      @keydown.capture="launchCursorRestore.userIntent"
+      @wheel.capture.passive="launchCursorRestore.userIntent"
+    >
+      <div
+        v-if="isSplit && editorHoverBand"
+        class="split-hover-band"
+        :style="{ top: `${editorHoverBand.top}px`, height: `${editorHoverBand.height}px` }"
+      />
       <Editor
         :key="editorImplementationKey"
         ref="editorRef"
@@ -848,7 +1025,12 @@ function onPreviewSearchEvent(e: Event) {
       @dblclick="resetSplitRatio"
       @keydown="onDividerKeydown"
     />
-    <div class="pane pane--preview" v-if="showPreview && tab">
+    <div
+      class="pane pane--preview"
+      v-if="showPreview && tab"
+      @pointermove="onPreviewPointerMove"
+      @pointerleave="clearSplitHover"
+    >
       <Preview
         ref="previewRef"
         :source="previewSource"
@@ -894,6 +1076,23 @@ function onPreviewSearchEvent(e: Event) {
   flex: 1;
   min-width: 0;
   height: 100%;
+  position: relative;
+}
+.split-hover-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  z-index: 2;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: top 0.05s ease-out, height 0.05s ease-out;
+}
+.pane--preview :deep(.split-hover-block) {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-radius: 4px;
+  box-shadow: -3px 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: background 0.1s ease-out;
 }
 .pane--editor + .pane--preview {
   border-left: var(--bd-hair);

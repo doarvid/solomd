@@ -87,6 +87,11 @@ export async function safCreate(
   return await invoke<string>('saf_create', { treeUri, parentDocId, mime, name });
 }
 
+/** Delete a SAF document (file or directory). */
+export async function safDelete(treeUri: string, docId: string): Promise<void> {
+  await invoke('saf_delete', { treeUri, docId });
+}
+
 /** #502 — Create a folder under `parentDocId`; returns its documentId. */
 export async function safCreateDir(
   treeUri: string,
@@ -166,4 +171,69 @@ export async function safResolvePicked(): Promise<SafVault | null | 'pending'> {
   const rootDocId = await invoke<string>('saf_tree_root', { treeUri: res });
   const name = await invoke<string>('saf_tree_name', { treeUri: res, docId: rootDocId });
   return { treeUri: res, rootDocId, name };
+}
+
+/**
+ * #611 — Recover `{ treeUri, rootDocId, name }` for a `saf:<docId>` path (e.g.
+ * from `recentFolders` persisted before `safVaults` existed, or a subfolder inside
+ * a granted SAF tree) by matching against Android's persisted URI permissions.
+ */
+export async function safRecoverVaultForPath(safPath: string): Promise<SafVault | null> {
+  if (!isSafPath(safPath)) return null;
+  const targetDocId = fromSafPath(safPath);
+  if (!targetDocId) return null;
+  const trees = await safPersistedTrees();
+  let bestTreeUri = '';
+  let bestRootLen = -1;
+  for (const treeUri of trees) {
+    try {
+      const rootDocId = await invoke<string>('saf_tree_root', { treeUri });
+      const matches =
+        targetDocId === rootDocId ||
+        targetDocId.startsWith(`${rootDocId}/`) ||
+        (rootDocId.endsWith(':') && targetDocId.startsWith(rootDocId));
+      if (matches && rootDocId.length > bestRootLen) {
+        bestTreeUri = treeUri;
+        bestRootLen = rootDocId.length;
+      }
+    } catch {
+      /* ignore invalid/revoked tree URI */
+    }
+  }
+  if (!bestTreeUri) return null;
+  let name = targetDocId.split('/').pop()?.split(':').pop() || 'Vault';
+  try {
+    const fetched = await invoke<string>('saf_tree_name', { treeUri: bestTreeUri, docId: targetDocId });
+    if (fetched) name = fetched;
+  } catch {
+    /* keep fallback segment name */
+  }
+  return { treeUri: bestTreeUri, rootDocId: targetDocId, name };
+}
+
+export interface SafAllFilesAccessStatus {
+  supported: boolean;
+  granted: boolean;
+}
+
+/**
+ * #611 — Check whether MANAGE_EXTERNAL_STORAGE ("All Files Access") is declared
+ * in this APK and currently granted on Android 11+ (needed on OEM ROMs such as
+ * ColorOS 16 / Android 16 when Syncthing / VNote syncs non-media `.md` files).
+ */
+export async function safAllFilesAccessStatus(): Promise<SafAllFilesAccessStatus> {
+  try {
+    return await invoke<SafAllFilesAccessStatus>('saf_all_files_access_status');
+  } catch {
+    return { supported: false, granted: true };
+  }
+}
+
+/** #611 — Launch Android's system settings page to grant All Files Access. */
+export async function safRequestAllFilesAccess(): Promise<void> {
+  try {
+    await invoke('saf_request_all_files_access');
+  } catch {
+    /* ignore on unsupported platforms */
+  }
 }

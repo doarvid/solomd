@@ -7,6 +7,7 @@ import BrandMark from './BrandMark.vue';
 import Icons from './Icons.vue';
 import SupportDialog from './SupportDialog.vue';
 import { useI18n } from '../i18n';
+import { IS_APP_STORE_BUILD } from '../lib/app-build';
 import {
   supporterRecord,
   iapUseStoreFlow,
@@ -34,14 +35,28 @@ onMounted(async () => {
 });
 
 // Sponsor nicknames, fetched from the site so a new name shows up without an
-// app release. Silent on failure (offline, blocked): the section just stays
-// hidden. Fetched once per session, only when the dialog is first opened.
-const sponsors = ref<string[]>([]);
-const promoters = ref<string[]>([]);
-const testers = ref<string[]>([]);
+// app release. Seeded with the built-in list so sponsors/testers/promoters
+// always appear even when offline.
+const sponsors = ref<string[]>(['tyysoft(太阳雨)']);
+const promoters = ref<string[]>([
+  'Garfield',
+  'lcfactorization',
+  '^9星守辰^',
+  'LinuxLinks',
+  'ToBeFree',
+  '极客范 (JikeFan)',
+  'BYOKList',
+  'Jörg Kantel',
+  '码客徐的小栈 (MakeXu)',
+  'doaipm',
+  'Tool Makers',
+  'MCP Market',
+  'AlternativeTo',
+]);
+const testers = ref<string[]>(['张工', '冰瞬若风', 'tyysoft(太阳雨)', 'lcfactorization', 'ScienceZone', 'Limoncello-Zoey', 'davi-jorge-art', 'zhuhaisto', 'licryle', 'ed-edwin', 'xjfnet', 'Snowboy801']);
 let sponsorsLoaded = false;
 async function loadSponsors() {
-  if (sponsorsLoaded) return;
+  if (IS_APP_STORE_BUILD || sponsorsLoaded) return;
   sponsorsLoaded = true;
   try {
     const res = await fetch('https://solomd.app/sponsors.json', { signal: AbortSignal.timeout(5000) });
@@ -52,13 +67,14 @@ async function loadSponsors() {
         .map((s: { name?: unknown }) => (typeof s?.name === 'string' ? s.name.trim() : ''))
         .filter((n: string) => n.length > 0 && n.length <= 40)
         .slice(0, 200);
-    sponsors.value = names(data?.sponsors);
-    // People who wrote about SoloMD or recommended it (solomd.app/promote).
-    promoters.value = names(data?.promoters);
-    // People who test SoloMD carefully and send detailed bug reports.
-    testers.value = names(data?.testers);
+    const sList = names(data?.sponsors);
+    const pList = names(data?.promoters);
+    const tList = names(data?.testers);
+    if (sList.length) sponsors.value = sList;
+    if (pList.length) promoters.value = pList;
+    if (tList.length) testers.value = tList;
   } catch {
-    /* offline or blocked — nothing to show */
+    /* offline or blocked — keep seeded list */
   }
 }
 watch(() => props.open, (o) => {

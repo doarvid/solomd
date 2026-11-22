@@ -35,6 +35,7 @@ import { useGithubSyncStore } from '../stores/githubSync';
 import { useGithubSync } from './useGithubSync';
 import { IS_APP_STORE_BUILD } from '../lib/app-build';
 import { hasGitBackend } from '../lib/platform';
+import { getUserPlugins, runUserTransform } from '../lib/user-plugins';
 
 export interface Command {
   id: string;
@@ -162,6 +163,38 @@ export function useCommands(): Command[] {
     transformActive(pick(await loadChineseConvert()), successMsg);
   }
 
+  function buildUserPluginCommands(): Command[] {
+    return getUserPlugins()
+      .filter((p) => p.enabled && Array.isArray(p.transforms))
+      .flatMap((plugin) =>
+        (plugin.transforms || []).map((tf) => ({
+          id: `plugin.${plugin.id}.${tf.id}`,
+          title: tf.title || `${plugin.name}: ${tf.id}`,
+          hint: tf.hint || plugin.name,
+          run: async () => {
+            const t = freshActiveTab();
+            if (!t) {
+              toasts.warning('No active document');
+              return;
+            }
+            try {
+              const res = await runUserTransform(tf, t.content, {
+                title: t.fileName,
+                filePath: t.filePath,
+                capabilities: plugin.capabilities,
+              });
+              if (res.content !== t.content) {
+                tabs.setContent(t.id, res.content);
+              }
+              toasts.success(res.message);
+            } catch (e) {
+              toasts.error(`Plugin failed: ${e}`);
+            }
+          },
+        })),
+      );
+  }
+
   const all: Command[] = [
     { id: 'file.new', title: 'New Markdown File', shortcut: kb('file.new'), run: () => files.newFile() },
     { id: 'file.newText', title: 'New Plain Text File', shortcut: kb('file.newText'), run: () => files.newTextFile() },
@@ -179,9 +212,19 @@ export function useCommands(): Command[] {
         requestNewFileInTree();
       },
     },
+    {
+      // #322 — New Note from Template…
+      id: 'file.newFromTemplate',
+      title: 'New Note from Template…',
+      shortcut: kb('file.newFromTemplate'),
+      run: () => {
+        window.dispatchEvent(new CustomEvent('solomd:open-template-picker'));
+      },
+    },
     { id: 'file.open', title: 'Open File…', shortcut: kb('file.open'), run: () => files.openFile() },
     { id: 'file.save', title: 'Save', shortcut: kb('file.save'), run: () => files.saveActive() },
     { id: 'file.saveAs', title: 'Save As…', shortcut: kb('file.saveAs'), run: () => files.saveActiveAs() },
+    { id: 'file.saveAll', title: 'Save All', shortcut: kb('file.saveAll'), run: () => files.saveAll() },
     {
       id: 'file.openFolder',
       title: 'Open Folder…',
@@ -195,6 +238,7 @@ export function useCommands(): Command[] {
     {
       id: 'file.openExternal',
       title: 'Open in External Editor',
+      shortcut: kb('file.openExternal'),
       hint: 'Open file with system default editor',
       run: async () => {
         const tab = useTabsStore().activeTab;
@@ -210,6 +254,49 @@ export function useCommands(): Command[] {
         }
       },
     },
+    {
+      id: 'file.copyPath',
+      title: 'Copy File Path',
+      shortcut: kb('file.copyPath'),
+      hint: 'Copy the active document’s full file path to clipboard',
+      run: async () => {
+        const tab = useTabsStore().activeTab;
+        const path = tab?.filePath;
+        if (!path) {
+          toasts.warning(settings.language === 'zh' ? '请先保存文件再复制路径' : 'Save the file first before copying its path');
+          return;
+        }
+        try {
+          await writeText(path);
+          toasts.success(settings.language === 'zh' ? '文件路径已复制' : 'File path copied to clipboard');
+        } catch {
+          try {
+            await navigator.clipboard?.writeText?.(path);
+            toasts.success(settings.language === 'zh' ? '文件路径已复制' : 'File path copied to clipboard');
+          } catch (e) {
+            toasts.error(`${e}`);
+          }
+        }
+      },
+    },
+    ...(!isMobile()
+      ? [
+          {
+            id: 'file.openInNewWindow',
+            title: 'Open in New Window',
+            hint: 'Open the active document in a separate SoloMD window',
+            run: () => {
+              const tab = useTabsStore().activeTab;
+              const path = tab?.filePath;
+              if (!path) {
+                toasts.warning(settings.language === 'zh' ? '请先保存文件再在新窗口中打开' : 'Save the file first before opening in a new window');
+                return;
+              }
+              files.spawnAuxWindow(path);
+            },
+          },
+        ]
+      : []),
 
     { id: 'view.editor', title: 'View: Edit Only', run: () => settings.setViewMode('edit') },
     { id: 'view.split', title: 'View: Split', run: () => settings.setViewMode('split') },
@@ -243,6 +330,8 @@ export function useCommands(): Command[] {
     { id: 'view.toggleSpellCheck', title: 'View: Toggle Spell Check', run: () => settings.toggleSpellCheck() },
     { id: 'view.toggleFocusMode', title: 'View: Toggle Focus Mode', shortcut: kb('view.toggleFocusMode'), run: () => settings.toggleFocusMode() },
     { id: 'view.toggleToolbar', title: 'View: Show / Hide Toolbar Buttons', shortcut: kb('view.toggleToolbar'), run: () => settings.toggleToolbarHidden() },
+    { id: 'view.toggleFormatBar', title: 'View: Show / Hide Formatting Toolbar', run: () => settings.toggleFormatBar() },
+    { id: 'view.toggleMenuBar', title: 'View: Show / Hide Menu Bar', run: () => settings.toggleHideMenuBar() },
     { id: 'view.toggleTypewriter', title: 'View: Toggle Typewriter Mode', shortcut: kb('view.toggleTypewriter'), run: () => settings.toggleTypewriterMode() },
     { id: 'view.zoomUiIn', title: 'UI: Zoom In', shortcut: kb('view.zoomUiIn'), run: () => settings.zoomIn() },
     { id: 'view.zoomUiOut', title: 'UI: Zoom Out', shortcut: kb('view.zoomUiOut'), run: () => settings.zoomOut() },
@@ -255,6 +344,8 @@ export function useCommands(): Command[] {
     // to carry them. Settings / reading mode also have a chord.
     { id: 'view.toggleReading', title: 'View: Toggle Reading Mode', shortcut: kb('view.toggleReading'), run: () => settings.toggleReadingMode() },
     { id: 'view.toggleFitWidth', title: 'View: Toggle Preview Fit Width', run: () => settings.togglePreviewFitWidth() },
+    { id: 'view.togglePdfPageBreaks', title: 'View: Toggle PDF Page-Break Reference Lines', run: () => settings.toggleShowPdfPageBreaks() },
+    { id: 'view.toggleAlwaysOnTop', title: 'View: Toggle Always on Top', shortcut: kb('view.toggleAlwaysOnTop'), run: () => settings.toggleAlwaysOnTop() },
     { id: 'pomodoro.open', title: 'Writing Session (Pomodoro)…', hint: '25 / 50 / 90 minutes or a custom length', run: () => window.dispatchEvent(new CustomEvent('solomd:open-pomodoro')) },
     { id: 'settings.open', title: 'Settings', shortcut: kb('settings.open'), run: () => window.dispatchEvent(new CustomEvent('solomd:open-settings')) },
 
@@ -263,6 +354,18 @@ export function useCommands(): Command[] {
     { id: 'tile.splitDown', title: 'Split Editor Down', shortcut: kb('tile.splitDown'), run: () => tiles.splitPane(tiles.focusedPaneId, 'vertical') },
     { id: 'tile.closePane', title: 'Close Pane', run: () => tiles.closePane(tiles.focusedPaneId) },
     { id: 'tile.focusNext', title: 'Focus Next Pane', shortcut: kb('tile.focusNext'), run: () => tiles.focusNextPane() },
+    {
+      id: 'editor.cursorBack',
+      title: 'Navigate Back (Cursor History)',
+      shortcut: kb('editor.cursorBack'),
+      run: () => window.dispatchEvent(new CustomEvent('solomd:editor-command', { detail: { cmd: 'cursorBack' } })),
+    },
+    {
+      id: 'editor.cursorForward',
+      title: 'Navigate Forward (Cursor History)',
+      shortcut: kb('editor.cursorForward'),
+      run: () => window.dispatchEvent(new CustomEvent('solomd:editor-command', { detail: { cmd: 'cursorForward' } })),
+    },
     { id: 'tile.focusPrev', title: 'Focus Previous Pane', shortcut: kb('tile.focusPrev'), run: () => tiles.focusPrevPane() },
 
     {
@@ -278,9 +381,10 @@ export function useCommands(): Command[] {
       title: 'Theme: Set Custom CSS File…',
       hint: 'Pick a .css file to override SoloMD styles',
       run: async () => {
+        const themesDir = await invoke<string>('theme_get_dir').catch(() => undefined);
         const path = await openFileDialog({
           multiple: false,
-          defaultPath: await files.filePickerStartDir(),
+          defaultPath: themesDir || (await files.filePickerStartDir()),
           filters: [{ name: 'CSS', extensions: ['css'] }],
         });
         if (path && typeof path === 'string') {
@@ -391,6 +495,13 @@ export function useCommands(): Command[] {
     },
 
     {
+      id: 'insert.table',
+      title: 'Insert Table…',
+      hint: 'Pick rows × columns from a grid or enter custom table dimensions',
+      run: () => window.dispatchEvent(new CustomEvent('solomd:open-insert-table-dialog')),
+    },
+
+    {
       id: 'editor.tableEditor',
       title: 'Edit Table…',
       shortcut: kb('editor.tableEditor'),
@@ -455,6 +566,28 @@ export function useCommands(): Command[] {
       },
     },
 
+    {
+      id: 'editor.insertAttachment',
+      title: 'Insert attachment…',
+      hint: 'Pick any file — it is copied into the note’s attachments folder and a Markdown link is inserted',
+      run: async () => {
+        if (!tabs.activeTab) {
+          toasts.warning('No active document');
+          return;
+        }
+        const sel = await openFileDialog({
+          multiple: false,
+          defaultPath: await files.filePickerStartDir(),
+        });
+        if (typeof sel !== 'string') return;
+        window.dispatchEvent(
+          new CustomEvent('solomd:insert-image-path', {
+            detail: { path: sel, paneId: tiles.focusedPaneId },
+          }),
+        );
+      },
+    },
+
     // #296 / #274 — every formatting command, so they are discoverable from
     // the palette and not only by knowing the chord. Titles come from
     // `cmd.fmt.<kind>` in the locale files.
@@ -470,6 +603,12 @@ export function useCommands(): Command[] {
     // there is nothing selected. Shift+F3 cycles lower → UPPER → Title, which
     // is the Word convention most writers already have in their fingers.
     {
+      id: 'editor.insertFrontmatter',
+      title: 'Insert YAML Frontmatter',
+      hint: 'Add or focus leading YAML metadata block (title, date, tags)',
+      run: () => window.dispatchEvent(new CustomEvent('solomd:insert-frontmatter')),
+    },
+    {
       id: 'editor.caseCycle',
       title: 'Cycle Case (lower / UPPER / Title)',
       hint: 'Selection, or the word under the cursor',
@@ -484,6 +623,10 @@ export function useCommands(): Command[] {
         ['editor.deleteWord', 'Delete Word', 'deleteWord'],
         ['editor.selectLine', 'Select Line', 'selectLine'],
         ['editor.jumpToSelection', 'Jump to Selection', 'jumpToSelection'],
+        ['editor.selectNextOccurrence', 'Add Next Occurrence to Selection', 'selectNextOccurrence'],
+        ['editor.selectAllOccurrences', 'Select All Occurrences', 'selectAllOccurrences'],
+        ['editor.addCursorAbove', 'Add Cursor Above', 'addCursorAbove'],
+        ['editor.addCursorBelow', 'Add Cursor Below', 'addCursorBelow'],
         ['heading.promote', 'Increase Heading Level', 'headingPromote'],
         ['heading.demote', 'Decrease Heading Level', 'headingDemote'],
         ['heading.paragraph', 'Convert to Paragraph', 'headingParagraph'],
@@ -597,6 +740,7 @@ export function useCommands(): Command[] {
     { id: 'file.print', title: 'Print…', hint: 'Open the system print dialog', shortcut: kb('file.print'), run: () => exporter.printDocument() },
     { id: 'export.pdf', title: 'Export to PDF (image)…', hint: 'rasterised, text not selectable', run: () => exporter.exportPdf() },
     { id: 'export.image', title: 'Export to Image (PNG)…', run: () => exporter.exportImage() },
+    { id: 'export.custom', title: 'Custom / Batch Export…', hint: 'export current file or entire folder to a custom directory', shortcut: kb('export.custom'), run: () => exporter.openCustomExportDialog() },
     { id: 'export.epub', title: 'Export to EPUB…', hint: 'via Pandoc', run: () => pandoc.exportTo('epub') },
     { id: 'export.odt', title: 'Export to ODT…', hint: 'via Pandoc', run: () => pandoc.exportTo('odt') },
     { id: 'export.latex', title: 'Export to LaTeX…', hint: 'via Pandoc', run: () => pandoc.exportTo('latex') },
@@ -742,6 +886,8 @@ export function useCommands(): Command[] {
             username: settings.webdavUsername,
             password: settings.webdavPassword,
             remotePath: settings.webdavRemotePath,
+            encrypted: settings.webdavEncrypted,
+            passphrase: settings.webdavPassphrase,
           });
           toasts.success(
             settings.language === 'zh'
@@ -775,6 +921,8 @@ export function useCommands(): Command[] {
             username: settings.webdavUsername,
             password: settings.webdavPassword,
             remotePath: settings.webdavRemotePath,
+            encrypted: settings.webdavEncrypted,
+            passphrase: settings.webdavPassphrase,
           });
           window.dispatchEvent(new CustomEvent('solomd:remote-pulled'));
           toasts.success(
@@ -878,7 +1026,7 @@ export function useCommands(): Command[] {
     {
       id: 'inbox.organizeAndAdvance',
       title: 'Inbox: Mark Organized & Advance',
-      shortcut: kb('inbox.organizeAndAdvance'),
+      shortcut: kb('inbox.toggle'),
       hint: 'Set `inbox: false` on the active note and jump to the next inbox note',
       run: () => {
         if (!settings.inboxWorkflowEnabled) {
@@ -889,6 +1037,7 @@ export function useCommands(): Command[] {
       },
     },
   ];
+  all.push(...buildUserPluginCommands());
 
   // App Store builds strip AI / Agent commands (Apple 3.1.1).
   const built = IS_APP_STORE_BUILD
@@ -900,11 +1049,20 @@ export function useCommands(): Command[] {
   // rather than letting the user find a command that can only fail.
   // Quick capture is a desktop window opened by an OS-level hotkey; neither
   // half exists on a phone, so the command would only ever fail there.
-  const desktopOnly = isMobile() ? built.filter((c) => c.id !== 'capture.quick') : built;
-  if (!hasGitBackend()) {
-    return desktopOnly.filter(
-      (c) => !c.id.startsWith('history.') && !c.id.startsWith('sync.'),
-    );
-  }
-  return desktopOnly;
+  const desktopOnly = isMobile()
+    ? built.filter((c) => c.id !== 'capture.quick' && c.id !== 'view.toggleAlwaysOnTop')
+    : built;
+  const finalCommands = !hasGitBackend()
+    ? desktopOnly.filter(
+        (c) => !c.id.startsWith('history.') && !c.id.startsWith('sync.'),
+      )
+    : desktopOnly;
+  Object.defineProperty(finalCommands, '__refreshPlugins', {
+    value: () => [
+      ...finalCommands.filter((c) => !c.id.startsWith('plugin.')),
+      ...buildUserPluginCommands(),
+    ],
+    enumerable: false,
+  });
+  return finalCommands;
 }

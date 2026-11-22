@@ -77,11 +77,24 @@ fn keyring_entry() -> Result<keyring::Entry, String> {
 /// just to render a green dot. The marker file moves that prompt off
 /// the read path; the keychain only gets touched on push / pull (which
 /// the user explicitly initiates and where the prompt is meaningful).
-fn token_marker_path() -> Option<std::path::PathBuf> {
+fn user_home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
-        .map(|h| h.join(".solomd").join("github-token-set"))
+        .or_else(|| {
+            if cfg!(target_os = "android") {
+                let p = std::path::PathBuf::from("/data/user/0/app.solomd/files");
+                if p.exists() {
+                    return Some(p);
+                }
+                return Some(std::env::temp_dir());
+            }
+            None
+        })
+}
+
+fn token_marker_path() -> Option<std::path::PathBuf> {
+    user_home_dir().map(|h| h.join(".solomd").join("github-token-set"))
 }
 
 fn write_token_marker() {
@@ -189,10 +202,7 @@ fn gitea_keyring_entry() -> Result<keyring::Entry, String> {
 }
 
 fn gitea_token_marker_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
-        .map(|h| h.join(".solomd").join("gitea-token-set"))
+    user_home_dir().map(|h| h.join(".solomd").join("gitea-token-set"))
 }
 
 fn gitea_write_token_marker() {
@@ -277,6 +287,103 @@ fn gitea_clear_token_blocking() -> Result<(), String> {
 #[tauri::command]
 pub fn gitea_has_token() -> Result<bool, String> {
     Ok(gitea_token_marker_path().map(|p| p.exists()).unwrap_or(false))
+}
+
+// ---------------------------------------------------------------------------
+// #602 — Gitee (码云, gitee.com) token storage & OpenAPI v5 integration
+// ---------------------------------------------------------------------------
+
+const KEYRING_SERVICE_GITEE: &str = "solomd-gitee";
+const GITEE_API: &str = "https://gitee.com/api/v5";
+
+static GITEE_TOKEN_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+fn gitee_keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE_GITEE, KEYRING_USER).map_err(|e| e.to_string())
+}
+
+fn gitee_token_marker_path() -> Option<std::path::PathBuf> {
+    user_home_dir().map(|h| h.join(".solomd").join("gitee-token-set"))
+}
+
+fn gitee_write_token_marker() {
+    if let Some(p) = gitee_token_marker_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&p, b"1");
+    }
+}
+
+fn gitee_remove_token_marker() {
+    if let Some(p) = gitee_token_marker_path() {
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
+fn gitee_read_token() -> Result<Option<String>, String> {
+    if let Ok(guard) = GITEE_TOKEN_CACHE.lock() {
+        if let Some(s) = guard.as_ref() {
+            return Ok(Some(s.clone()));
+        }
+    }
+    let entry = gitee_keyring_entry()?;
+    let token = match entry.get_password() {
+        Ok(s) => Some(s),
+        Err(keyring::Error::NoEntry) => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    if let (Ok(mut guard), Some(t)) = (GITEE_TOKEN_CACHE.lock(), token.as_ref()) {
+        *guard = Some(t.clone());
+    }
+    Ok(token)
+}
+
+#[tauri::command]
+pub async fn gitee_set_token(token: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || gitee_set_token_blocking(token))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn gitee_set_token_blocking(token: String) -> Result<(), String> {
+    let trimmed = token.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("token is empty".into());
+    }
+    let entry = gitee_keyring_entry()?;
+    entry.set_password(&trimmed).map_err(|e| e.to_string())?;
+    if let Ok(mut guard) = GITEE_TOKEN_CACHE.lock() {
+        *guard = Some(trimmed);
+    }
+    gitee_write_token_marker();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn gitee_clear_token() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || gitee_clear_token_blocking())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn gitee_clear_token_blocking() -> Result<(), String> {
+    let entry = gitee_keyring_entry()?;
+    let r = match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Ok(mut guard) = GITEE_TOKEN_CACHE.lock() {
+        *guard = None;
+    }
+    gitee_remove_token_marker();
+    r
+}
+
+#[tauri::command]
+pub fn gitee_has_token() -> Result<bool, String> {
+    Ok(gitee_token_marker_path().map(|p| p.exists()).unwrap_or(false))
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +708,7 @@ pub async fn github_enable_encryption(
         }
         let token = match cfg.provider.as_str() {
             "gitea" => gitea_read_token()?.ok_or("no Gitea token set")?,
+            "gitee" => gitee_read_token()?.ok_or("no Gitee token set")?,
             _ => read_token()?.ok_or("no GitHub token set")?,
         };
 
@@ -860,10 +968,7 @@ fn now_secs() -> i64 {
 // ---------------------------------------------------------------------------
 
 fn proxy_path() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-        .map(|h| h.join(".solomd").join("proxy"))
+    user_home_dir().map(|h| h.join(".solomd").join("proxy"))
 }
 
 fn read_proxy_url() -> Option<String> {
@@ -938,10 +1043,7 @@ fn make_proxy_options() -> git2::ProxyOptions<'static> {
 // ---------------------------------------------------------------------------
 
 fn gitea_url_path() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-        .map(|h| h.join(".solomd").join("gitea-url"))
+    user_home_dir().map(|h| h.join(".solomd").join("gitea-url"))
 }
 
 fn read_gitea_url() -> Option<String> {
@@ -1066,6 +1168,137 @@ pub async fn gitea_create_vault_repo(
     gitea_api_post(&base, "/api/v1/user/repos", &token, &req).await
 }
 
+// ---------------------------------------------------------------------------
+// #602 — Gitee REST API v5 (`https://gitee.com/api/v5`)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GiteeRepoRaw {
+    name: String,
+    #[serde(default)]
+    full_name: String,
+    #[serde(default)]
+    clone_url: Option<String>,
+    #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    private: bool,
+    #[serde(default)]
+    default_branch: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+impl From<GiteeRepoRaw> for GitHubRepo {
+    fn from(raw: GiteeRepoRaw) -> Self {
+        let trimmed_html = raw.html_url.trim_end_matches('/').to_string();
+        let clean_html = trimmed_html.trim_end_matches(".git").to_string();
+        let clone_url = raw.clone_url.unwrap_or_else(|| {
+            if trimmed_html.ends_with(".git") {
+                trimmed_html.clone()
+            } else if !trimmed_html.is_empty() {
+                format!("{trimmed_html}.git")
+            } else {
+                format!("https://gitee.com/{}.git", raw.full_name)
+            }
+        });
+        let full_name = if raw.full_name.is_empty() {
+            raw.name.clone()
+        } else {
+            raw.full_name
+        };
+        Self {
+            name: raw.name,
+            full_name,
+            clone_url,
+            private: raw.private,
+            default_branch: raw.default_branch.unwrap_or_else(|| "master".into()),
+            html_url: clean_html,
+            updated_at: raw.updated_at.unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct GiteeCreateRepoRequest<'a> {
+    access_token: &'a str,
+    name: &'a str,
+    private: bool,
+    auto_init: bool,
+    description: &'a str,
+}
+
+#[tauri::command]
+pub async fn gitee_user() -> Result<GitHubUser, String> {
+    let token = gitee_read_token()?.ok_or("no Gitee token set")?;
+    let url = format!("{GITEE_API}/user");
+    let res = reqwest::Client::new()
+        .get(&url)
+        .query(&[("access_token", token.as_str())])
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Gitee API {}: {}", status, body));
+    }
+    res.json::<GitHubUser>().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn gitee_list_repos() -> Result<Vec<GitHubRepo>, String> {
+    let token = gitee_read_token()?.ok_or("no Gitee token set")?;
+    let url = format!("{GITEE_API}/user/repos");
+    let res = reqwest::Client::new()
+        .get(&url)
+        .query(&[
+            ("access_token", token.as_str()),
+            ("sort", "updated"),
+            ("per_page", "100"),
+            ("type", "personal"),
+        ])
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Gitee API {}: {}", status, body));
+    }
+    let raw = res.json::<Vec<GiteeRepoRaw>>().await.map_err(|e| e.to_string())?;
+    Ok(raw.into_iter().map(Into::into).collect())
+}
+
+#[tauri::command]
+pub async fn gitee_create_vault_repo(name: String, private: bool) -> Result<GitHubRepo, String> {
+    let token = gitee_read_token()?.ok_or("no Gitee token set")?;
+    let url = format!("{GITEE_API}/user/repos");
+    let req = GiteeCreateRepoRequest {
+        access_token: &token,
+        name: &name,
+        private,
+        auto_init: true,
+        description: "Notes vault — synced by SoloMD",
+    };
+    let res = reqwest::Client::new()
+        .post(&url)
+        .header("User-Agent", USER_AGENT)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Gitee API {}: {}", status, body));
+    }
+    let raw = res.json::<GiteeRepoRaw>().await.map_err(|e| e.to_string())?;
+    Ok(raw.into())
+}
+
 /// In a repo, stage every change in the working tree and commit. No-op
 /// if there's nothing to commit. Used by E2EE push/pull to keep the
 /// shadow's git history advancing as the user edits the workspace.
@@ -1174,6 +1407,7 @@ pub async fn github_push(
     let cfg = load_config(&path)?.unwrap_or_default();
     let token = match cfg.provider.as_str() {
         "gitea" => gitea_read_token()?.ok_or("no Gitea token set")?,
+        "gitee" => gitee_read_token()?.ok_or("no Gitee token set")?,
         _ => read_token()?.ok_or("no GitHub token set")?,
     };
     tauri::async_runtime::spawn_blocking(move || github_push_inner(folder, token, commit_message))
@@ -1425,6 +1659,7 @@ pub async fn github_pull(folder: String) -> Result<PullResult, String> {
     let cfg = load_config(&path)?.unwrap_or_default();
     let token = match cfg.provider.as_str() {
         "gitea" => gitea_read_token()?.ok_or("no Gitea token set")?,
+        "gitee" => gitee_read_token()?.ok_or("no Gitee token set")?,
         _ => read_token()?.ok_or("no GitHub token set")?,
     };
     tauri::async_runtime::spawn_blocking(move || github_pull_inner(folder, token))
@@ -1574,5 +1809,25 @@ mod url_owner_tests {
         assert_eq!(owner_from_url("https://gitee.com/").as_deref(), None);
         assert_eq!(owner_from_url("https://gitee.com").as_deref(), None);
         assert_eq!(owner_from_url("not a url").as_deref(), None);
+    }
+
+    #[test]
+    fn gitee_repo_raw_derives_clone_and_clean_html_urls() {
+        let json = r#"{
+            "name": "vault",
+            "full_name": "zhitongblog/vault",
+            "html_url": "https://gitee.com/zhitongblog/vault.git",
+            "private": true,
+            "default_branch": "master",
+            "updated_at": "2026-11-18T10:00:00+08:00"
+        }"#;
+        let raw: super::GiteeRepoRaw = serde_json::from_str(json).unwrap();
+        let repo: super::GitHubRepo = raw.into();
+        assert_eq!(repo.name, "vault");
+        assert_eq!(repo.full_name, "zhitongblog/vault");
+        assert_eq!(repo.clone_url, "https://gitee.com/zhitongblog/vault.git");
+        assert_eq!(repo.html_url, "https://gitee.com/zhitongblog/vault");
+        assert!(repo.private);
+        assert_eq!(repo.default_branch, "master");
     }
 }

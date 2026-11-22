@@ -95,14 +95,43 @@ function printRulesAsScreenCss(): string {
  * the pagination is measured with them in place; `fillTocPageNumbers` writes
  * the real numbers. Returns the TOC, or null if the document has none.
  */
+function isLeadingTocElement(nav: HTMLElement, root: HTMLElement): boolean {
+  let h1Count = 0;
+  let cur = nav.previousElementSibling as HTMLElement | null;
+  while (cur) {
+    if (cur.tagName === 'H1') {
+      h1Count++;
+      if (h1Count > 1) return false;
+    } else if (/^H[2-6]$/.test(cur.tagName)) {
+      return false;
+    } else if (cur.querySelector('h2, h3, h4, h5, h6')) {
+      return false;
+    }
+    cur = cur.previousElementSibling as HTMLElement | null;
+  }
+  return root.contains(nav);
+}
+
 export function decoratePrintToc(content: HTMLElement, title: string): HTMLElement | null {
   const nav = content.querySelector<HTMLElement>('nav.md-toc');
   if (!nav || nav.dataset.printDecorated) return nav;
   nav.dataset.printDecorated = '1';
-  const heading = document.createElement('div');
-  heading.className = 'md-toc__title';
-  heading.textContent = title;
-  nav.prepend(heading);
+  const prev = nav.previousElementSibling as HTMLElement | null;
+  if (prev?.tagName === 'H1') {
+    prev.classList.add('pdf-doc-title');
+  } else if (title && !nav.querySelector('.md-toc__title')) {
+    const heading = document.createElement('div');
+    heading.className = 'md-toc__title';
+    heading.textContent = title;
+    nav.prepend(heading);
+  }
+  if (isLeadingTocElement(nav, content)) {
+    nav.classList.add('md-toc--lead');
+    const next = nav.nextElementSibling as HTMLElement | null;
+    if (next?.tagName === 'HR') {
+      next.classList.add('pdf-toc-hr');
+    }
+  }
   for (const link of Array.from(nav.querySelectorAll<HTMLAnchorElement>('a.md-toc__link'))) {
     const text = document.createElement('span');
     text.className = 'md-toc__text';
@@ -144,9 +173,39 @@ export function fillTocPageNumbers(
   }
 }
 
+/**
+ * #515 — Collect heading entries `[level, title, pageNumber]` from the print
+ * overlay so native PDF generation can attach a PDF document outline (bookmarks).
+ */
+export function collectPrintOutline(
+  content: HTMLElement,
+  pageOf: ((el: Element) => number) | null,
+  yRatioOf?: ((el: Element) => number) | null,
+): Array<[number, string, number, number]> {
+  const headings = Array.from(
+    content.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'),
+  ).filter((el) => !el.closest('.md-toc'));
+  const entries: Array<[number, string, number, number]> = [];
+  for (const el of headings) {
+    const customLvl = Number(el.getAttribute('data-toc-level'));
+    const level = Math.max(
+      1,
+      Math.min(6, Number.isFinite(customLvl) && customLvl >= 1 ? customLvl : Number(el.tagName.slice(1)) || 1),
+    );
+    const title = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!title) continue;
+    const page = pageOf ? Math.max(1, pageOf(el)) : 1;
+    const yRatio = yRatioOf ? Math.max(0, Math.min(1, yRatioOf(el))) : 0;
+    entries.push([level, title, page, yRatio]);
+  }
+  return entries;
+}
+
 export interface PrintPagination {
   /** 1-based page an element starts on. */
   pageOf(el: Element): number;
+  /** Vertical offset ratio (0 = top of printable box, 1 = bottom) on the element's page. */
+  yRatioOf(el: Element): number;
   /** Total number of pages. */
   pages: number;
 }
@@ -196,11 +255,17 @@ export function withPrintPagination<T>(
 
   const spacers: HTMLElement[] = [];
   try {
-    const origin = content.getBoundingClientRect().left;
+    const contentRect = content.getBoundingClientRect();
+    const origin = contentRect.left;
+    const originTop = contentRect.top;
     const stride = box.width + GAP;
     const pageOf = (el: Element) => {
       const r = el.getBoundingClientRect();
       return Math.max(1, Math.floor((r.left - origin + 1) / stride) + 1);
+    };
+    const yRatioOf = (el: Element) => {
+      const r = el.getBoundingClientRect();
+      return box.height > 0 ? Math.max(0, Math.min(1, (r.top - originTop) / box.height)) : 0;
     };
     // Print repeats a table's header row at the top of every page the table
     // continues onto (#337); column fragmentation does not. Left alone, the
@@ -235,7 +300,7 @@ export function withPrintPagination<T>(
       if (r.width === 0 && r.height === 0) continue;
       last = Math.max(last, Math.floor((r.right - origin - 1) / stride) + 1);
     }
-    return use({ pageOf, pages: last });
+    return use({ pageOf, yRatioOf, pages: last });
   } finally {
     for (const s of spacers) s.remove();
     style.remove();

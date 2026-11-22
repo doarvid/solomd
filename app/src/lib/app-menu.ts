@@ -81,6 +81,11 @@ export interface MenuState {
   lineNumbers: boolean;
   /** Auto-commit on save (history). */
   autoGit: boolean;
+  /** #604 — Keep window floating above other windows. */
+  alwaysOnTop: boolean;
+  /** Top toolbar hidden / Markdown formatting bar visible. */
+  toolbarHidden?: boolean;
+  formatBar?: boolean;
   /** Right-sidebar / left-sidebar pane visibility, for the 面板 check marks. */
   panes: {
     outline: boolean;
@@ -163,6 +168,7 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
     item('file.new', t('menubar.newMd')),
     item('file.newText', t('menubar.newText')),
     item('file.newInFolder', t('cmd.file.newInFolder')),
+    item('file.newFromTemplate', t('types.templateLabel')),
     item('window.new', t('menubar.newWindow')),
     item('capture.quick', t('menubar.quickCapture')),
     sep,
@@ -182,6 +188,7 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
     sep,
     item('file.save', t('menubar.save')),
     item('file.saveAs', t('menubar.saveAs')),
+    item('file.saveAll', t('menubar.saveAll')),
     item('file.autoSave', t('menubar.autoSave'), { checked: state.autoSave }),
     sep,
     item('file.import', t('menubar.importDocs')),
@@ -197,6 +204,7 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
         item('export.pdfPrint', t('toolbar.exportPdfPrint')),
         item('export.pdf', t('toolbar.exportPdf')),
         item('export.image', t('toolbar.exportImage')),
+        item('export.custom', t('toolbar.exportCustom')),
         sep,
         // Pandoc-based: they tell the user when Pandoc is not installed.
         item('export.epub', t('cmd.export.epub')),
@@ -291,6 +299,11 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
     item('editor.deleteWord', t('cmd.editor.deleteWord')),
     item('editor.selectLine', t('cmd.editor.selectLine')),
     item('editor.jumpToSelection', t('cmd.editor.jumpToSelection')),
+    sep,
+    item('editor.selectNextOccurrence', t('cmd.editor.selectNextOccurrence')),
+    item('editor.selectAllOccurrences', t('cmd.editor.selectAllOccurrences')),
+    item('editor.addCursorAbove', t('cmd.editor.addCursorAbove')),
+    item('editor.addCursorBelow', t('cmd.editor.addCursorBelow')),
     sep,
     // AI first, then plain text processing — two different kinds of command.
     ...(ctx.aiAvailable ? [item('editor.aiRewrite', t('cmd.editor.aiRewrite'))] : []),
@@ -466,7 +479,9 @@ export function buildAppMenu(ctx: MenuContext): TopMenu[] {
       ],
     },
     // The toolbar is chrome, not a pane: it sits with the appearance items.
-    item('view.toggleToolbar', t('menubar.toggleToolbar')),
+    item('view.toggleToolbar', t('menubar.toggleToolbar'), { checked: !state.toolbarHidden }),
+    item('view.toggleFormatBar', t('settings.formatBar'), { checked: !!state.formatBar }),
+    item('view.toggleAlwaysOnTop', t('menubar.alwaysOnTop'), { checked: state.alwaysOnTop }),
     sep,
     {
       type: 'submenu',

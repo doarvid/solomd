@@ -38,11 +38,18 @@ function looksLikeRow(line: string): boolean {
 
 /** `|---|:--:|` and friends. */
 export function isDelimiterRow(line: string): boolean {
-  const t = line.trim();
-  if (!t.includes('-')) return false;
+  const t = line.replace(/^\s*(?:>\s*)*/, '').trim();
+  if (!t.includes('-') || !t.includes('|')) return false;
   const cells = splitRow(t);
   if (cells.length === 0) return false;
-  return cells.every((c) => /^:?-{1,}:?$/.test(c.trim()));
+  let hasRealCell = false;
+  for (const c of cells) {
+    const ct = c.trim();
+    if (ct === '') continue;
+    if (!/^:?-{1,}:?$/.test(ct)) return false;
+    hasRealCell = true;
+  }
+  return hasRealCell;
 }
 
 /**
@@ -263,6 +270,32 @@ export function setAlign(t: TableModel, col: number, align: TableAlign): TableMo
   const aligns = [...t.aligns];
   aligns[col] = align;
   return { ...t, aligns };
+}
+
+/**
+ * #382 — one alignment for several columns at once: "select the four numeric
+ * columns, make them all right-aligned" instead of four round-trips to the
+ * toolbar.
+ *
+ * Out-of-range indices are skipped rather than rejected: the selection is
+ * held by the view and can outlive a column delete by one render, and
+ * throwing there would take down the whole dialog. Returns the same model
+ * when nothing actually changed, so a no-op leaves the #390 dirty baseline
+ * alone.
+ */
+export function setAlignMany(
+  t: TableModel,
+  cols: readonly number[],
+  align: TableAlign,
+): TableModel {
+  const aligns = [...t.aligns];
+  let changed = false;
+  for (const col of cols) {
+    if (!Number.isInteger(col) || col < 0 || col >= aligns.length) continue;
+    if (aligns[col] !== align) changed = true;
+    aligns[col] = align;
+  }
+  return changed ? { ...t, aligns } : t;
 }
 
 export function setCell(t: TableModel, row: number, col: number, value: string): TableModel {

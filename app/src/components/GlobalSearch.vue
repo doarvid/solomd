@@ -20,6 +20,8 @@ import { useFiles } from '../composables/useFiles';
 import { useTabsStore } from '../stores/tabs';
 import { useTilesStore } from '../stores/tiles';
 import { useWorkspaceStore } from '../stores/workspace';
+import { useWorkspaceIndexStore } from '../stores/workspaceIndex';
+import { useSettingsStore } from '../stores/settings';
 import { useI18n } from '../i18n';
 import Icons from './Icons.vue';
 
@@ -31,14 +33,24 @@ const files = useFiles();
 const tabs = useTabsStore();
 const tiles = useTilesStore();
 const workspace = useWorkspaceStore();
+const wsIndex = useWorkspaceIndexStore();
+const settings = useSettingsStore();
 const { t } = useI18n();
 
 const query = ref('');
+const titleOnly = ref(false);
+const expandedModal = ref(false);
 const hits = ref<SearchHit[]>([]);
 const loading = ref(false);
 const selectedIdx = ref(0);
 const inputRef = ref<HTMLInputElement | null>(null);
 const activeFilePath = computed(() => tabs.activeTab?.filePath ?? '');
+const titleOnlyLabel = computed(() =>
+  settings.language?.startsWith('zh') ? '仅标题' : 'Title',
+);
+const titleOnlyTip = computed(() =>
+  settings.language?.startsWith('zh') ? '仅搜索笔记文件名与标题' : 'Search note titles and filenames only',
+);
 
 let debounceTimer: number | null = null;
 
@@ -62,33 +74,88 @@ watch(
   },
 );
 
-watch(query, () => {
+watch([query, titleOnly], () => {
   if (debounceTimer != null) {
     window.clearTimeout(debounceTimer);
   }
   debounceTimer = window.setTimeout(doSearch, 220);
 });
 
+const TITLE_HIT_CAP = 200;
+let searchReqSeq = 0;
+
 async function doSearch() {
   const q = query.value.trim();
+  const reqId = ++searchReqSeq;
   if (!q) {
     hits.value = [];
+    loading.value = false;
     return;
   }
   loading.value = true;
   try {
-    hits.value = await search.search(q);
+    let nextHits: SearchHit[];
+    if (titleOnly.value) {
+      const qLower = q.toLowerCase();
+      const matched: SearchHit[] = [];
+      const seenFiles = new Set<string>();
+      for (const entry of wsIndex.entries) {
+        if (matched.length >= TITLE_HIT_CAP) break;
+        const displayTitle = entry.title || entry.headings?.[0] || entry.name;
+        if (
+          entry.name.toLowerCase().includes(qLower) ||
+          entry.stem.toLowerCase().includes(qLower) ||
+          displayTitle.toLowerCase().includes(qLower)
+        ) {
+          seenFiles.add(entry.path);
+          matched.push({
+            file: entry.path,
+            line: 1,
+            snippet: displayTitle,
+          });
+        }
+      }
+      if (matched.length === 0) {
+        const rawHits = await search.search(q);
+        if (reqId !== searchReqSeq) return;
+        for (const h of rawHits) {
+          if (matched.length >= TITLE_HIT_CAP) break;
+          const base = h.file.split(/[\\/]/).pop() ?? h.file;
+          const isHeading = /^#{1,6}\s+/.test(h.snippet.trim());
+          if (
+            !seenFiles.has(h.file) &&
+            (base.toLowerCase().includes(qLower) || isHeading)
+          ) {
+            seenFiles.add(h.file);
+            matched.push(h);
+          }
+        }
+      }
+      nextHits = matched;
+    } else {
+      nextHits = await search.search(q);
+      if (reqId !== searchReqSeq) return;
+    }
+    hits.value = nextHits;
     selectedIdx.value = 0;
   } finally {
-    loading.value = false;
+    if (reqId === searchReqSeq) {
+      loading.value = false;
+    }
   }
 }
 
 const grouped = computed(() => {
-  const map = new Map<string, SearchHit[]>();
-  for (const h of hits.value) {
-    if (!map.has(h.file)) map.set(h.file, []);
-    map.get(h.file)!.push(h);
+  const map = new Map<string, Array<{ hit: SearchHit; idx: number }>>();
+  const list = hits.value;
+  for (let idx = 0; idx < list.length; idx++) {
+    const h = list[idx];
+    let group = map.get(h.file);
+    if (!group) {
+      group = [];
+      map.set(h.file, group);
+    }
+    group.push({ hit: h, idx });
   }
   return Array.from(map.entries());
 });
@@ -103,14 +170,18 @@ function shortPath(p: string) {
 
 async function openHit(hit: SearchHit) {
   try {
+    const highlightQuery = titleOnly.value ? '' : query.value.trim();
     await files.openPath(hit.file);
-    nextTick(() => {
-      window.dispatchEvent(
-        new CustomEvent('solomd:outline-goto', {
-          detail: { line: hit.line, paneId: tiles.focusedPaneId },
-        }),
-      );
-    });
+    await nextTick();
+    window.dispatchEvent(
+      new CustomEvent('solomd:outline-goto', {
+        detail: {
+          line: hit.line,
+          paneId: tiles.focusedPaneId,
+          query: highlightQuery,
+        },
+      }),
+    );
   } catch (e) {
     console.error('GlobalSearch: openPath failed', e);
   }
@@ -119,8 +190,23 @@ async function openHit(hit: SearchHit) {
 function highlight(snippet: string): string {
   const q = query.value.trim();
   if (!q) return escapeHtml(snippet);
-  const re = new RegExp(`(${escapeRe(q)})`, 'gi');
-  return escapeHtml(snippet).replace(re, '<mark>$1</mark>');
+  // Match against the raw text BEFORE HTML-escaping so queries like `a`, `&`,
+  // `<`, or `;` never slice inside `&amp;` / `&lt;` entities!
+  const re = new RegExp(escapeRe(q), 'gi');
+  let out = '';
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(snippet)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex += 1;
+      continue;
+    }
+    out += escapeHtml(snippet.slice(last, m.index));
+    out += `<mark>${escapeHtml(m[0])}</mark>`;
+    last = m.index + m[0].length;
+  }
+  out += escapeHtml(snippet.slice(last));
+  return out;
 }
 
 function escapeHtml(s: string) {
@@ -135,6 +221,7 @@ function escapeRe(s: string) {
 }
 
 function onKey(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Escape') {
     e.preventDefault();
     emit('close');
@@ -153,15 +240,23 @@ function onKey(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="sp">
+  <div class="sp" :class="{ 'sp--expanded': expandedModal }">
     <header class="sp__head">
       <span class="sp__title">{{ t('search.heading') }}</span>
-      <button
-        class="rs-pane-close"
-        type="button"
-        :title="t('rightSidebar.hidePane')"
-        @click="emit('close')"
-      >×</button>
+      <div class="sp__head-actions">
+        <button
+          class="rs-pane-close"
+          type="button"
+          :title="settings.language?.startsWith('zh') ? (expandedModal ? '收起为侧栏' : '展开为居中大窗') : (expandedModal ? 'Dock to sidebar' : 'Expand to modal view')"
+          @click="expandedModal = !expandedModal"
+        >{{ expandedModal ? '⤡' : '⤢' }}</button>
+        <button
+          class="rs-pane-close"
+          type="button"
+          :title="t('rightSidebar.hidePane')"
+          @click="emit('close')"
+        >×</button>
+      </div>
     </header>
     <div class="sp__input-wrap">
       <Icons class="sp__input-icon" name="search" :size="14" aria-hidden="true" />
@@ -173,6 +268,14 @@ function onKey(e: KeyboardEvent) {
         spellcheck="false"
         @keydown="onKey"
       />
+      <button
+        type="button"
+        class="sp__mode-btn"
+        :class="{ 'sp__mode-btn--active': titleOnly }"
+        :title="titleOnlyTip"
+        :aria-pressed="titleOnly"
+        @click="titleOnly = !titleOnly"
+      >{{ titleOnlyLabel }}</button>
       <span v-if="loading" class="sp__loading">…</span>
     </div>
     <div v-if="!workspace.currentFolder" class="sp__empty">
@@ -191,15 +294,15 @@ function onKey(e: KeyboardEvent) {
           :class="{ 'sp__file--active': file === activeFilePath }"
         >{{ shortPath(file) }}</div>
         <div
-          v-for="hit in fileHits"
-          :key="hit.line"
+          v-for="item in fileHits"
+          :key="item.idx"
           class="sp__hit"
-          :class="{ 'sp__hit--active': hits.indexOf(hit) === selectedIdx }"
-          @click="openHit(hit)"
-          @mouseenter="selectedIdx = hits.indexOf(hit)"
+          :class="{ 'sp__hit--active': item.idx === selectedIdx }"
+          @click="openHit(item.hit)"
+          @mouseenter="selectedIdx = item.idx"
         >
-          <span class="sp__lineno">L{{ hit.line }}</span>
-          <span class="sp__snippet" v-html="highlight(hit.snippet)"></span>
+          <span class="sp__lineno">L{{ item.hit.line }}</span>
+          <span class="sp__snippet" v-html="highlight(item.hit.snippet)"></span>
         </div>
       </div>
     </div>
@@ -217,6 +320,23 @@ function onKey(e: KeyboardEvent) {
   height: 100%;
   background: var(--bg);
   overflow: hidden;
+}
+.sp--expanded {
+  position: fixed;
+  top: 8vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(760px, 92vw);
+  height: min(640px, 82vh);
+  z-index: var(--z-modal, 200);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg, 12px);
+  box-shadow: var(--sh-pop, 0 20px 50px rgba(0, 0, 0, 0.35));
+}
+.sp__head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 .sp__head {
   display: flex;
@@ -265,6 +385,27 @@ function onKey(e: KeyboardEvent) {
 }
 .sp__input::placeholder {
   color: var(--text-3);
+}
+.sp__mode-btn {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font: 11px var(--font-ui);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.sp__mode-btn:hover {
+  color: var(--text);
+  border-color: var(--text-3);
+}
+.sp__mode-btn--active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
 }
 .sp__loading {
   color: var(--accent);

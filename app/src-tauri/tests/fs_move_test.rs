@@ -5,8 +5,8 @@
 //! as well as through the real filesystem.
 
 use app_lib::commands::{
-    abs_segments, fs_move_inner, fs_rename, lexical_relative, lexical_resolve,
-    rewrite_links_after_move,
+    abs_segments, fs_move_inner, fs_move_with_workspace, fs_rename_with_workspace,
+    lexical_relative, lexical_resolve, rewrite_links_after_move,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -342,9 +342,11 @@ fn renaming_a_note_renames_its_assets_folder_and_the_links() {
     fs::write(root.join("note.assets/a.png"), b"png").unwrap();
     fs::write(root.join("note.md"), "![](note.assets/a.png)\n").unwrap();
 
-    fs_rename(
+    fs_rename_with_workspace(
         root.join("note.md").to_string_lossy().to_string(),
         root.join("renamed.md").to_string_lossy().to_string(),
+        None,
+        true,
     )
     .unwrap();
 
@@ -357,6 +359,48 @@ fn renaming_a_note_renames_its_assets_folder_and_the_links() {
     );
 }
 
+// --------------------------------------------------------------------------
+// #571 — Workspace-wide inbound link auto-update on rename and move
+// --------------------------------------------------------------------------
+
+#[test]
+fn rename_updates_inbound_wikilinks_and_relative_links_skipping_code() {
+    let root = tmp("inbound-rename");
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/OldName.md"), "# Old\n").unwrap();
+    let index_src = concat!(
+        "See [[OldName]], [[OldName#Intro|the intro]], and [[docs/OldName]].\n",
+        "Markdown link: [guide](./docs/OldName.md#Intro) and `[[OldName]]`.\n",
+        "```md\n",
+        "[[OldName]] [keep](./docs/OldName.md)\n",
+        "```\n",
+    );
+    fs::write(root.join("index.md"), index_src).unwrap();
+
+    let ws = root.to_string_lossy().to_string();
+    let updated = fs_rename_with_workspace(
+        root.join("docs/OldName.md").to_string_lossy().to_string(),
+        root.join("docs/NewName.md").to_string_lossy().to_string(),
+        Some(ws),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(updated.len(), 1);
+    let after = fs::read_to_string(root.join("index.md")).unwrap();
+    assert_eq!(
+        after,
+        concat!(
+            "See [[NewName]], [[NewName#Intro|the intro]], and [[docs/NewName]].\n",
+            "Markdown link: [guide](./docs/NewName.md#Intro) and `[[OldName]]`.\n",
+            "```md\n",
+            "[[OldName]] [keep](./docs/OldName.md)\n",
+            "```\n",
+        )
+    );
+}
+
+
 #[test]
 fn renaming_rewrites_percent_encoded_asset_links_too() {
     // 磁盘上的目录名是原文，正文里写的却是编码形式（编辑器写图片链接、
@@ -366,9 +410,11 @@ fn renaming_rewrites_percent_encoded_asset_links_too() {
     fs::write(root.join("我的 笔记.assets/a.png"), b"png").unwrap();
     fs::write(root.join("我的 笔记.md"), "![](我的%20笔记.assets/a.png)\n").unwrap();
 
-    fs_rename(
+    fs_rename_with_workspace(
         root.join("我的 笔记.md").to_string_lossy().to_string(),
         root.join("新 名字.md").to_string_lossy().to_string(),
+        None,
+        true,
     )
     .unwrap();
 
@@ -384,10 +430,65 @@ fn renaming_rewrites_percent_encoded_asset_links_too() {
 fn renaming_a_note_without_assets_is_fine() {
     let root = tmp("rename-plain");
     fs::write(root.join("note.md"), "正文\n").unwrap();
-    fs_rename(
+    fs_rename_with_workspace(
         root.join("note.md").to_string_lossy().to_string(),
         root.join("other.md").to_string_lossy().to_string(),
+        None,
+        true,
     )
     .unwrap();
     assert!(root.join("other.md").is_file());
+}
+
+#[test]
+fn move_updates_inbound_links_across_workspace_and_round_trips_on_undo() {
+    let root = tmp("inbound-move");
+    fs::create_dir_all(root.join("archive")).unwrap();
+    fs::write(root.join("NoteA.md"), "# Note A\n").unwrap();
+    let original_index = "Link: [A](./NoteA.md#sec) and [[NoteA]].\n";
+    fs::write(root.join("index.md"), original_index).unwrap();
+
+    let ws = root.to_string_lossy().to_string();
+    fs_move_with_workspace(
+        root.join("NoteA.md").to_string_lossy().to_string(),
+        root.join("archive/NoteA.md").to_string_lossy().to_string(),
+        Some(ws.clone()),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(root.join("index.md")).unwrap(),
+        "Link: [A](./archive/NoteA.md#sec) and [[NoteA]].\n"
+    );
+
+    // Undo move restores exact original link text
+    fs_move_with_workspace(
+        root.join("archive/NoteA.md").to_string_lossy().to_string(),
+        root.join("NoteA.md").to_string_lossy().to_string(),
+        Some(ws),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(fs::read_to_string(root.join("index.md")).unwrap(), original_index);
+}
+
+#[test]
+fn disabling_update_links_leaves_workspace_references_untouched() {
+    let root = tmp("inbound-disabled");
+    fs::write(root.join("Alpha.md"), "# A\n").unwrap();
+    fs::write(root.join("ref.md"), "[[Alpha]] [a](Alpha.md)\n").unwrap();
+
+    let ws = root.to_string_lossy().to_string();
+    let updated = fs_rename_with_workspace(
+        root.join("Alpha.md").to_string_lossy().to_string(),
+        root.join("Beta.md").to_string_lossy().to_string(),
+        Some(ws),
+        false,
+    )
+    .unwrap();
+
+    assert!(updated.is_empty());
+    assert_eq!(fs::read_to_string(root.join("ref.md")).unwrap(), "[[Alpha]] [a](Alpha.md)\n");
 }

@@ -104,6 +104,12 @@ const modelChoices = computed<string[]>(() => {
       }
     }
   }
+  // #299 — Merge live models fetched from GET {base}/models when available
+  if (probe.value?.ok && probe.value.models.length > 0) {
+    for (const m of probe.value.models) {
+      if (m) out.add(m);
+    }
+  }
   return Array.from(out);
 });
 
@@ -113,6 +119,10 @@ const modelChoices = computed<string[]>(() => {
 const needsKey = computed(() => !currentProviderConfig.value?.keyless);
 /** The self-hosted OpenAI-compatible branch (llama.cpp / LM Studio / vLLM). */
 const isCompat = computed(() => props.provider === 'openai-compat');
+/** #299 — Hosted OpenAI-compatible providers that expose GET {base}/models. */
+const canProbeModels = computed(
+  () => currentProviderConfig.value?.apiFormat === 'openai' && props.provider !== 'ollama',
+);
 
 // ---------------------------------------------------------------------------
 // Ollama detection cache (v4.0 Pillar 5)
@@ -215,9 +225,42 @@ interface ModelProbe {
   error?: string | null;
 }
 
+interface DiscoveredOprProvider {
+  id: string;
+  name: string;
+  base_url: string;
+  models: string[];
+  source: string;
+}
+
 const probe = ref<ModelProbe | null>(null);
 const probing = ref(false);
 let probeDebounce: number | null = null;
+
+// #286 — Open Provider Registry (OPR) & Local AI Runner Auto-Discovery
+const oprProviders = ref<DiscoveredOprProvider[]>([]);
+const oprDiscovering = ref(false);
+const isZh = computed(() => (settingsStore.language || '').startsWith('zh'));
+
+async function discoverOpr(): Promise<void> {
+  if (oprDiscovering.value) return;
+  oprDiscovering.value = true;
+  try {
+    oprProviders.value = await invoke<DiscoveredOprProvider[]>('ai_discover_opr_providers');
+  } catch {
+    oprProviders.value = [];
+  } finally {
+    oprDiscovering.value = false;
+  }
+}
+
+function applyOprProvider(p: DiscoveredOprProvider): void {
+  emit('update:baseUrl', p.base_url);
+  if (p.models.length > 0) {
+    emit('update:model', p.models[0]);
+  }
+  scheduleCompatProbe(0);
+}
 
 async function probeCompat(): Promise<void> {
   const url = probeUrl.value;
@@ -335,15 +378,19 @@ async function refreshAll(): Promise<void> {
 
 watch(
   () => props.provider,
-  (p) => {
+  async (p) => {
     keyInput.value = '';
     status.value = null;
-    refreshHasKey(p);
+    probe.value = null;
+    await refreshHasKey(p);
     // Re-probe Ollama on every switch INTO ollama (force = false uses
     // the 30s cache so back-and-forth flips don't spam the server).
     if (p === 'ollama') void detectOllama(false);
-    if (p === 'openai-compat') {
-      probe.value = null;
+    if (p === 'openai-compat') void discoverOpr();
+    if (
+      p === 'openai-compat' ||
+      (canProbeModels.value && (hasKey.value[p] || p === 'openrouter'))
+    ) {
       scheduleCompatProbe(0);
     }
   },
@@ -355,7 +402,10 @@ let baseUrlDebounce: number | null = null;
 watch(
   () => props.baseUrl,
   () => {
-    if (isCompat.value) {
+    if (
+      isCompat.value ||
+      (canProbeModels.value && (hasKey.value[props.provider] || props.provider === 'openrouter'))
+    ) {
       scheduleCompatProbe();
       return;
     }
@@ -368,10 +418,16 @@ watch(
   },
 );
 
-onMounted(() => {
-  void refreshAll();
+onMounted(async () => {
+  await refreshAll();
   if (props.provider === 'ollama') void detectOllama(false);
-  if (isCompat.value) scheduleCompatProbe(0);
+  if (isCompat.value) void discoverOpr();
+  if (
+    isCompat.value ||
+    (canProbeModels.value && (hasKey.value[props.provider] || props.provider === 'openrouter'))
+  ) {
+    scheduleCompatProbe(0);
+  }
 });
 
 onUnmounted(() => {
@@ -422,6 +478,7 @@ async function saveKey(): Promise<void> {
     keyInput.value = '';
     await refreshHasKey(props.provider);
     status.value = { kind: 'ok', msg: t('ai.verified') + ' · ' + verifiedMsg };
+    if (canProbeModels.value) scheduleCompatProbe(0);
   } catch (e) {
     status.value = { kind: 'err', msg: String(e) };
   } finally {
@@ -603,7 +660,8 @@ function onProviderChange(ev: Event): void {
   emit('update:provider', sel);
   const cfg = providerById(sel);
   if (cfg) {
-    emit('update:model', cfg.defaultModel);
+    const remembered = settingsStore.aiModels?.[sel]?.trim();
+    emit('update:model', remembered || cfg.defaultModel);
     emit('update:baseUrl', cfg.defaultBaseUrl || '');
   }
   // Clear any stale verify status from the previous provider.
@@ -655,6 +713,33 @@ function onProviderChange(ev: Event): void {
         <datalist :id="`ai-model-options-${provider}`">
           <option v-for="m in modelChoices" :key="m" :value="m" />
         </datalist>
+      </div>
+      <!-- #299 — Quick model dropdown selector + live /models refresh for hosted providers -->
+      <div
+        v-if="!isCompat && provider !== 'ollama' && modelChoices.length > 0"
+        class="ai-settings__row"
+      >
+        <span class="ai-settings__label">{{ t('ai.compat.pickModel') }}</span>
+        <div class="ai-settings__keyrow">
+          <select
+            class="ai-settings__input"
+            :value="modelChoices.includes(model) ? model : ''"
+            @change="emit('update:model', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="" disabled>—</option>
+            <option v-for="m in modelChoices" :key="m" :value="m">{{ m }}</option>
+          </select>
+          <button
+            v-if="canProbeModels"
+            type="button"
+            class="ai-settings__btn"
+            :disabled="probing"
+            :title="t('ai.ollama.refresh')"
+            @click="probeCompat()"
+          >
+            ↻ {{ t('ai.ollama.refresh') }}
+          </button>
+        </div>
       </div>
       <p v-if="currentProviderConfig?.modelHint" class="ai-settings__hint">
         {{ t('ai.modelHintPrefix') }}: {{ currentProviderConfig.modelHint }}
@@ -768,6 +853,38 @@ function onProviderChange(ev: Event): void {
             @click="probeCompat()"
           >
             {{ t('ai.ollama.refresh') }}
+          </button>
+
+          <button
+            type="button"
+            class="ai-settings__btn"
+            :disabled="oprDiscovering"
+            @click="discoverOpr()"
+          >
+            {{ oprDiscovering
+              ? (isZh ? '正在扫描 OPR…' : 'Scanning OPR…')
+              : (isZh ? '⚡ 自动发现本地服务 (OPR)' : '⚡ Discover Local Runners (OPR)') }}
+          </button>
+        </div>
+
+        <div
+          v-if="oprProviders.length > 0"
+          class="ai-settings__row"
+          style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px;"
+        >
+          <span class="ai-settings__hint" style="margin: 0;">
+            {{ isZh ? '已发现本地 AI 服务 (OPR)：' : 'Discovered local runners (OPR):' }}
+          </span>
+          <button
+            v-for="op in oprProviders"
+            :key="op.base_url"
+            type="button"
+            class="ai-settings__btn"
+            style="font-size: 11px; padding: 3px 8px;"
+            :title="`${op.base_url}${op.models.length ? ' · ' + op.models.join(', ') : ''}`"
+            @click="applyOprProvider(op)"
+          >
+            {{ op.name }} ({{ op.base_url.replace(/^https?:\/\//, '') }}<template v-if="op.models.length"> · {{ op.models.length }}</template>)
           </button>
         </div>
 
@@ -1176,12 +1293,20 @@ select.ai-settings__input {
 }
 .ai-settings__keystatus {
   display: flex;
-  align-items: center;
+  /* Narrow panels: the verification message drops under the badge instead of
+     squeezing it to a one-character column. */
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 10px;
   padding-left: 120px;
   font-size: 11px;
 }
 .ai-settings__pill {
+  /* A flex item shrinks to its min-content width, which for "○ 未设置密钥"
+     is a single glyph — the badge then stacks one character per line.
+     Badges are short and fixed-shape: never shrink them. */
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
@@ -1199,6 +1324,16 @@ select.ai-settings__input {
 .ai-settings__pill--err {
   color: #dc2626;
   border-color: rgba(220, 38, 38, 0.4);
+}
+.ai-settings__msg {
+  /* Provider errors are one long unbroken token (a JSON body, a URL), so the
+     default wrapping leaves them running past the card and getting clipped.
+     Let them break anywhere and wrap onto extra lines instead. */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
 }
 .ai-settings__msg--ok { color: #16a34a; }
 .ai-settings__msg--err { color: #dc2626; }

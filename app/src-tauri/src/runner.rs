@@ -84,14 +84,16 @@ mod collections;
 #[path = "cloud_folder.rs"]
 mod cloud_folder;
 
+// #458 / #501 / #510 — WebDAV, local cloud vault, and cloud drive API sync.
+#[path = "webdav_sync.rs"]
+mod webdav_sync;
+
 // v2.6.3 workspace-level E2EE.
 #[path = "crypto.rs"]
 mod crypto;
 
 // #458 — WebDAV workspace sync. Same dual-root requirement as github_sync:
 // the desktop binary's handler list has to name the module too.
-#[path = "webdav_sync.rs"]
-mod webdav_sync;
 
 // v2.3 dev WebDriver bridge — debug builds only. Module file itself is
 // `#[cfg(debug_assertions)]`-gated, so this `mod` line is too.
@@ -457,6 +459,11 @@ fn fit_main_window_once(win: &tauri::WebviewWindow) {
         return;
     }
     clamp_window_to_monitor(win);
+    // #633 — Ensure Windows 11 taskbar / Alt+Tab always receives WM_SETICON
+    // when revealing a frameless hidden-at-startup window.
+    if let Some(icon) = win.app_handle().default_window_icon().cloned() {
+        let _ = win.set_icon(icon);
+    }
     let _ = win.show();
     let _ = win.unminimize();
     let _ = win.set_focus();
@@ -491,29 +498,35 @@ fn clamp_window_to_monitor(win: &tauri::WebviewWindow) {
         return;
     }
 
-    // The macOS global menu bar overlays the top of the screen, so reserve a
-    // strip for it. Windows / Linux have no such bar — reserving there made a
-    // legitimately near-full-height restored window get shrunk by 40px.
-    #[cfg(target_os = "macos")]
-    const MENU_BAR_RESERVE: i32 = 40;
-    #[cfg(not(target_os = "macos"))]
-    const MENU_BAR_RESERVE: i32 = 0;
     const MIN_W: i32 = 480;
     const MIN_H: i32 = 360;
+    // Windows's invisible resize border makes `outer_size()` / `outer_position()`
+    // extend ~7px past the visible frame on each side: a window docked at the
+    // left edge of the screen reports `x = -7`, and one touching the taskbar
+    // reports a bottom edge a few pixels past `work_area`. Without slack, those
+    // legitimate positions fail the bounds check and snap back to screen centre
+    // on every launch (#517).
+    const EDGE_SLACK: i32 = 8;
 
     let Ok(Some(monitor)) = win.current_monitor() else { return; };
     let scale = monitor.scale_factor();
-    let mon_w = (monitor.size().width as f64 / scale).round() as i32;
-    let mon_h = (monitor.size().height as f64 / scale).round() as i32;
-    let mon_x = (monitor.position().x as f64 / scale).round() as i32;
-    let mon_y = (monitor.position().y as f64 / scale).round() as i32;
+    // #517 — clamp against `work_area` (screen minus Windows taskbar / macOS
+    // dock+menubar), not the raw panel size `monitor.size()`. Against the raw
+    // size a tall window whose bottom sat under the taskbar passed the clamp,
+    // left its status bar and resize grip unreachable behind the taskbar, and
+    // looked as if the app had forgotten the size the user set.
+    let work = monitor.work_area();
+    let mon_w = (work.size.width as f64 / scale).round() as i32;
+    let mon_h = (work.size.height as f64 / scale).round() as i32;
+    let mon_x = (work.position.x as f64 / scale).round() as i32;
+    let mon_y = (work.position.y as f64 / scale).round() as i32;
 
     let Ok(outer) = win.outer_size() else { return; };
     let cur_w = (outer.width as f64 / scale).round() as i32;
     let cur_h = (outer.height as f64 / scale).round() as i32;
 
-    let max_w = mon_w;
-    let max_h = mon_h - MENU_BAR_RESERVE;
+    let max_w = mon_w.max(MIN_W);
+    let max_h = mon_h.max(MIN_H);
     let new_w = cur_w.clamp(MIN_W, max_w);
     let new_h = cur_h.clamp(MIN_H, max_h);
     let size_clamped = new_w != cur_w || new_h != cur_h;
@@ -523,12 +536,11 @@ fn clamp_window_to_monitor(win: &tauri::WebviewWindow) {
     let cur_y = (outer_pos.y as f64 / scale).round() as i32;
 
     // Position is "off-monitor" if any edge of the window falls outside the
-    // current monitor's work area (top edge above the menu bar reserve, or
-    // any other edge past the monitor bounds for the post-clamp size).
-    let position_invalid = cur_x < mon_x
-        || cur_x + new_w > mon_x + mon_w
-        || cur_y < mon_y + MENU_BAR_RESERVE
-        || cur_y + new_h > mon_y + mon_h;
+    // current monitor's work area.
+    let position_invalid = cur_x < mon_x - EDGE_SLACK
+        || cur_x + new_w > mon_x + mon_w + EDGE_SLACK
+        || cur_y < mon_y - EDGE_SLACK
+        || cur_y + new_h > mon_y + mon_h + EDGE_SLACK;
 
     if size_clamped {
         let _ = win.set_size(tauri::LogicalSize::new(new_w as u32, new_h as u32));
@@ -536,8 +548,7 @@ fn clamp_window_to_monitor(win: &tauri::WebviewWindow) {
 
     if size_clamped || position_invalid {
         let new_x = mon_x + (mon_w - new_w) / 2;
-        let centered_y = mon_y + (mon_h - new_h) / 2;
-        let new_y = centered_y.max(mon_y + MENU_BAR_RESERVE);
+        let new_y = (mon_y + (mon_h - new_h) / 2).max(mon_y);
         let _ = win.set_position(tauri::LogicalPosition::new(new_x, new_y));
     }
 }
@@ -697,13 +708,19 @@ pub fn run_with(initial_file: Option<String>) {
             commands::print_webview,
             commands::print_webview_to_pdf,
             commands::copy_file,
+            commands::download_and_install_update,
+            commands::cancel_update_download,
             image_upload::upload_image,
             commands::list_dir,
             commands::fs_create_file,
             commands::fs_create_dir,
             commands::fs_delete,
             commands::fs_dir_exists,
+            commands::fs_files_exist,
+            commands::fs_file_exists,
             commands::webview_runtime_version,
+            commands::clipboard_read_text_fallback,
+            commands::vim_switch_input_method,
             commands::fs_rename,
             commands::fs_move,
             commands::fs_list_dirs,
@@ -730,6 +747,7 @@ pub fn run_with(initial_file: Option<String>) {
             workspace_index::workspace_index_referenced_by,
             commands::update_frontmatter_property,
             commands::delete_frontmatter_property,
+            commands::convert_image_format,
             spellcheck::spellcheck_init,
             spellcheck::spellcheck_check,
             spellcheck::spellcheck_suggest,
@@ -762,11 +780,15 @@ pub fn run_with(initial_file: Option<String>) {
             acp::acp_set_mode,
             acp::acp_list_sessions,
             acp::acp_read_session,
+            ai_proxy::ai_discover_opr_providers,
             pandoc::pandoc_detect,
             pandoc::pandoc_export,
             git_history::git_workspace_status,
             git_history::git_init_workspace,
             git_history::git_auto_commit,
+            git_history::git_stage,
+            git_history::git_cli_pull,
+            git_history::git_cli_push,
             git_history::git_file_history,
             git_history::git_file_diff,
             git_history::git_file_at_version,
@@ -791,6 +813,7 @@ pub fn run_with(initial_file: Option<String>) {
             themes::theme_install,
             themes::theme_uninstall,
             themes::theme_list_installed,
+            themes::theme_get_dir,
             cjk_proofread::cjk_proofread,
             github_sync::github_set_token,
             github_sync::github_clear_token,
@@ -818,6 +841,12 @@ pub fn run_with(initial_file: Option<String>) {
             github_sync::gitea_user,
             github_sync::gitea_list_repos,
             github_sync::gitea_create_vault_repo,
+            github_sync::gitee_set_token,
+            github_sync::gitee_clear_token,
+            github_sync::gitee_has_token,
+            github_sync::gitee_user,
+            github_sync::gitee_list_repos,
+            github_sync::gitee_create_vault_repo,
             cloud_folder::cloud_folder_detect,
             cloud_folder::device_id_get_or_create,
             cloud_folder::session_save,
@@ -826,6 +855,19 @@ pub fn run_with(initial_file: Option<String>) {
             webdav_sync::webdav_test_connection,
             webdav_sync::webdav_push_workspace,
             webdav_sync::webdav_pull_workspace,
+            webdav_sync::cloud_vault_detect_local_dirs,
+            webdav_sync::cloud_vault_push_workspace,
+            webdav_sync::cloud_vault_pull_workspace,
+            webdav_sync::cloud_api_build_quick_auth_url,
+            webdav_sync::cloud_api_start_device_auth,
+            webdav_sync::cloud_api_poll_device_auth,
+            webdav_sync::cloud_api_push_workspace,
+            webdav_sync::cloud_api_pull_workspace,
+            webdav_sync::sync_save_file_snapshot,
+            webdav_sync::sync_list_file_versions,
+            webdav_sync::sync_get_file_version_diff,
+            webdav_sync::sync_restore_file_version,
+            webdav_sync::sync_prune_file_versions,
             crypto::crypto_status,
             crypto::crypto_set_passphrase,
             crypto::crypto_clear_passphrase,
@@ -992,6 +1034,9 @@ pub fn run_with(initial_file: Option<String>) {
             // run-loop event match (`RunEvent::Ready` + 400ms timer) acts
             // as a fallback when there's no saved state to restore.
             if let Some(win) = app.get_webview_window("main") {
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    let _ = win.set_icon(icon);
+                }
                 let win_clone = win.clone();
                 win.on_window_event(move |event| {
                     if matches!(

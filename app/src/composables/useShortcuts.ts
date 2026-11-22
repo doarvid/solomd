@@ -90,7 +90,21 @@ export function useShortcuts(hooks: Hooks = {}) {
     if (list.length < 2) return;
     const cur = list.findIndex((t) => t.id === tabs.activeId);
     const idx = cur < 0 ? 0 : (cur + offset + list.length) % list.length;
+    tabs.endMruCycle();
     tiles.setActiveTab(tiles.focusedPaneId, list[idx].id);
+  }
+
+  /** #508 — switch to the most recently used tab (`Ctrl+Tab` / `Ctrl+Shift+Tab`).
+   *  When triggered while `Ctrl` / `Meta` is held down (`keepCycleOpen = true`),
+   *  repeated presses step through the MRU snapshot until the modifier key is
+   *  released (`onKeyup` / `onBlur`), so a single `Ctrl+Tab` toggles back and
+   *  forth between the two most recently edited tabs while holding `Ctrl` and
+   *  pressing `Tab` multiple times reaches older tabs. */
+  let mruKeydownActive = false;
+  function activateMruTab(offset: 1 | -1) {
+    const targetId = tabs.nextMruTabId(offset, mruKeydownActive);
+    if (!targetId) return;
+    tiles.setActiveTab(tiles.focusedPaneId, targetId);
   }
 
   /**
@@ -106,14 +120,17 @@ export function useShortcuts(hooks: Hooks = {}) {
     'file.new': () => void files.newFile(),
     'file.newText': () => void files.newTextFile(),
     'file.newInFolder': () => runById('file.newInFolder'),
+    'file.newFromTemplate': () => runById('file.newFromTemplate'),
     'file.open': () => void files.openFile(),
     'file.import': () => void files.importDocuments(),
     'file.save': () => void files.saveActive(),
     'file.saveAs': () => void files.saveActiveAs(),
+    'file.saveAll': () => void files.saveAll(),
     'file.closeTab': () => {
       if (tabs.activeId) files.closeTabSafe(tabs.activeId);
     },
     'file.openExternal': () => runById('file.openExternal'),
+    'file.copyPath': () => runById('file.copyPath'),
     'tab.reopenClosed': () => void files.reopenClosedTab(),
     'window.new': () => runById('window.new'),
     'file.exit': () => void getCurrentWindow().close(),
@@ -132,6 +149,12 @@ export function useShortcuts(hooks: Hooks = {}) {
     'editor.deleteWord': () => editorCommand('deleteWord'),
     'editor.selectLine': () => editorCommand('selectLine'),
     'editor.jumpToSelection': () => editorCommand('jumpToSelection'),
+    'editor.selectNextOccurrence': () => editorCommand('selectNextOccurrence'),
+    'editor.selectAllOccurrences': () => editorCommand('selectAllOccurrences'),
+    'editor.addCursorAbove': () => editorCommand('addCursorAbove'),
+    'editor.addCursorBelow': () => editorCommand('addCursorBelow'),
+    'editor.cursorBack': () => editorCommand('cursorBack'),
+    'editor.cursorForward': () => editorCommand('cursorForward'),
     'heading.promote': () => editorCommand('headingPromote'),
     'heading.demote': () => editorCommand('headingDemote'),
     'heading.paragraph': () => editorCommand('headingParagraph'),
@@ -151,6 +174,7 @@ export function useShortcuts(hooks: Hooks = {}) {
     // and PNG stay palette-only — they're one-off exports.
     'export.copyMd': () => void exporter.copyAsMarkdown(),
     'export.pdfPrint': () => runById('export.pdfPrint'),
+    'export.custom': () => runById('export.custom'),
     'file.print': () => void exporter.printDocument(),
 
     'view.cycleView': () => settings.cycleViewMode(),
@@ -166,6 +190,8 @@ export function useShortcuts(hooks: Hooks = {}) {
     'view.toggleOutline': () => runById('view.toggleOutline'),
     'view.toggleInspector': () => settings.toggleInspector(),
     'view.toggleToolbar': () => settings.toggleToolbarHidden(),
+    'view.toggleFormatBar': () => settings.toggleFormatBar(),
+    'view.toggleAlwaysOnTop': () => settings.toggleAlwaysOnTop(),
     'view.slideshow': () => runById('view.slideshow'),
     'view.toggleFocusMode': () => settings.toggleFocusMode(),
     'view.toggleTypewriter': () => settings.toggleTypewriterMode(),
@@ -187,18 +213,26 @@ export function useShortcuts(hooks: Hooks = {}) {
       if (settings.ragEnabled) hooks.openRagSearch?.();
       else hooks.openGlobalSearch?.();
     },
-    // Only the preview pane needs our own find; anywhere else the event must
-    // fall through to CodeMirror's.
+    // Only the preview / reading pane needs our own find; anywhere else the
+    // event must fall through to CodeMirror's (or the Windows plain editor's).
     'editor.find': () => {
-      if (settings.viewMode !== 'preview' || tabs.activeTab?.language !== 'markdown') return false;
+      if (
+        (settings.viewMode !== 'preview' && settings.viewMode !== 'reading') ||
+        tabs.activeTab?.language !== 'markdown'
+      ) {
+        return false;
+      }
       window.dispatchEvent(
         new CustomEvent('solomd:preview-search', { detail: { paneId: tiles.focusedPaneId } }),
       );
     },
     // Opens the same find bar with the caret in the replace field. The
-    // preview has no replace, so there it is the preview's find.
+    // preview / reading view has no replace, so there it is the preview's find.
     'editor.replace': () => {
-      if (settings.viewMode === 'preview' && tabs.activeTab?.language === 'markdown') {
+      if (
+        (settings.viewMode === 'preview' || settings.viewMode === 'reading') &&
+        tabs.activeTab?.language === 'markdown'
+      ) {
         window.dispatchEvent(
           new CustomEvent('solomd:preview-search', { detail: { paneId: tiles.focusedPaneId } }),
         );
@@ -210,6 +244,8 @@ export function useShortcuts(hooks: Hooks = {}) {
     },
     'tab.prev': () => activateTabByOffset(-1),
     'tab.next': () => activateTabByOffset(1),
+    'tab.mru': () => activateMruTab(1),
+    'tab.mruPrev': () => activateMruTab(-1),
     'tile.splitRight': () => tiles.splitPane(tiles.focusedPaneId, 'horizontal'),
     'tile.splitDown': () => tiles.splitPane(tiles.focusedPaneId, 'vertical'),
     'tile.focusNext': () => tiles.focusNextPane(),
@@ -218,13 +254,16 @@ export function useShortcuts(hooks: Hooks = {}) {
     'settings.open': () => hooks.openSettings?.(),
     'help.markdown': () => hooks.openHelp?.(),
     'proofread.cjk': () => hooks.openCjkProofread?.(),
-    'daily.openToday': () => runById('daily.openToday'),
+    'daily.openToday': () => {
+      if (!settings.dailyNotesEnabled) return false;
+      runById('daily.openToday');
+    },
     // v4.6 F6: inside the inbox context with auto-advance on, this marks the
     // note organized and jumps to the next one; elsewhere it degrades to the
     // plain front-matter toggle, and it's off entirely when opted out.
     'inbox.toggle': () => {
-      if (settings.inboxWorkflowEnabled) void inbox.organizeAndAdvance();
-      else inbox.toggleActive();
+      if (!settings.inboxWorkflowEnabled) return false;
+      void inbox.organizeAndAdvance();
     },
     // A no-op while a session runs, so the shortcut can't restart one and
     // lose the writing window in progress.
@@ -252,6 +291,29 @@ export function useShortcuts(hooks: Hooks = {}) {
       void invoke('open_devtools_window').catch(() => {});
       return;
     }
+    // #610 — On Windows/Linux non-US layouts (German QWERTZ, French AZERTY…),
+    // `AltGr` sends `ctrlKey: true, altKey: true` (`AltGraph`) to type third-level
+    // characters like `@`, `{`, `[`, `]`, `}`, `\`, `~`, `|`, `€`. Never hijack
+    // printable `AltGr` symbols when an editable input or editor has focus.
+    if (
+      typeof e.getModifierState === 'function' &&
+      e.getModifierState('AltGraph') &&
+      !e.metaKey &&
+      e.key &&
+      e.key.length === 1 &&
+      !/^[a-zA-Z0-9]$/.test(e.key)
+    ) {
+      const el = (e.target as HTMLElement | null) ?? (document.activeElement as HTMLElement | null);
+      if (
+        el &&
+        (el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.isContentEditable ||
+          !!el.closest('.cm-content'))
+      ) {
+        return;
+      }
+    }
     const raw = eventToCombo(e);
     if (!raw) return;
     // A key event without a `code` (synthetic input, some remote-desktop and
@@ -278,12 +340,22 @@ export function useShortcuts(hooks: Hooks = {}) {
     // Pomodoro session, AI rewrite opening its overlay twice. Only file /
     // window / navigation commands still run on top of it.
     const inEditor = e.target instanceof Element && !!e.target.closest('.cm-editor');
-    if (e.defaultPrevented && inEditor && !appRunsAfterEditor(actionId, combo)) return;
+    if (
+      e.defaultPrevented &&
+      inEditor &&
+      ((settings.vimMode && /^Mod\+[DUEYBF]$/i.test(combo)) ||
+        !appRunsAfterEditor(actionId, combo))
+    ) {
+      return;
+    }
     // Menu commands made bindable for the menus' sake (export, quick capture,
     // open folder…) need no handler of their own: they run as the palette does.
     const run = actions[actionId] ?? (commands.some((c) => c.id === actionId) ? () => runById(actionId) : undefined);
     if (!run) return;
-    if (run() === false) return; // action declined — leave the event alone
+    mruKeydownActive = e.ctrlKey || e.metaKey;
+    const result = run();
+    mruKeydownActive = false;
+    if (result === false) return; // action declined — leave the event alone
     e.preventDefault();
   }
 
@@ -305,12 +377,16 @@ export function useShortcuts(hooks: Hooks = {}) {
     if (e.code) downCodes.add(e.code);
   }
   function onKeyup(e: KeyboardEvent) {
+    if (!e.ctrlKey && !e.metaKey) {
+      tabs.endMruCycle();
+    }
     const seen = downCodes.delete(e.code);
-    if (seen || !keyupFallback || !e.ctrlKey || e.metaKey || !e.code) return;
+    if (seen || !keyupFallback || (!e.ctrlKey && !e.altKey) || e.metaKey || !e.code) return;
     handler(e);
   }
   function onBlur() {
     downCodes.clear();
+    tabs.endMruCycle();
   }
 
   /**

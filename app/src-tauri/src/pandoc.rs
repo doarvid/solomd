@@ -62,6 +62,16 @@ pub struct ExportArgs {
     /// responsible for shell-safety. We do **not** invoke a shell, so each
     /// element is a single argv entry.
     pub extra_args: Vec<String>,
+    /// #560 — folders Pandoc may resolve relative resources (images, includes)
+    /// from. The Markdown we hand it is written to the system temp dir, so
+    /// without this `![](assets/pic.png)` is looked up next to the temp file,
+    /// fails, and Pandoc quietly drops the picture from the EPUB/DOCX.
+    #[serde(default)]
+    pub resource_paths: Vec<String>,
+    /// #579 / #583 — Optional inline CSS stylesheet written to a temp `.css`
+    /// file and passed via `--css=<tmp_css>` (used for EPUB table & code styling).
+    #[serde(default)]
+    pub css_content: Option<String>,
 }
 
 /// Look up `pandoc` on PATH. We prefer the `which`/`where` shellouts here
@@ -175,10 +185,26 @@ pub fn pandoc_export_inner(args: ExportArgs) -> Result<(), String> {
     std::fs::write(&tmp_path, args.input_markdown.as_bytes())
         .map_err(|e| format!("could not write temp input file: {e}"))?;
 
+    let tmp_css_path = if let Some(css) = args.css_content.as_deref().filter(|s| !s.trim().is_empty()) {
+        let p = tmp_dir.join(format!("solomd-pandoc-{stamp}.css"));
+        std::fs::write(&p, css.as_bytes())
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("could not write temp css file: {e}")
+            })?;
+        Some(p)
+    } else {
+        None
+    };
+
     // Build argv.
     let mut cmd = no_window_command(&pandoc_path);
     cmd.arg(&tmp_path);
     cmd.arg("-o").arg(&args.output_path);
+
+    if let Some(ref css_p) = tmp_css_path {
+        cmd.arg(format!("--css={}", css_p.to_string_lossy()));
+    }
 
     if let Some(bib) = args.bibliography.as_deref().filter(|s| !s.is_empty()) {
         cmd.arg("--citeproc");
@@ -192,20 +218,37 @@ pub fn pandoc_export_inner(args: ExportArgs) -> Result<(), String> {
         cmd.arg(format!("--template={tpl}"));
     }
 
+    // #560 — resolve the note's relative images (and any other resource) from
+    // the folders it was written in, not from the temp dir the Markdown sits
+    // in. `join_paths` uses the platform's search-path separator, which is the
+    // same one Pandoc splits `--resource-path` on.
+    if !args.resource_paths.is_empty() {
+        if let Ok(joined) = std::env::join_paths(
+            args.resource_paths
+                .iter()
+                .filter(|p| !p.is_empty())
+                .map(std::path::Path::new),
+        ) {
+            cmd.arg(format!("--resource-path={}", joined.to_string_lossy()));
+        }
+    }
+
     for extra in &args.extra_args {
         if !extra.is_empty() {
             cmd.arg(extra);
         }
     }
 
-    // Make sure pandoc resolves relative paths (e.g. images) from the
-    // *output* directory rather than our temp dir. `--resource-path` would
-    // be cleaner but requires the user's source directory which we don't
-    // have at this layer; the temp dir + absolute output_path gets us 95%.
+    // Images still resolve through `--resource-path` above; the output
+    // directory is on the path as well so a note that writes resources next to
+    // its export keeps working.
     let exec_result = cmd.output();
 
-    // Always clean up the temp file, even on failure.
+    // Always clean up the temp file(s), even on failure.
     let _ = std::fs::remove_file(&tmp_path);
+    if let Some(ref css_p) = tmp_css_path {
+        let _ = std::fs::remove_file(css_p);
+    }
 
     let out = exec_result.map_err(|e| format!("failed to run pandoc: {e}"))?;
     if !out.status.success() {

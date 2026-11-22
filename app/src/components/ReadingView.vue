@@ -14,15 +14,34 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import Preview from './Preview.vue';
 import Icon from './Icons.vue';
 import { useTabsStore } from '../stores/tabs';
+import { useTilesStore } from '../stores/tiles';
 import { useSettingsStore } from '../stores/settings';
+import { useFiles } from '../composables/useFiles';
 import { useI18n } from '../i18n';
-import { forceWinChromePreview, isWindowsDesktop } from '../lib/platform';
+import { forceWinChromePreview, isMacOS, isWindowsDesktop } from '../lib/platform';
 
 const tabs = useTabsStore();
+const tiles = useTilesStore();
 const settings = useSettingsStore();
+const files = useFiles();
 const { t } = useI18n();
 
 const tab = computed(() => tabs.activeTab);
+const isMac = isMacOS();
+const previewRef = ref<InstanceType<typeof Preview> | null>(null);
+
+function onReadingSearchEvent() {
+  previewRef.value?.openSearch?.();
+}
+
+function selectReadingTab(id: string) {
+  tabs.activate(id);
+  tiles.setActiveTab(tiles.focusedPaneId, id);
+}
+
+function closeReadingTab(id: string) {
+  files.closeTabSafe(id);
+}
 
 function exit() {
   settings.exitReadingMode();
@@ -61,6 +80,7 @@ function winToggleMax() {
   if (hasTauriShell) void getCurrentWindow().toggleMaximize();
 }
 onMounted(async () => {
+  window.addEventListener('solomd:preview-search', onReadingSearchEvent);
   if (!winControls || !hasTauriShell) return;
   await refreshMaximized();
   try {
@@ -70,6 +90,7 @@ onMounted(async () => {
   }
 });
 onBeforeUnmount(() => {
+  window.removeEventListener('solomd:preview-search', onReadingSearchEvent);
   unlistenResize?.();
   unlistenResize = null;
 });
@@ -77,6 +98,36 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="reading-view" data-reading-view>
+    <!-- #145: Hide the tab bar when only a single document is open for full immersion;
+         show the tab strip when multiple documents are open so the user can switch tabs
+         directly inside reading mode. -->
+    <div
+      v-if="tabs.tabs.length > 1"
+      class="reading-view__tabs"
+      :class="{ 'reading-view__tabs--mac': isMac }"
+      data-tauri-drag-region
+    >
+      <div class="reading-view__tab-strip">
+        <button
+          v-for="item in tabs.tabs"
+          :key="item.id"
+          type="button"
+          class="reading-view__tab"
+          :class="{ 'reading-view__tab--active': item.id === tabs.activeId }"
+          :title="item.filePath || item.fileName"
+          @click="selectReadingTab(item.id)"
+        >
+          <span class="reading-view__tab-title">{{ item.fileName.replace(/\.md$/i, '') || item.fileName }}</span>
+          <span
+            v-if="tabs.tabs.length > 1"
+            class="reading-view__tab-close"
+            role="button"
+            aria-label="Close tab"
+            @click.stop="closeReadingTab(item.id)"
+          >×</span>
+        </button>
+      </div>
+    </div>
     <div class="reading-view__controls">
       <button
         v-if="winControls"
@@ -119,6 +170,7 @@ onBeforeUnmount(() => {
     </div>
     <div v-if="tab" class="reading-view__doc">
       <Preview
+        ref="previewRef"
         :source="tab.content"
         :file-path="tab.filePath"
         :tab-id="tab.id"
@@ -141,6 +193,68 @@ onBeforeUnmount(() => {
   min-width: 0;
   background: var(--bg);
 }
+.reading-view__tabs {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 4px 140px 4px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-sidebar, var(--bg)) 70%, transparent);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.reading-view__tabs--mac {
+  padding-left: 80px;
+}
+.reading-view__tab-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.reading-view__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.reading-view__tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reading-view__tab-close {
+  flex: none;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.55;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+.reading-view__tab-close:hover {
+  opacity: 1;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.reading-view__tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.reading-view__tab--active {
+  color: var(--text);
+  font-weight: 600;
+  background: var(--bg-elev);
+  border-color: var(--border);
+}
 .reading-view__doc {
   flex: 1;
   display: flex;
@@ -157,7 +271,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   /* Stay clear of iOS notch / home-indicator areas */
-  top: max(14px, env(safe-area-inset-top, 0px));
+  top: max(14px, env(safe-area-inset-top, 0px), var(--android-safe-top, 0px));
   right: max(18px, env(safe-area-inset-right, 0px));
 }
 .reading-view__winbtn {

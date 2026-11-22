@@ -25,6 +25,42 @@ pub struct SafEntry {
     pub is_dir: bool,
 }
 
+/// #611 — Status of Android's MANAGE_EXTERNAL_STORAGE ("All Files Access") on sideload APKs.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SafAllFilesAccessStatus {
+    pub supported: bool,
+    pub granted: bool,
+}
+
+/// #611 — Check whether MANAGE_EXTERNAL_STORAGE is declared in this APK and granted.
+#[tauri::command]
+pub fn saf_all_files_access_status() -> Result<SafAllFilesAccessStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        imp::all_files_access_status()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(SafAllFilesAccessStatus {
+            supported: false,
+            granted: true,
+        })
+    }
+}
+
+/// #611 — Open Android's system "All Files Access" settings screen for SoloMD.
+#[tauri::command]
+pub fn saf_request_all_files_access() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        imp::request_all_files_access()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(())
+    }
+}
+
 /// Launch the system folder picker (ACTION_OPEN_DOCUMENT_TREE). Fire-and-forget;
 /// the frontend polls `saf_poll_picked` for the result.
 #[tauri::command]
@@ -200,6 +236,21 @@ pub fn saf_create(
     }
 }
 
+/// #608 — Overwrite a standalone `content://` URI with UTF-8 text via JNI
+/// `ContentResolver` (fallback when `@tauri-apps/plugin-fs` rejects OEM URIs).
+#[tauri::command]
+pub fn saf_write_content_uri(uri: String, content: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        imp::write_content_uri_bytes(&uri, content.as_bytes())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (uri, content);
+        Err("SAF is Android-only".into())
+    }
+}
+
 /// Delete a document (file or empty directory).
 #[tauri::command]
 pub fn saf_delete(tree_uri: String, doc_id: String) -> Result<(), String> {
@@ -236,17 +287,25 @@ pub fn android_poll_print_finished() -> Result<bool, String> {
 
 #[cfg(target_os = "android")]
 mod imp {
-    use super::SafEntry;
+    use super::{SafAllFilesAccessStatus, SafEntry};
     use jni::objects::{JObject, JString, JValue};
     use jni::JavaVM;
 
     const CLS: &str = "app/solomd/MainActivity";
+    const CLS_DOT: &str = "app.solomd.MainActivity";
 
     fn with_env<T>(f: impl FnOnce(&mut jni::JNIEnv) -> Result<T, String>) -> Result<T, String> {
         let ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        f(&mut env)
+        let out = f(&mut env);
+        // #611 — Never return to WebView's `@JavascriptInterface Ipc.postMessage`
+        // with a pending Java exception on JNIEnv; Chromium's JavaBridge otherwise
+        // throws "Error invoking postMessage: Java exception was raised during method invocation".
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+        }
+        out
     }
 
     fn check_exc(env: &mut jni::JNIEnv, what: &str) -> Result<(), String> {
@@ -257,6 +316,37 @@ mod imp {
         Ok(())
     }
 
+    /// Resolve `app.solomd.MainActivity` safely on both WebView's JavaBridge thread
+    /// (`find_class` sees the app ClassLoader) and native Rust worker threads
+    /// (`ndk_context::android_context().context()` is `android.app.Application`,
+    /// whose `getClassLoader().loadClass(...)` resolves app classes; note that
+    /// `get_object_class(&app_ctx)` returns `android.app.Application`, NOT `MainActivity`!).
+    fn main_activity_class<'a>(env: &mut jni::JNIEnv<'a>) -> Result<jni::objects::JClass<'a>, String> {
+        if let Ok(cls) = env.find_class(CLS) {
+            return Ok(cls);
+        }
+        let _ = env.exception_clear();
+
+        let ctx = ndk_context::android_context();
+        let app_ctx = unsafe { JObject::from_raw(ctx.context().cast()) };
+        if app_ctx.is_null() {
+            return Err("Android context is null".into());
+        }
+        let loader_res = env.call_method(&app_ctx, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]);
+        check_exc(env, "getClassLoader")?;
+        let loader = loader_res.map_err(|e| e.to_string())?.l().map_err(|e| e.to_string())?;
+        let cname = env.new_string(CLS_DOT).map_err(|e| e.to_string())?;
+        let cls_res = env.call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&cname)],
+        );
+        check_exc(env, "loadClass(MainActivity)")?;
+        let cls_obj = cls_res.map_err(|e| e.to_string())?.l().map_err(|e| e.to_string())?;
+        Ok(jni::objects::JClass::from(cls_obj))
+    }
+
     /// Call a static method returning a (nullable) java.lang.String.
     fn call_str_opt(
         method: &str,
@@ -264,7 +354,8 @@ mod imp {
         args: &[JValue],
     ) -> Result<Option<String>, String> {
         with_env(|env| {
-            let res = env.call_static_method(CLS, method, sig, args);
+            let cls = main_activity_class(env)?;
+            let res = env.call_static_method(cls, method, sig, args);
             check_exc(env, method)?;
             let obj = res.map_err(|e| e.to_string())?.l().map_err(|e| e.to_string())?;
             if obj.is_null() {
@@ -303,9 +394,10 @@ mod imp {
 
     pub fn pick_folder() -> Result<(), String> {
         with_env(|env| {
-            env.call_static_method(CLS, "launchFolderPicker", "()V", &[])
-                .map_err(|e| e.to_string())?;
-            check_exc(env, "launchFolderPicker")
+            let cls = main_activity_class(env)?;
+            let res = env.call_static_method(cls, "launchFolderPicker", "()V", &[]);
+            check_exc(env, "launchFolderPicker")?;
+            res.map(|_| ()).map_err(|e| e.to_string())
         })
     }
 
@@ -504,5 +596,16 @@ mod imp {
     pub fn poll_print_finished() -> Result<bool, String> {
         let s = call_str("pollPrintFinished", "()Ljava/lang/String;", &[])?;
         Ok(s == "1")
+    }
+
+    pub fn all_files_access_status() -> Result<SafAllFilesAccessStatus, String> {
+        let json = call_str("allFilesAccessStatus", "()Ljava/lang/String;", &[])?;
+        let val = unwrap_env(&json)?;
+        serde_json::from_value(val).map_err(|e| e.to_string())
+    }
+
+    pub fn request_all_files_access() -> Result<(), String> {
+        let json = call_str("requestAllFilesAccess", "()Ljava/lang/String;", &[])?;
+        unwrap_env(&json).map(|_| ())
     }
 }

@@ -29,9 +29,11 @@ import {
   PageBreak,
   TableOfContents,
   LineRuleType,
+  Bookmark,
 } from 'docx';
 import { mermaidToPng } from './diagram-export';
 import { md, extractImageRoot, preprocessMarkdown } from './markdown';
+import { parseImageAltSize } from './md-image-url';
 import {
   resolveDocxTemplate,
   renderHeaderText,
@@ -41,6 +43,7 @@ import {
 import { resolveImagePath } from './image-resolve';
 import { blobToPng, loadImageBlob } from './image-clipboard';
 import { isPlantumlLang, plantumlSvgUrl } from './plantuml';
+import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate';
 import type Token from 'markdown-it/lib/token.mjs';
 
 type BlockChild = Paragraph | Table;
@@ -104,6 +107,7 @@ function htmlImageSrcs(html: string): string[] {
 
 /** Set per export run; buildBody's fence branch reads it. */
 let plantumlServerForRun: string | null = null;
+let mediaAlignmentForRun: (typeof AlignmentType)[keyof typeof AlignmentType] = AlignmentType.CENTER;
 
 function plantumlUrlFor(tok: Token): string | null {
   if (!plantumlServerForRun || tok.type !== 'fence') return null;
@@ -153,13 +157,52 @@ async function prefetchImages(tokens: Token[], imageRoot: string | null, filePat
   );
 }
 
-function imageRun(img: ImageCache, alt: string, maxWidth = MAX_IMG_WIDTH): ImageRun {
-  const dim = scaleDimensions(img.width, img.height, maxWidth);
+function resolveDocxImageDim(
+  img: ImageCache,
+  alt: string,
+  maxWidth: number,
+  tok?: Token,
+): { cleanAlt: string; width: number; height: number } {
+  const parsed = parseImageAltSize(alt);
+  const meta = (tok?.meta || {}) as { eqWidth?: string | null; eqHeight?: string | null };
+  const rawW = meta.eqWidth || parsed.width;
+  const rawH = meta.eqHeight || parsed.height;
+  const parseDimPx = (spec: string | null | undefined, base: number): number | null => {
+    if (!spec) return null;
+    if (spec.endsWith('%')) {
+      const pct = Number.parseFloat(spec.slice(0, -1));
+      return pct > 0 ? Math.max(1, Math.round((base * pct) / 100)) : null;
+    }
+    const px = Number.parseFloat(spec.replace(/px$/i, ''));
+    return px > 0 ? Math.max(1, Math.round(px)) : null;
+  };
+  const explicitW = parseDimPx(rawW, maxWidth);
+  const explicitH = parseDimPx(rawH, img.height);
+  let w = img.width;
+  let h = img.height;
+  if (explicitW && explicitH) {
+    w = explicitW;
+    h = explicitH;
+  } else if (explicitW) {
+    const ratio = img.width > 0 ? explicitW / img.width : 1;
+    w = explicitW;
+    h = Math.max(1, Math.round(img.height * ratio));
+  } else if (explicitH) {
+    const ratio = img.height > 0 ? explicitH / img.height : 1;
+    h = explicitH;
+    w = Math.max(1, Math.round(img.width * ratio));
+  }
+  const scaled = scaleDimensions(w, h, maxWidth);
+  return { cleanAlt: parsed.alt, width: scaled.width, height: scaled.height };
+}
+
+function imageRun(img: ImageCache, alt: string, maxWidth = MAX_IMG_WIDTH, tok?: Token): ImageRun {
+  const dim = resolveDocxImageDim(img, alt, maxWidth, tok);
   return new ImageRun({
     type: img.type,
     data: img.data,
     transformation: { width: dim.width, height: dim.height },
-    altText: { name: alt || 'image', description: alt || 'image' },
+    altText: { name: dim.cleanAlt || 'image', description: dim.cleanAlt || 'image' },
   });
 }
 
@@ -300,7 +343,7 @@ function buildRuns(inlineToken: Token, style: RunStyle = {}): (TextRun | ImageRu
         // in its paragraph it is handled by buildBody (centered block).
         const src = tok.attrGet('src') || '';
         const img = srcImages.get(src);
-        if (img) push(imageRun(img, tok.content || ''));
+        if (img) push(imageRun(img, tok.content || '', MAX_IMG_WIDTH, tok));
         else push(new TextRun({ text: `[${tok.content || 'image'}]`, italics: true, color: '888888' }));
         break;
       }
@@ -336,7 +379,7 @@ function mathBlockParagraph(latex: string): Paragraph {
       ...(idx > 0 ? [new TextRun({ break: 1 })] : []),
       new TextRun({ text: line, font: MATH_FONT }),
     ]),
-    alignment: AlignmentType.CENTER,
+    alignment: mediaAlignmentForRun,
     spacing: { before: 160, after: 160 },
   });
 }
@@ -387,9 +430,46 @@ function findMatchingClose(tokens: Token[], start: number, openType: string, clo
  * list in the entire document shares `ordered-list-undefined` and continues
  * numbering from the previous section (`1, 2, 3` → `4, 5` → … → `45`).
  */
-let nextOrderedListInstance = 0;
+interface CollectedDocxHeading {
+  anchorId: string;
+  level: number;
+  text: string;
+}
 
-async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: string): Promise<BlockChild[]> {
+let nextOrderedListInstance = 0;
+let nextHeadingAnchorId = 0;
+
+function extractInlinePlainText(inlineToken?: Token): string {
+  if (!inlineToken) return '';
+  if (!inlineToken.children || inlineToken.children.length === 0) {
+    return (inlineToken.content || '').replace(/\s+/g, ' ').trim();
+  }
+  const parts: string[] = [];
+  for (const ch of inlineToken.children) {
+    if (ch.type === 'text' || ch.type === 'code_inline' || ch.type === 'math_inline') {
+      parts.push(ch.content || '');
+    } else if (ch.type === 'softbreak' || ch.type === 'hardbreak') {
+      parts.push(' ');
+    }
+  }
+  return parts.join('').replace(/\s+/g, ' ').trim();
+}
+
+function escapeXmlText(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+async function buildBody(
+  tokens: Token[],
+  imageRoot: string | null,
+  filePath?: string,
+  tocHeadings?: CollectedDocxHeading[],
+  hasReference = false,
+): Promise<BlockChild[]> {
   const out: BlockChild[] = [];
   let i = 0;
   const listStack: { type: 'bullet' | 'ordered'; instance: number; itemParagraphs: number }[] = [];
@@ -401,11 +481,49 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
         const level = tok.tag;
         const inline = tokens[i + 1];
         i += 3;
+        const rawLevelNum = Number(level.slice(1)) || 1;
+        let effectiveTocLevel = rawLevelNum;
+        if (inline?.content) {
+          const customLvlMatch = /<!--\s*solomd-toc-level:(\d+)\s*-->/.exec(inline.content);
+          if (customLvlMatch) {
+            effectiveTocLevel = Math.max(1, Number(customLvlMatch[1]) || rawLevelNum);
+          }
+          inline.content = inline.content.replace(
+            /\s*<!--\s*solomd-toc-(?:level:\d+|folder)\s*-->/g,
+            '',
+          );
+        }
+        if (inline?.children) {
+          for (const ch of inline.children) {
+            if ((ch.type === 'html_inline' || ch.type === 'text') && ch.content) {
+              ch.content = ch.content.replace(
+                /\s*<!--\s*solomd-toc-(?:level:\d+|folder)\s*-->/g,
+                '',
+              );
+            }
+          }
+        }
+        const headingRuns = buildRuns(inline);
+        const anchorId = `_TocSolomd_${++nextHeadingAnchorId}`;
+        const plainTitle = extractInlinePlainText(inline);
+        if (tocHeadings && plainTitle) {
+          tocHeadings.push({
+            anchorId,
+            level: Math.min(6, Math.max(1, effectiveTocLevel)),
+            text: plainTitle,
+          });
+        }
         out.push(
           new Paragraph({
             heading: HEADING_LEVELS[level],
-            children: buildRuns(inline),
-            spacing: HEADING_SPACING[level] ?? { before: 240, after: 120 },
+            ...(hasReference ? {} : { alignment: AlignmentType.LEFT }),
+            children: [
+              new Bookmark({
+                id: anchorId,
+                children: headingRuns as (TextRun | ImageRun)[],
+              }),
+            ],
+            ...(hasReference ? {} : { spacing: HEADING_SPACING[level] ?? { before: 240, after: 120 } }),
             keepNext: true,
           })
         );
@@ -429,8 +547,8 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
           if (img) {
             out.push(
               new Paragraph({
-                children: [imageRun(img, alt)],
-                alignment: AlignmentType.CENTER,
+                children: [imageRun(img, alt, MAX_IMG_WIDTH, imgTok)],
+                alignment: mediaAlignmentForRun,
                 spacing: { before: 160, after: 160 },
               })
             );
@@ -447,7 +565,7 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
                   color: '888888',
                 }),
               ],
-              alignment: AlignmentType.CENTER,
+              alignment: mediaAlignmentForRun,
               spacing: { before: 160, after: 160 },
             })
           );
@@ -456,6 +574,7 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
 
         out.push(
           new Paragraph({
+            alignment: AlignmentType.LEFT,
             children: buildRuns(inline),
             spacing: isInList ? { before: 60, after: 60 } : { before: 120, after: 120 },
             ...(isInList && isFirstListParagraph && topList && {
@@ -487,7 +606,7 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
           out.push(
             new Paragraph({
               children: [imageRun(pumlImg, 'PlantUML diagram')],
-              alignment: AlignmentType.CENTER,
+              alignment: mediaAlignmentForRun,
               spacing: { before: 160, after: 160 },
             })
           );
@@ -508,7 +627,7 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
                     altText: { name: 'Mermaid diagram', description: 'Mermaid diagram' },
                   }),
                 ],
-                alignment: AlignmentType.CENTER,
+                alignment: mediaAlignmentForRun,
                 spacing: { before: 160, after: 160 },
               })
             );
@@ -521,6 +640,7 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
         lines.forEach((line, idx) => {
           out.push(
             new Paragraph({
+              alignment: AlignmentType.LEFT,
               children: [
                 new TextRun({
                   text: line || ' ',
@@ -544,6 +664,11 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
         break;
       }
       case 'html_block': {
+        if (/<!--\s*solomd-page-break\s*-->/i.test(tok.content || '')) {
+          out.push(new Paragraph({ children: [new PageBreak()] }));
+          i += 1;
+          break;
+        }
         // A pasted `<img>` block (common when copying from the web). Other
         // raw HTML still has no DOCX equivalent and is skipped as before.
         const imgs = htmlImageSrcs(tok.content || '')
@@ -553,7 +678,7 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
           out.push(
             new Paragraph({
               children: imgs.map((img) => imageRun(img, '')),
-              alignment: AlignmentType.CENTER,
+              alignment: mediaAlignmentForRun,
               spacing: { before: 160, after: 160 },
             })
           );
@@ -622,7 +747,12 @@ async function buildBody(tokens: Token[], imageRoot: string | null, filePath?: s
               }
               return j + 1;
             })();
-            const nestedBlocks = await buildBody(inner.slice(j, sliceEnd), imageRoot, filePath);
+            const nestedBlocks = await buildBody(
+              inner.slice(j, sliceEnd),
+              imageRoot,
+              filePath,
+              tocHeadings,
+            );
             for (const b of nestedBlocks) out.push(b);
             j = sliceEnd;
           }
@@ -731,8 +861,8 @@ function buildTable(inner: Token[]): Table | null {
           const runs = row.cells[c] ?? [];
           const cellChildren =
             runs.length > 0
-              ? [new Paragraph({ children: runs, spacing: { before: 40, after: 40 } })]
-              : [new Paragraph({ text: '' })];
+              ? [new Paragraph({ alignment: AlignmentType.LEFT, children: runs, spacing: { before: 40, after: 40 } })]
+              : [new Paragraph({ alignment: AlignmentType.LEFT, text: '' })];
           return new TableCell({
             children: cellChildren,
             shading: row.isHeader
@@ -792,6 +922,366 @@ function buildCover(tpl: DocxTemplate): Paragraph[] {
   return out;
 }
 
+/**
+ * #553 — Apply a user's .docx as a Word "reference document".
+ *
+ * The `docx` library builds a document from scratch; it cannot open an
+ * existing .docx as a template. Word's own "reference doc" convention (the
+ * one pandoc's `--reference-doc` uses) needs only a handful of package parts,
+ * so we swap those parts into the freshly generated zip:
+ *
+ *   - `word/styles.xml`  — Normal / Heading1..6 / caption / TOC styles, i.e.
+ *     the fonts, sizes, colours and paragraph spacing the user set up.
+ *   - `word/fontTable.xml`, `word/theme/theme1.xml` — fonts / theme colours
+ *     those styles point at.
+ *   - `<w:pgSz>` / `<w:pgMar>` from the template's `word/document.xml` —
+ *     paper size and margins.
+ *
+ * Existing parts are replaced in place (the manifests stay valid); the theme
+ * is added together with its content-type override and relationship because
+ * the generator does not emit one. Numbering, headers and footers are
+ * deliberately left alone: the generator's list numbering and preset-driven
+ * header/footer would otherwise point at ids and media that were never copied
+ * in. An unreadable / non-DOCX file is ignored rather than failing the whole
+ * export.
+ */
+const REFERENCE_STYLE_PARTS = [
+  'word/styles.xml',
+  'word/stylesWithEffects.xml',
+  'word/fontTable.xml',
+];
+const THEME_PART = 'word/theme/theme1.xml';
+
+interface ParsedTemplateStyle {
+  styleId: string;
+  name: string;
+  aliases: string[];
+  outlineLvl: number | null;
+  isDefault: boolean;
+}
+
+/**
+ * #603 — Parse paragraph styles in the reference template's `word/styles.xml`
+ * so `Heading1..Heading6` generated by `docx` can be remapped to the template's
+ * actual `w:styleId` (e.g. WPS/Chinese Word templates where `<w:name w:val="heading 1"/>`
+ * has `w:styleId="2"`, `<w:name w:val="heading 2"/>` has `w:styleId="5"`, etc.).
+ */
+function parseTemplateHeadingStyles(stylesXml: string): {
+  headingIds: Record<number, string | null>;
+  normalId: string | null;
+} {
+  const styles: ParsedTemplateStyle[] = [];
+  const styleBlockRe = /<w:style\b([^>]*)>([\s\S]*?)<\/w:style>/g;
+  let m: RegExpExecArray | null;
+  while ((m = styleBlockRe.exec(stylesXml)) !== null) {
+    const attrs = m[1];
+    const body = m[2];
+    const typeMatch = /\bw:type="([^"]+)"/.exec(attrs);
+    const stype = typeMatch ? typeMatch[1] : 'paragraph';
+    if (stype !== 'paragraph') continue;
+    const idMatch = /\bw:styleId="([^"]+)"/.exec(attrs);
+    if (!idMatch) continue;
+    const isDefault = /\bw:default="(?:1|true)"/i.test(attrs);
+    const nameMatch = /<w:name\b[^>]*\bw:val="([^"]+)"/.exec(body);
+    const aliasMatch = /<w:aliases\b[^>]*\bw:val="([^"]+)"/.exec(body);
+    const olMatch = /<w:outlineLvl\b[^>]*\bw:val="(\d+)"/.exec(body);
+    styles.push({
+      styleId: idMatch[1],
+      name: nameMatch ? nameMatch[1].trim() : '',
+      aliases: aliasMatch ? aliasMatch[1].split(',').map((s) => s.trim()).filter(Boolean) : [],
+      outlineLvl: olMatch ? Number(olMatch[1]) : null,
+      isDefault,
+    });
+  }
+
+  const normalStyle =
+    styles.find((s) => /^(?:normal|正文)$/i.test(s.name)) ||
+    styles.find((s) => s.styleId === 'Normal') ||
+    styles.find((s) => s.isDefault);
+
+  const headingIds: Record<number, string | null> = {};
+  for (let level = 1; level <= 6; level++) {
+    const targetNames = new Set([
+      `heading ${level}`,
+      `heading${level}`,
+      `标题 ${level}`,
+      `标题${level}`,
+      `überschrift ${level}`,
+      `titre ${level}`,
+      `título ${level}`,
+    ]);
+    const byName = styles.find((s) => {
+      const candidates = [s.name, ...s.aliases].map((x) => x.toLowerCase());
+      return candidates.some((c) => targetNames.has(c));
+    });
+    if (byName) {
+      headingIds[level] = byName.styleId;
+      continue;
+    }
+    const byExactId = styles.find((s) => s.styleId === `Heading${level}`);
+    if (byExactId) {
+      headingIds[level] = byExactId.styleId;
+      continue;
+    }
+    const byOutline = styles.find(
+      (s) => s.outlineLvl === level - 1 && !/^(?:toc\b|目录)/i.test(s.name),
+    );
+    headingIds[level] = byOutline ? byOutline.styleId : null;
+  }
+
+  return { headingIds, normalId: normalStyle ? normalStyle.styleId : null };
+}
+
+/**
+ * #603 — Merge `word/numbering.xml` from the reference template with the
+ * generated document's list numbering so heading multilevel numbering defined
+ * in `template['word/styles.xml']` (`<w:numId w:val="1"/>` etc.) keeps working
+ * without colliding with `docx` library's bullet/ordered list `numId`s.
+ */
+function mergeNumberingWithTemplate(
+  merged: Record<string, Uint8Array>,
+  templateNumberingBytes: Uint8Array,
+): void {
+  const tplNumXml = strFromU8(templateNumberingBytes);
+  let maxId = 0;
+  for (const m of tplNumXml.matchAll(/\bw:(?:abstractNumId|numId)="(\d+)"/g)) {
+    const n = Number(m[1]);
+    if (n > maxId) maxId = n;
+  }
+  const offset = maxId + 10;
+
+  if (merged['word/numbering.xml'] && merged['word/document.xml']) {
+    let genNumXml = strFromU8(merged['word/numbering.xml']);
+    genNumXml = genNumXml
+      .replace(/(\bw:abstractNumId=")(\d+)(")/g, (_all, p1, num, p3) => `${p1}${Number(num) + offset}${p3}`)
+      .replace(/(<w:abstractNumId\b[^>]*\bw:val=")(\d+)(")/g, (_all, p1, num, p3) => `${p1}${Number(num) + offset}${p3}`)
+      .replace(/(\bw:numId=")(\d+)(")/g, (_all, p1, num, p3) => `${p1}${Number(num) + offset}${p3}`);
+
+    const absBlocks = genNumXml.match(/<w:abstractNum\b[\s\S]*?<\/w:abstractNum>/g) ?? [];
+    const numBlocks = genNumXml.match(/<w:num\b[\s\S]*?<\/w:num>/g) ?? [];
+
+    let combined = tplNumXml;
+    if (absBlocks.length > 0) {
+      const firstNumIdx = combined.indexOf('<w:num ');
+      const firstNumIdx2 = combined.indexOf('<w:num>');
+      const insertAt =
+        firstNumIdx >= 0 && firstNumIdx2 >= 0
+          ? Math.min(firstNumIdx, firstNumIdx2)
+          : firstNumIdx >= 0
+            ? firstNumIdx
+            : firstNumIdx2;
+      if (insertAt >= 0) {
+        combined = combined.slice(0, insertAt) + absBlocks.join('') + combined.slice(insertAt);
+      } else {
+        combined = combined.replace('</w:numbering>', `${absBlocks.join('')}</w:numbering>`);
+      }
+    }
+    if (numBlocks.length > 0) {
+      combined = combined.replace('</w:numbering>', `${numBlocks.join('')}</w:numbering>`);
+    }
+    merged['word/numbering.xml'] = strToU8(combined);
+
+    let docXml = strFromU8(merged['word/document.xml']);
+    docXml = docXml.replace(
+      /(<w:numId\b[^>]*\bw:val=")(\d+)(")/g,
+      (_all, p1, num, p3) => `${p1}${Number(num) + offset}${p3}`,
+    );
+    merged['word/document.xml'] = strToU8(docXml);
+  } else {
+    merged['word/numbering.xml'] = templateNumberingBytes;
+  }
+
+  const typesName = '[Content_Types].xml';
+  if (merged[typesName]) {
+    let types = strFromU8(merged[typesName]);
+    if (!types.includes('PartName="/word/numbering.xml"')) {
+      types = types.replace(
+        '</Types>',
+        '<Override ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml" ' +
+          'PartName="/word/numbering.xml"/></Types>',
+      );
+      merged[typesName] = strToU8(types);
+    }
+  }
+  const relsName = 'word/_rels/document.xml.rels';
+  if (merged[relsName]) {
+    let rels = strFromU8(merged[relsName]);
+    if (!rels.includes('/relationships/numbering"')) {
+      rels = rels.replace(
+        '</Relationships>',
+        '<Relationship Id="rIdSolomdNumbering" ' +
+          'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" ' +
+          'Target="numbering.xml"/></Relationships>',
+      );
+      merged[relsName] = strToU8(rels);
+    }
+  }
+}
+
+async function applyDocxReference(blob: Blob, reference: Uint8Array): Promise<Blob> {
+  let generated: Record<string, Uint8Array>;
+  let template: Record<string, Uint8Array>;
+  try {
+    generated = unzipSync(new Uint8Array(await blob.arrayBuffer()));
+    template = unzipSync(reference);
+  } catch (e) {
+    console.warn('[docx] reference template is not a readable .docx, ignoring it', e);
+    return blob;
+  }
+  if (!template['word/styles.xml']) {
+    console.warn('[docx] reference template has no word/styles.xml, ignoring it');
+    return blob;
+  }
+
+  const merged: Record<string, Uint8Array> = {};
+  for (const [name, data] of Object.entries(generated)) {
+    if (!name.endsWith('/')) merged[name] = data;
+  }
+  for (const name of REFERENCE_STYLE_PARTS) {
+    if (template[name] && merged[name]) merged[name] = template[name];
+  }
+
+  // The generated package has no theme part of its own, so the template's
+  // theme has to be declared in both manifests before it can be added —
+  // otherwise Word reports a corrupt document.
+  if (template[THEME_PART]) {
+    merged[THEME_PART] = template[THEME_PART];
+    const typesName = '[Content_Types].xml';
+    if (merged[typesName]) {
+      let types = strFromU8(merged[typesName]);
+      if (!types.includes(`PartName="/${THEME_PART}"`)) {
+        types = types.replace(
+          '</Types>',
+          '<Override ContentType="application/vnd.openxmlformats-officedocument.theme+xml" ' +
+            `PartName="/${THEME_PART}"/></Types>`,
+        );
+        merged[typesName] = strToU8(types);
+      }
+    }
+    const relsName = 'word/_rels/document.xml.rels';
+    if (merged[relsName]) {
+      let rels = strFromU8(merged[relsName]);
+      if (!rels.includes('/relationships/theme"')) {
+        rels = rels.replace(
+          '</Relationships>',
+          '<Relationship Id="rIdSolomdTheme" ' +
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" ' +
+            'Target="theme/theme1.xml"/></Relationships>',
+        );
+        merged[relsName] = strToU8(rels);
+      }
+    }
+  }
+
+  const tplDoc = template['word/document.xml'] ? strFromU8(template['word/document.xml']) : '';
+  if (tplDoc && merged['word/document.xml']) {
+    const lastMatch = (re: RegExp): string | null => {
+      const found = tplDoc.match(re);
+      return found && found.length ? found[found.length - 1] : null;
+    };
+    const pgSz = lastMatch(/<w:pgSz\b[^>]*\/>/g);
+    const pgMar = lastMatch(/<w:pgMar\b[^>]*\/>/g);
+    let docXml = strFromU8(merged['word/document.xml']);
+    if (pgSz) docXml = docXml.replace(/<w:pgSz\b[^>]*\/>/g, pgSz);
+    if (pgMar) docXml = docXml.replace(/<w:pgMar\b[^>]*\/>/g, pgMar);
+    merged['word/document.xml'] = strToU8(docXml);
+  }
+
+  if (template['word/numbering.xml']) {
+    mergeNumberingWithTemplate(merged, template['word/numbering.xml']);
+  }
+
+  // #603 — Remap `<w:pStyle w:val="Heading1..6"/>` to the reference template's
+  // real heading `styleId`s, or inject `<w:outlineLvl w:val="N-1"/>` when the
+  // template omits a style for that heading level so Word/WPS Navigation Pane
+  // and TOC still recognize every heading level.
+  if (merged['word/document.xml']) {
+    const { headingIds, normalId } = parseTemplateHeadingStyles(strFromU8(template['word/styles.xml']));
+    let docXml = strFromU8(merged['word/document.xml']);
+    docXml = docXml.replace(/<w:pStyle\s+w:val="Heading([1-6])"\s*\/>/g, (_match, lvlStr) => {
+      const lvl = Number(lvlStr);
+      const mappedId = headingIds[lvl];
+      if (mappedId) {
+        return `<w:pStyle w:val="${escapeXmlText(mappedId)}"/>`;
+      }
+      const fallbackStyle = normalId
+        ? `<w:pStyle w:val="${escapeXmlText(normalId)}"/>`
+        : '';
+      return `${fallbackStyle}<w:outlineLvl w:val="${lvl - 1}"/>`;
+    });
+    merged['word/document.xml'] = strToU8(docXml);
+  }
+
+  return new Blob([zipSync(merged, { level: 6 })], {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
+}
+
+/**
+ * #592 & #593 — Post-process the generated DOCX ZIP so that:
+ * 1) `word/settings.xml` sets `<w:doNotExpandShiftReturn/>` (preventing Word/WPS
+ *    from stretching lines ending in `<w:br/>` across the full page width) and
+ *    `<w:updateFields w:val="true"/>` when a TOC is present;
+ * 2) When a `TableOfContents` (`TOC \h \o "1-6"`) is present, pre-populate its
+ *    cached field result between `separate` and `end` with indented, clickable
+ *    `<w:hyperlink w:anchor="_TocSolomd_N">` entries so WPS Office, Word, Pages,
+ *    and QuickLook display the full Table of Contents immediately on open (#593).
+ */
+async function postProcessDocxPackage(
+  blob: Blob,
+  wantToc: boolean,
+  tocHeadings: CollectedDocxHeading[],
+): Promise<Blob> {
+  const archive = unzipSync(new Uint8Array(await blob.arrayBuffer()));
+
+  if (archive['word/settings.xml']) {
+    let settingsXml = strFromU8(archive['word/settings.xml']);
+    if (!settingsXml.includes('<w:doNotExpandShiftReturn')) {
+      if (settingsXml.includes('<w:compat>')) {
+        settingsXml = settingsXml.replace('<w:compat>', '<w:compat><w:doNotExpandShiftReturn/>');
+      } else {
+        settingsXml = settingsXml.replace(
+          '</w:settings>',
+          '<w:compat><w:doNotExpandShiftReturn/></w:compat></w:settings>',
+        );
+      }
+    }
+    if (wantToc && !settingsXml.includes('<w:updateFields')) {
+      settingsXml = settingsXml.replace('</w:settings>', '<w:updateFields w:val="true"/></w:settings>');
+    }
+    archive['word/settings.xml'] = strToU8(settingsXml);
+  }
+
+  if (wantToc && tocHeadings.length > 0 && archive['word/document.xml']) {
+    let docXml = strFromU8(archive['word/document.xml']);
+    const tocCachedXml = tocHeadings
+      .map((h) => {
+        const indentTwips = Math.max(0, (h.level - 1) * 320);
+        const boldTag = h.level === 1 ? '<w:b/>' : '';
+        const sizeHalfPt = h.level === 1 ? 24 : h.level === 2 ? 22 : 21;
+        return (
+          `<w:p><w:pPr><w:jc w:val="left"/>` +
+          (indentTwips > 0 ? `<w:ind w:left="${indentTwips}"/>` : '') +
+          `<w:spacing w:before="40" w:after="60"/></w:pPr>` +
+          `<w:hyperlink w:history="1" w:anchor="${escapeXmlText(h.anchorId)}">` +
+          `<w:r><w:rPr>${boldTag}<w:color w:val="1F2328"/><w:sz w:val="${sizeHalfPt}"/></w:rPr>` +
+          `<w:t xml:space="preserve">${escapeXmlText(h.text)}</w:t></w:r>` +
+          `</w:hyperlink></w:p>`
+        );
+      })
+      .join('');
+    docXml = docXml.replace(
+      /(<w:instrText[^>]*>\s*TOC\b[\s\S]*?<w:fldChar w:fldCharType="separate"\s*\/>\s*<\/w:r>\s*<\/w:p>)/,
+      `$1${tocCachedXml}`,
+    );
+    archive['word/document.xml'] = strToU8(docXml);
+  }
+
+  return new Blob([zipSync(archive, { level: 6 })], {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
+}
+
 export async function markdownToDocxBlob(
   source: string,
   _title = 'Document',
@@ -802,34 +1292,59 @@ export async function markdownToDocxBlob(
   contentsLabel = 'Contents',
   /** PlantUML server when PlantUML is on (#163); fences become diagrams. */
   plantumlServer: string | null = null,
+  /** #553 — bytes of the user's .docx reference template, when configured. */
+  referenceDocx?: Uint8Array | null,
+  /** #572 — explicit override for whether to generate a leading Table of Contents page. */
+  includeTocPage?: boolean,
+  /** #597 — merged folder book export: keep folder name as Page 1 cover title without adding a root Heading 1 bookmark. */
+  isMergedBook?: boolean,
+  /** #624 — alignment for images, diagrams, and display math blocks (`left` | `center` | `right`). */
+  mediaAlign: 'left' | 'center' | 'right' = 'center',
 ): Promise<Blob> {
   srcImages.clear();
   nextOrderedListInstance = 0;
+  nextHeadingAnchorId = 0;
   plantumlServerForRun = plantumlServer;
+  mediaAlignmentForRun =
+    mediaAlign === 'left'
+      ? AlignmentType.LEFT
+      : mediaAlign === 'right'
+        ? AlignmentType.RIGHT
+        : AlignmentType.CENTER;
   // Apply the same leniency preprocessors the HTML render path uses (malformed
   // table delimiters, list re-indent, inline-HTML blocks) so DOCX export
   // doesn't silently drop tables/lists the preview shows correctly.
-  const tokens = md.parse(preprocessMarkdown(source ?? ''), {});
+  const cleanedSource = (source ?? '').replace(/^[ \t]*\[toc\][ \t]*\r?\n?/gim, '');
+  const tokens = md.parse(preprocessMarkdown(cleanedSource), {});
   const imageRoot = extractImageRoot(source || '');
   await prefetchImages(tokens, imageRoot, filePath);
-  const blocks = await buildBody(tokens, imageRoot, filePath);
-  if (blocks.length === 0) blocks.push(new Paragraph({ text: '' }));
+  const hasReference = Boolean(referenceDocx && referenceDocx.length > 0);
+  const tocHeadings: CollectedDocxHeading[] = [];
+  const blocks = await buildBody(tokens, imageRoot, filePath, tocHeadings, hasReference);
+  if (blocks.length === 0) blocks.push(new Paragraph({ alignment: AlignmentType.LEFT, text: '' }));
 
-  const tpl = resolveDocxTemplate(preset, source ?? '', _title);
+  const tpl = resolveDocxTemplate(preset, source ?? '', _title, {
+    preferFallbackTitle: Boolean(isMergedBook),
+  });
   const headerText = renderHeaderText(tpl);
+  const showCover = tpl.cover || Boolean(isMergedBook);
 
   const front: BlockChild[] = [];
-  if (tpl.cover) front.push(...buildCover(tpl));
-  if (tpl.toc) {
-    // A Word TOC is a field, not text: Word fills it in and offers to update
-    // it on open. Generating a static list instead would go stale the moment
-    // anyone edited the document.
+  if (showCover) front.push(...buildCover(tpl));
+  const wantToc = typeof includeTocPage === 'boolean' ? includeTocPage : tpl.toc;
+  if (wantToc) {
+    // Emit a real Word TOC field (`TOC \h \o "1-6"`) AND pre-populate its cached
+    // `<w:sdtContent>` entries in `postProcessDocxPackage` (#593) so both WPS
+    // Office and Word render the complete clickable TOC immediately on open.
+    // #597 — Use a non-heading bold paragraph for the TOC title so "目录" does
+    // not enter Word's outline/bookmark tree.
     front.push(
       new Paragraph({
-        heading: HeadingLevel.HEADING_1,
-        children: [new TextRun({ text: contentsLabel })],
+        ...(hasReference ? {} : { alignment: AlignmentType.LEFT }),
+        spacing: { before: 240, after: 180 },
+        children: [new TextRun({ text: contentsLabel, bold: true, size: 32 })],
       }),
-      new TableOfContents(contentsLabel, { hyperlink: true, headingStyleRange: '1-3' }),
+      new TableOfContents(contentsLabel, { hyperlink: true, headingStyleRange: '1-6' }),
       new Paragraph({ children: [new PageBreak()] }),
     );
   }
@@ -839,6 +1354,7 @@ export async function markdownToDocxBlob(
     creator: 'SoloMD',
     title: tpl.title || _title,
     description: 'Exported from SoloMD',
+    features: wantToc ? { updateFields: true } : undefined,
     styles: {
       default: {
         document: {
@@ -847,6 +1363,7 @@ export async function markdownToDocxBlob(
             ...(tpl.fontFamily ? { font: tpl.fontFamily } : {}),
           },
           paragraph: {
+            alignment: AlignmentType.LEFT,
             spacing: {
               after: Math.round(tpl.paragraphSpacingPt * 20), // twips
               line: Math.round(tpl.lineSpacing * 240),
@@ -880,7 +1397,7 @@ export async function markdownToDocxBlob(
           // With a cover page, `titlePage` gives page one its own (empty)
           // header and footer — a running header across the title page is
           // the giveaway that a template was bolted on.
-          titlePage: tpl.cover,
+          titlePage: showCover,
         },
         headers: headerText
           ? {
@@ -915,5 +1432,7 @@ export async function markdownToDocxBlob(
     ],
   });
 
-  return Packer.toBlob(doc);
+  const rawGenerated = await Packer.toBlob(doc);
+  const generated = await postProcessDocxPackage(rawGenerated, wantToc, tocHeadings);
+  return referenceDocx ? applyDocxReference(generated, referenceDocx) : generated;
 }

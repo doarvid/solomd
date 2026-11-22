@@ -301,6 +301,62 @@ class MainActivity : TauriActivity() {
 
     private fun resolver() = instance?.contentResolver
 
+    private fun primaryFileForDocId(docId: String): java.io.File? {
+      if (!docId.startsWith("primary:")) return null
+      val rel = docId.removePrefix("primary:").trimStart('/')
+      return if (rel.isEmpty()) {
+        java.io.File("/storage/emulated/0")
+      } else {
+        java.io.File("/storage/emulated/0", rel)
+      }
+    }
+
+    /** #611 — Query whether MANAGE_EXTERNAL_STORAGE is declared in this build and granted. */
+    @JvmStatic
+    fun allFilesAccessStatus(): String { return try {
+      val act = instance ?: return err2("no activity")
+      if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+        return envelope {
+          put("v", JSONObject().put("supported", false).put("granted", true))
+        }
+      }
+      @Suppress("DEPRECATION")
+      val pkgInfo = act.packageManager.getPackageInfo(
+        act.packageName,
+        android.content.pm.PackageManager.GET_PERMISSIONS
+      )
+      val declared = pkgInfo.requestedPermissions?.contains(
+        android.Manifest.permission.MANAGE_EXTERNAL_STORAGE
+      ) == true
+      val granted = android.os.Environment.isExternalStorageManager()
+      envelope {
+        put("v", JSONObject().put("supported", declared).put("granted", granted))
+      }
+    } catch (e: Exception) { err(e) } }
+
+    /** #611 — Open Android system settings to grant MANAGE_EXTERNAL_STORAGE for this app. */
+    @JvmStatic
+    fun requestAllFilesAccess(): String { return try {
+      val act = instance ?: return err2("no activity")
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        act.runOnUiThread {
+          try {
+            val intent = Intent(
+              android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+              Uri.parse("package:${act.packageName}")
+            )
+            act.startActivity(intent)
+          } catch (_: Exception) {
+            try {
+              act.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            } catch (_: Exception) {
+            }
+          }
+        }
+      }
+      envelope { put("v", true) }
+    } catch (e: Exception) { err(e) } }
+
     /** Launch the system folder picker. Clears any stale result first. */
     @JvmStatic
     fun launchFolderPicker() {
@@ -311,8 +367,19 @@ class MainActivity : TauriActivity() {
           addFlags(
             Intent.FLAG_GRANT_READ_URI_PERMISSION or
               Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-              Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+              Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+              Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
           )
+          if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            try {
+              val initial = DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents",
+                "primary:Documents"
+              )
+              putExtra(DocumentsContract.EXTRA_INITIAL_URI, initial)
+            } catch (_: Throwable) {
+            }
+          }
         }
         try {
           act.startActivityForResult(intent, REQ_PICK_TREE)
@@ -360,6 +427,7 @@ class MainActivity : TauriActivity() {
       val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId)
       val r = resolver() ?: return err2("no resolver")
       val items = JSONArray()
+      val seenNames = HashSet<String>()
       r.query(
         children,
         arrayOf(
@@ -369,13 +437,33 @@ class MainActivity : TauriActivity() {
         ),
         null, null, null
       )?.use { c ->
+        val idIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID).let { if (it >= 0) it else 0 }
+        val nameIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME).let { if (it >= 0) it else 1 }
+        val mimeIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE).let { if (it >= 0) it else 2 }
         while (c.moveToNext()) {
-          val cid = c.getString(0)
-          val name = if (c.isNull(1)) cid.substringAfterLast('/') else c.getString(1)
-          val mime = if (c.isNull(2)) "" else c.getString(2)
+          val cid = if (c.isNull(idIdx)) continue else c.getString(idIdx)
+          val name = if (c.isNull(nameIdx)) cid.substringAfterLast('/') else c.getString(nameIdx)
+          val mime = if (c.isNull(mimeIdx)) "" else c.getString(mimeIdx)
+          seenNames.add(name)
           items.put(JSONObject().apply {
             put("name", name); put("docId", cid); put("isDir", mime == DIR_MIME)
           })
+        }
+      }
+      // #608 / #611 — Fallback on OEM ROMs (ColorOS 16 / Android 16 Scoped Storage)
+      // when ContentResolver hides non-media `.md` files synced by external tools.
+      val dirFile = primaryFileForDocId(docId)
+      if (dirFile != null && dirFile.isDirectory && dirFile.canRead()) {
+        val rel = docId.removePrefix("primary:").trimStart('/')
+        dirFile.listFiles()?.forEach { f ->
+          if (!seenNames.contains(f.name)) {
+            val childRel = if (rel.isEmpty()) f.name else "$rel/${f.name}"
+            items.put(JSONObject().apply {
+              put("name", f.name)
+              put("docId", "primary:$childRel")
+              put("isDir", f.isDirectory)
+            })
+          }
         }
       }
       envelope { put("v", items) }
@@ -386,7 +474,13 @@ class MainActivity : TauriActivity() {
     fun readText(treeUri: String, docId: String): String { return try {
       val uri = DocumentsContract.buildDocumentUriUsingTree(Uri.parse(treeUri), docId)
       val r = resolver() ?: return err2("no resolver")
-      val text = r.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+      val fromSaf: String? = try {
+        r.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+      } catch (_: Exception) {
+        null
+      }
+      val text = fromSaf
+        ?: primaryFileForDocId(docId)?.takeIf { it.isFile && it.canRead() }?.readText(Charsets.UTF_8)
         ?: return err2("openInputStream null")
       envelope { put("v", text) }
     } catch (e: Exception) { err(e) } }
@@ -448,8 +542,15 @@ class MainActivity : TauriActivity() {
         val resolvedDocId = resolveChildDocIdBySegments(tree, rootDocId, segments)
         if (resolvedDocId != null) {
           val uri = DocumentsContract.buildDocumentUriUsingTree(tree, resolvedDocId)
-          bytes = r.openInputStream(uri)?.use { it.readBytes() }
+          bytes = try {
+            r.openInputStream(uri)?.use { it.readBytes() }
+          } catch (_: Exception) {
+            null
+          }
         }
+      }
+      if (bytes == null) {
+        bytes = primaryFileForDocId(docId)?.takeIf { it.isFile && it.canRead() }?.readBytes()
       }
       val data = bytes ?: return err2("openInputStream null")
       envelope { put("v", Base64.encodeToString(data, Base64.NO_WRAP)) }
@@ -460,8 +561,29 @@ class MainActivity : TauriActivity() {
     fun writeText(treeUri: String, docId: String, content: String): String { return try {
       val uri = DocumentsContract.buildDocumentUriUsingTree(Uri.parse(treeUri), docId)
       val r = resolver() ?: return err2("no resolver")
-      r.openOutputStream(uri, "wt")?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
-        ?: return err2("openOutputStream null")
+      val wroteSaf = try {
+        val out = try {
+          r.openOutputStream(uri, "wt")
+        } catch (_: Exception) {
+          r.openOutputStream(uri, "w")
+        }
+        if (out != null) {
+          out.use {
+            it.write(content.toByteArray(Charsets.UTF_8))
+            it.flush()
+          }
+          true
+        } else {
+          false
+        }
+      } catch (_: Exception) {
+        false
+      }
+      if (!wroteSaf) {
+        val f = primaryFileForDocId(docId) ?: return err2("openOutputStream null")
+        f.parentFile?.mkdirs()
+        f.writeText(content, Charsets.UTF_8)
+      }
       envelope { put("v", true) }
     } catch (e: Exception) { err(e) } }
 
@@ -471,19 +593,33 @@ class MainActivity : TauriActivity() {
       val uri = DocumentsContract.buildDocumentUriUsingTree(Uri.parse(treeUri), docId)
       val r = resolver() ?: return err2("no resolver")
       val bytes = Base64.decode(b64, Base64.DEFAULT)
-      val stream = try {
-        r.openOutputStream(uri, "wt")
-      } catch (_: Exception) {
-        try {
-          r.openOutputStream(uri, "w")
+      val wroteSaf = try {
+        val stream = try {
+          r.openOutputStream(uri, "wt")
         } catch (_: Exception) {
-          r.openOutputStream(uri)
+          try {
+            r.openOutputStream(uri, "w")
+          } catch (_: Exception) {
+            r.openOutputStream(uri)
+          }
         }
+        if (stream != null) {
+          stream.use {
+            it.write(bytes)
+            it.flush()
+          }
+          true
+        } else {
+          false
+        }
+      } catch (_: Exception) {
+        false
       }
-      stream?.use {
-        it.write(bytes)
-        it.flush()
-      } ?: return err2("openOutputStream null")
+      if (!wroteSaf) {
+        val f = primaryFileForDocId(docId) ?: return err2("openOutputStream null")
+        f.parentFile?.mkdirs()
+        f.writeBytes(bytes)
+      }
       envelope { put("v", true) }
     } catch (e: Exception) { err(e) } }
 
@@ -502,9 +638,40 @@ class MainActivity : TauriActivity() {
     fun createDoc(treeUri: String, parentDocId: String, mime: String, name: String): String { return try {
       val parent = DocumentsContract.buildDocumentUriUsingTree(Uri.parse(treeUri), parentDocId)
       val r = resolver() ?: return err2("no resolver")
-      val created = DocumentsContract.createDocument(r, parent, mime, name)
-        ?: return err2("createDocument null")
-      envelope { put("v", DocumentsContract.getDocumentId(created)) }
+      val candidateMimes = if (mime == DIR_MIME) {
+        listOf(DIR_MIME)
+      } else {
+        listOf(mime, "text/plain", "application/octet-stream").distinct()
+      }
+      var created: Uri? = null
+      var lastErr: Exception? = null
+      for (m in candidateMimes) {
+        try {
+          created = DocumentsContract.createDocument(r, parent, m, name)
+          if (created != null) break
+        } catch (e: Exception) {
+          lastErr = e
+        }
+      }
+      if (created != null) {
+        return envelope { put("v", DocumentsContract.getDocumentId(created)) }
+      }
+      val parentDir = primaryFileForDocId(parentDocId)
+      if (parentDir != null && parentDir.isDirectory && parentDir.canWrite()) {
+        val child = java.io.File(parentDir, name)
+        val ok = if (mime == DIR_MIME) {
+          child.exists() || child.mkdirs()
+        } else {
+          child.parentFile?.mkdirs()
+          if (!child.exists()) child.createNewFile() else true
+        }
+        if (ok) {
+          val rel = parentDocId.removePrefix("primary:").trimStart('/')
+          val childRel = if (rel.isEmpty()) name else "$rel/$name"
+          return envelope { put("v", "primary:$childRel") }
+        }
+      }
+      return if (lastErr != null) err(lastErr) else err2("createDocument null")
     } catch (e: Exception) { err(e) } }
 
     /** Write Base64-encoded bytes to a standalone content:// URI (e.g. from ACTION_CREATE_DOCUMENT). */
@@ -616,7 +783,12 @@ class MainActivity : TauriActivity() {
     fun deleteDoc(treeUri: String, docId: String): String { return try {
       val uri = DocumentsContract.buildDocumentUriUsingTree(Uri.parse(treeUri), docId)
       val r = resolver() ?: return err2("no resolver")
-      val ok = DocumentsContract.deleteDocument(r, uri)
+      val safDeleted = try {
+        DocumentsContract.deleteDocument(r, uri)
+      } catch (_: Exception) {
+        false
+      }
+      val ok = safDeleted || (primaryFileForDocId(docId)?.deleteRecursively() == true)
       envelope { put("v", ok) }
     } catch (e: Exception) { err(e) } }
 
@@ -630,19 +802,94 @@ class MainActivity : TauriActivity() {
       JSONObject().apply { put("ok", false); put("e", msg) }.toString()
   }
 
+  private var retriedInitialLoad = false
+
   override fun onCreate(savedInstanceState: Bundle?) {
     instance = this
+    // Ensure $HOME points to the app's private files directory so Rust crates
+    // (github_sync, cloud_folder, ai_keystore, cost_meter) never fail with
+    // "no HOME directory" on Android.
+    try {
+      android.system.Os.setenv("HOME", filesDir.absolutePath, false)
+    } catch (_: Throwable) {
+    }
+    // Guarantee ProcessLifecycleOwner is initialized before WryActivity.onCreate
+    // registers WryLifecycleObserver (fixes blank screen when OEM ROMs delay
+    // ContentProvider / AppStartup initialization).
+    try {
+      androidx.startup.AppInitializer.getInstance(applicationContext)
+        .initializeComponent(androidx.lifecycle.ProcessLifecycleInitializer::class.java)
+    } catch (_: Throwable) {
+    }
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
   }
 
+  override fun onResume() {
+    super.onResume()
+    runOnUiThread {
+      try {
+        findWebView(window?.decorView)?.evaluateJavascript(
+          "window.dispatchEvent(new Event('solomd:android-storage-resume'))",
+          null
+        )
+      } catch (_: Throwable) {
+      }
+    }
+  }
+
+  override fun onWebViewCreate(webView: android.webkit.WebView) {
+    super.onWebViewCreate(webView)
+    // Work around wry's CreateWebView race on Android 16 / ColorOS 16 where
+    // loadUrlMainThread("http://tauri.localhost/") is posted to an unattached
+    // WebView before setWebViewClient and setContentView are wired up.
+    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    handler.postDelayed({
+      try {
+        val currentUrl = webView.url
+        if (currentUrl.isNullOrEmpty() || currentUrl == "about:blank") {
+          webView.loadUrl("http://tauri.localhost/")
+        }
+      } catch (_: Throwable) {
+      }
+    }, 150)
+    handler.postDelayed({
+      try {
+        if (retriedInitialLoad) return@postDelayed
+        val currentUrl = webView.url
+        if (currentUrl.isNullOrEmpty() || currentUrl == "about:blank") {
+          retriedInitialLoad = true
+          webView.loadUrl("http://tauri.localhost/")
+          return@postDelayed
+        }
+        webView.evaluateJavascript(
+          "(function(){var r=document.getElementById('app');return (r&&r.childElementCount>0)||document.readyState==='loading'?'ok':'empty';})()"
+        ) { res ->
+          if (!retriedInitialLoad && res == "\"empty\"") {
+            retriedInitialLoad = true
+            webView.loadUrl("http://tauri.localhost/")
+          }
+        }
+      } catch (_: Throwable) {
+      }
+    }, 1200)
+  }
+
   override fun onDestroy() {
+    val finishingPermanently = !isChangingConfigurations
     if (instance === this) {
       billingClient?.endConnection()
       billingClient = null
       instance = null
     }
     super.onDestroy()
+    // WryLifecycleObserver.onCreate only fires once per OS process, while
+    // WryActivity.onDestroy tears down the tao Window permanently. If Android
+    // keeps the cached process alive after Activity destruction, relaunching
+    // MainActivity would otherwise open a blank window with no WebView.
+    if (finishingPermanently) {
+      android.os.Process.killProcess(android.os.Process.myPid())
+    }
   }
 
   @Deprecated("Deprecated in Java")
@@ -651,15 +898,31 @@ class MainActivity : TauriActivity() {
     if (requestCode != REQ_PICK_TREE) return
     val uri: Uri? = data?.data
     if (resultCode == RESULT_OK && uri != null) {
-      val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+      val rwFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
         Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+      val grantedFlags = (data.flags and rwFlags).let { if (it != 0) it else rwFlags }
       try {
-        contentResolver.takePersistableUriPermission(uri, flags)
+        contentResolver.takePersistableUriPermission(uri, grantedFlags)
       } catch (_: SecurityException) {
+        try {
+          contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+        }
       }
       pickedTreeUri.set(uri.toString())
     } else {
       pickedTreeUri.set("")
+    }
+    // #608 — Notify WebView immediately: on Android 16 / ColorOS 16 the SAF
+    // picker runs as a translucent overlay without firing `visibilitychange`.
+    runOnUiThread {
+      try {
+        findWebView(window?.decorView)?.evaluateJavascript(
+          "window.dispatchEvent(new Event('solomd:saf-pick-ready'))",
+          null
+        )
+      } catch (_: Throwable) {
+      }
     }
   }
 }

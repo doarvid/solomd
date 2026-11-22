@@ -44,7 +44,13 @@ export interface ParsedImageAltSize {
   height: string | null;
 }
 
-const ALT_SIZE_RE = /^(.*?)\|\s*(\d{1,4}(?:%|px)?)(?:\s*[x×]\s*(\d{1,4}(?:%|px)?))?\s*$/i;
+const ALT_SIZE_RE =
+  /^(.*?)\|\s*(?:(\d{1,4}(?:%|px)?)(?:\s*[x×]\s*(\d{1,4}(?:%|px)?))?|[x×]\s*(\d{1,4}(?:%|px)?))\s*$/i;
+
+const EQ_SIZE_TOKEN_RE =
+  /^=\s*(?:(\d{1,4}(?:%|px)?)(?:\s*[x×]\s*(\d{1,4}(?:%|px)?)?)?|[x×]\s*(\d{1,4}(?:%|px)?))\s*$/i;
+
+const IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|avif|ico|tiff?)(?:[?#][^\s)]*)?$/i;
 
 function normalizeImageDimension(dim: string): string {
   const trimmed = dim.trim();
@@ -52,42 +58,555 @@ function normalizeImageDimension(dim: string): string {
 }
 
 /**
- * #446 — Parse optional Obsidian/Markdown pipe size syntax at the end of an
- * image's alt text: `![alt|50%](url)`, `![|300](url)`, `![alt|400x300](url)`.
+ * #379 — Parse `=300x200`, `=300x`, `=x200`, `=300`, `=50%` size token used inside
+ * Markdown image destinations (`![alt](url =300x200)` / `![alt](url "title" =300x)`).
+ */
+export function parseImageEqSizeToken(
+  raw: string,
+): { width: string | null; height: string | null } | null {
+  const m = EQ_SIZE_TOKEN_RE.exec(raw.trim());
+  if (!m) return null;
+  const widthRaw = m[1] || null;
+  const heightRaw = m[2] || m[3] || null;
+  if (!widthRaw && !heightRaw) return null;
+  return {
+    width: widthRaw ? normalizeImageDimension(widthRaw) : null,
+    height: heightRaw ? normalizeImageDimension(heightRaw) : null,
+  };
+}
+
+/**
+ * #446 / #499 — Parse optional Obsidian/Markdown pipe size syntax at the end of
+ * an image's alt text: `![alt|50%](url)`, `![|300](url)`, `![alt|400x300](url)`
+ * and the height-only form `![alt|x250](url)` (width keeps its aspect ratio).
  */
 export function parseImageAltSize(rawAlt: string): ParsedImageAltSize {
   const m = ALT_SIZE_RE.exec(rawAlt);
   if (!m) {
     return { alt: rawAlt, width: null, height: null };
   }
+  const widthRaw = m[2] || null;
+  const heightRaw = m[3] || m[4] || null;
   return {
     alt: m[1].trimEnd(),
-    width: normalizeImageDimension(m[2]),
-    height: m[3] ? normalizeImageDimension(m[3]) : null,
+    width: widthRaw ? normalizeImageDimension(widthRaw) : null,
+    height: heightRaw ? normalizeImageDimension(heightRaw) : null,
   };
 }
 
-const MD_IMAGE_RESIZE_RE = /^(\s*!\[)([^\]]*)(\]\([^\n]+\)\s*)$/;
 const HTML_IMG_TAG_RE = /<img\b([^>]*?)(\/?)>/i;
 
+export interface ParsedMarkdownImageSpan {
+  /** Start index of the image (or outer linked-image `[`) in the line. */
+  start: number;
+  /** End index (exclusive) of the image (or outer linked-image `)`) in the line. */
+  end: number;
+  /** Raw alt text inside `![...]`. */
+  alt: string;
+  /** Start index of `alt` in the line. */
+  altStart: number;
+  /** End index (exclusive) of `alt` in the line. */
+  altEnd: number;
+  /** Image destination URL/path. */
+  src: string;
+  /** Optional title inside `![alt](url "title")`. */
+  title?: string;
+  /** Optional explicit width from `=WxH` or `![[img|W]]`. */
+  width?: string | null;
+  /** Optional explicit height from `=WxH` or `![[img|WxH]]`. */
+  height?: string | null;
+  /** True when parsed from an Obsidian-style `![[img.png]]` embed. */
+  isWikilink?: boolean;
+  /** Optional outer link URL when wrapped as `[![alt](img)](href)`. */
+  href?: string;
+}
+
+function maskInlineCode(text: string): boolean[] {
+  const n = text.length;
+  const code = new Array<boolean>(n).fill(false);
+  for (let p = 0; p < n; ) {
+    if (text[p] === '`') {
+      let len = 1;
+      while (p + len < n && text[p + len] === '`') len++;
+      let q = p + len;
+      let closed = -1;
+      while (q < n) {
+        if (text[q] === '`') {
+          let len2 = 1;
+          while (q + len2 < n && text[q + len2] === '`') len2++;
+          if (len2 === len) {
+            closed = q + len2;
+            break;
+          }
+          q += len2;
+        } else {
+          q++;
+        }
+      }
+      if (closed >= 0) {
+        for (let k = p; k < closed; k++) code[k] = true;
+        p = closed;
+      } else {
+        p += len;
+      }
+    } else {
+      p++;
+    }
+  }
+  return code;
+}
+
+function unescapeMarkdownUrl(raw: string): string {
+  let out = raw.replace(/&amp;/gi, '&');
+  if (/^https?:\/\//i.test(out)) {
+    out = out.replace(/\\([!#$%&'()*+,/:;=?@[\]_~-])/g, '$1');
+  } else {
+    out = out.replace(/\\([()[\]])/g, '$1');
+  }
+  return out;
+}
+
+function parseLinkDestinationAndTitle(
+  text: string,
+  openParen: number,
+): { dest: string; end: number; title?: string; width?: string | null; height?: string | null } | null {
+  const n = text.length;
+  if (openParen >= n || text[openParen] !== '(') return null;
+  let q = openParen + 1;
+  while (q < n && (text[q] === ' ' || text[q] === '\t')) q++;
+  if (q >= n) return null;
+
+  let dest = '';
+  if (text[q] === '<') {
+    const destStart = q + 1;
+    let closeAngle = -1;
+    for (let k = destStart; k < n; k++) {
+      if (text[k] === '\\' && k + 1 < n) {
+        k++;
+        continue;
+      }
+      if (text[k] === '<') return null;
+      if (text[k] === '>') {
+        closeAngle = k;
+        break;
+      }
+    }
+    if (closeAngle < 0) return null;
+    dest = text.slice(destStart, closeAngle).trim();
+    if (!dest) return null;
+    q = closeAngle + 1;
+  } else {
+    const destStart = q;
+    let parenDepth = 0;
+    while (q < n) {
+      const ch = text[q];
+      if (ch === '\\' && q + 1 < n) {
+        q += 2;
+        continue;
+      }
+      if (ch === ' ' || ch === '\t') break;
+      if (ch === '(') {
+        parenDepth++;
+        q++;
+        continue;
+      }
+      if (ch === ')') {
+        if (parenDepth > 0) {
+          parenDepth--;
+          q++;
+          continue;
+        }
+        break;
+      }
+      q++;
+    }
+    if (parenDepth !== 0) return null;
+    dest = text.slice(destStart, q);
+    if (!dest) return null;
+  }
+
+  let title: string | undefined;
+  let width: string | null | undefined;
+  let height: string | null | undefined;
+
+  const wsStart = q;
+  while (q < n && (text[q] === ' ' || text[q] === '\t')) q++;
+  if (q < n && text[q] !== ')') {
+    if (q === wsStart) return null;
+    const quote = text[q];
+    if (quote === '"' || quote === "'" || quote === '(') {
+      const closeQuote = quote === '(' ? ')' : quote;
+      let closeTitle = -1;
+      for (let k = q + 1; k < n; k++) {
+        if (text[k] === '\\' && k + 1 < n) {
+          k++;
+          continue;
+        }
+        if (text[k] === closeQuote) {
+          closeTitle = k;
+          break;
+        }
+      }
+      if (closeTitle < 0) return null;
+      title = text.slice(q + 1, closeTitle);
+      q = closeTitle + 1;
+      const wsAfterTitle = q;
+      while (q < n && (text[q] === ' ' || text[q] === '\t')) q++;
+      if (q < n && text[q] === '=' && q > wsAfterTitle) {
+        const closeParen = text.indexOf(')', q);
+        if (closeParen < 0) return null;
+        const eq = parseImageEqSizeToken(text.slice(q, closeParen));
+        if (!eq) return null;
+        width = eq.width;
+        height = eq.height;
+        q = closeParen;
+      }
+    } else if (text[q] === '=') {
+      // #379 — `![alt](url =300x200)` / `![alt](url =300x)` / `![alt](url =x200)`
+      const closeParen = text.indexOf(')', q);
+      if (closeParen > q) {
+        const eq = parseImageEqSizeToken(text.slice(q, closeParen));
+        if (eq) {
+          return {
+            dest: unescapeMarkdownUrl(dest),
+            end: closeParen + 1,
+            title,
+            width: eq.width,
+            height: eq.height,
+          };
+        }
+      }
+      return null;
+    } else {
+      // #345 / #506 / #379 — Fallback for unencoded spaces in image paths/URLs
+      // (`![](D:/Program Files/a.png)`, `![](01 文件夹/shot(1).png)`, or
+      // `![](_assets/my pic.png =300x200)`). Walk balanced `(...)` from
+      // `openParen` so filenames like `shot(1).png` don't truncate early.
+      let closeParen = -1;
+      let parenDepth = 1;
+      for (let k = openParen + 1; k < n; k++) {
+        const ch = text[k];
+        if (ch === '\n' || ch === '\r') break;
+        if (ch === '\\' && k + 1 < n) {
+          k++;
+          continue;
+        }
+        if (ch === '(') parenDepth++;
+        else if (ch === ')') {
+          parenDepth--;
+          if (parenDepth === 0) {
+            closeParen = k;
+            break;
+          }
+        }
+      }
+      if (closeParen < 0) return null;
+      let candidate = text.slice(openParen + 1, closeParen).trim();
+      let eqWidth: string | null | undefined;
+      let eqHeight: string | null | undefined;
+      const eqTrail = /\s+(=\s*[^\s)]+)\s*$/.exec(candidate);
+      if (eqTrail) {
+        const eq = parseImageEqSizeToken(eqTrail[1]);
+        if (eq) {
+          eqWidth = eq.width;
+          eqHeight = eq.height;
+          candidate = candidate.slice(0, eqTrail.index).trim();
+        }
+      }
+      if (!candidate || /[<>"']/.test(candidate) || !IMAGE_EXT_RE.test(candidate)) {
+        return null;
+      }
+      return {
+        dest: unescapeMarkdownUrl(candidate),
+        end: closeParen + 1,
+        width: eqWidth,
+        height: eqHeight,
+      };
+    }
+  }
+
+  if (q >= n || text[q] !== ')') return null;
+  return { dest: unescapeMarkdownUrl(dest), end: q + 1, title, width, height };
+}
+
+function normalizeRefLabel(label: string): string {
+  return label.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 /**
- * #446 — Update the display width of a Markdown image (`![alt](url)` ->
+ * #506 — Collect Markdown link/image reference definitions (`[id]: url`) across
+ * document lines (ignoring lines inside fenced/indented code blocks).
+ */
+export function extractImageReferenceDefinitions(
+  lines: readonly string[],
+  fenceBody?: readonly boolean[],
+): Map<string, string> {
+  const refs = new Map<string, string>();
+  const defRe =
+    /^\s*(?:>\s*)*\[([^\]]+)\]:\s*(?:<([^>\s]+)>|([^\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/;
+  for (let i = 0; i < lines.length; i++) {
+    if (fenceBody?.[i]) continue;
+    const m = defRe.exec(lines[i]);
+    if (!m) continue;
+    const key = normalizeRefLabel(m[1]);
+    const dest = unescapeMarkdownUrl((m[2] || m[3] || '').trim());
+    if (key && dest && !refs.has(key)) {
+      refs.set(key, dest);
+    }
+  }
+  return refs;
+}
+
+function parseSingleImageAt(
+  text: string,
+  bangIndex: number,
+  code: readonly boolean[],
+  refMap?: ReadonlyMap<string, string>,
+): ParsedMarkdownImageSpan | null {
+  const n = text.length;
+  if (bangIndex + 1 >= n || text[bangIndex] !== '!' || text[bangIndex + 1] !== '[') {
+    return null;
+  }
+  let p = bangIndex + 2;
+  let depth = 1;
+  while (p < n) {
+    if (text[p] === '\\' && p + 1 < n) {
+      p += 2;
+      continue;
+    }
+    if (code[p]) {
+      p++;
+      continue;
+    }
+    if (text[p] === '[') depth++;
+    else if (text[p] === ']') {
+      depth--;
+      if (depth === 0) break;
+    }
+    p++;
+  }
+  if (depth !== 0 || p >= n) return null;
+  const altStart = bangIndex + 2;
+  const altEnd = p;
+  const alt = text.slice(altStart, altEnd);
+
+  // Inline destination: `![alt](url)` / `![alt](url =300x200)`
+  if (p + 1 < n && text[p + 1] === '(') {
+    const parsedDest = parseLinkDestinationAndTitle(text, p + 1);
+    if (parsedDest) {
+      return {
+        start: bangIndex,
+        end: parsedDest.end,
+        alt,
+        altStart,
+        altEnd,
+        src: parsedDest.dest,
+        ...(parsedDest.title !== undefined ? { title: parsedDest.title } : {}),
+        ...(parsedDest.width ? { width: parsedDest.width } : {}),
+        ...(parsedDest.height ? { height: parsedDest.height } : {}),
+      };
+    }
+  }
+
+  // Reference-style destination: `![alt][ref]`, `![alt][]`, or `![ref]`
+  if (refMap && refMap.size > 0) {
+    if (p + 1 < n && text[p + 1] === '[') {
+      let r = p + 2;
+      while (r < n && text[r] !== ']' && text[r] !== '[') {
+        if (text[r] === '\\' && r + 1 < n) {
+          r += 2;
+          continue;
+        }
+        r++;
+      }
+      if (r < n && text[r] === ']') {
+        const rawRef = text.slice(p + 2, r);
+        const key = normalizeRefLabel(rawRef || alt);
+        const resolved = key ? refMap.get(key) : undefined;
+        if (resolved) {
+          return {
+            start: bangIndex,
+            end: r + 1,
+            alt,
+            altStart,
+            altEnd,
+            src: resolved,
+          };
+        }
+      }
+    } else {
+      const key = normalizeRefLabel(alt);
+      const resolved = key ? refMap.get(key) : undefined;
+      if (resolved) {
+        return {
+          start: bangIndex,
+          end: p + 1,
+          alt,
+          altStart,
+          altEnd,
+          src: resolved,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * #506 — Find all Markdown image spans in a single line (outside inline code),
+ * including:
+ * - standalone images `![alt](url)`
+ * - images inside list items (`- ![alt](url)`, `1. ![alt](url)`) or blockquotes (`> ![alt](url)`)
+ * - clickable linked images (`[![alt](imgUrl)](linkUrl)`)
+ * - images with brackets in `alt` (`![[图1] 描述](url)`)
+ * - angle-bracketed URLs (`![alt](<url>)`) and balanced parentheses (`![alt](https://.../a(1).png)`)
+ * - single/double/paren-quoted titles (`![alt](url 'title')`)
+ * - reference-style images (`![alt][ref]`) when `refMap` is supplied.
+ */
+export function findMarkdownImagesInLine(
+  line: string,
+  refMap?: ReadonlyMap<string, string>,
+): ParsedMarkdownImageSpan[] {
+  if (!line.includes('![')) return [];
+  const n = line.length;
+  const code = maskInlineCode(line);
+  const out: ParsedMarkdownImageSpan[] = [];
+  let i = 0;
+  while (i < n) {
+    if (code[i]) {
+      i++;
+      continue;
+    }
+    if (line[i] === '\\' && i + 1 < n) {
+      i += 2;
+      continue;
+    }
+    // Linked image: `[![alt](imgUrl)](linkUrl)`
+    if (line[i] === '[' && i + 2 < n && line[i + 1] === '!' && line[i + 2] === '[') {
+      const inner = parseSingleImageAt(line, i + 1, code, refMap);
+      if (inner && inner.end + 1 < n && line[inner.end] === ']' && line[inner.end + 1] === '(') {
+        const outer = parseLinkDestinationAndTitle(line, inner.end + 1);
+        if (outer) {
+          out.push({
+            start: i,
+            end: outer.end,
+            alt: inner.alt,
+            altStart: inner.altStart,
+            altEnd: inner.altEnd,
+            src: inner.src,
+            ...(inner.title !== undefined ? { title: inner.title } : {}),
+            ...(inner.width ? { width: inner.width } : {}),
+            ...(inner.height ? { height: inner.height } : {}),
+            href: outer.dest,
+          });
+          i = outer.end;
+          continue;
+        }
+      }
+    }
+    // #379 — Obsidian-style wikilink image embed: `![[img.png]]`, `![[img.png|300]]`,
+    // `![[folder/img.png|caption|300x200]]` (only when closing `]]` has no inner `[`/`]`
+    // so `![[1] alt](url)` continues to parse as a standard Markdown image).
+    if (line[i] === '!' && i + 3 < n && line[i + 1] === '[' && line[i + 2] === '[') {
+      let closeIdx = -1;
+      for (let k = i + 3; k < n - 1; k++) {
+        if (code[k] || line[k] === '[') break;
+        if (line[k] === ']') {
+          if (line[k + 1] === ']') {
+            closeIdx = k;
+          }
+          break;
+        }
+      }
+      if (closeIdx > i + 3) {
+        const innerRaw = line.slice(i + 3, closeIdx);
+        const firstPipe = innerRaw.indexOf('|');
+        const rawTarget = (firstPipe >= 0 ? innerRaw.slice(0, firstPipe) : innerRaw).trim();
+        if (rawTarget && IMAGE_EXT_RE.test(rawTarget)) {
+          const meta = firstPipe >= 0 ? innerRaw.slice(firstPipe + 1).trim() : '';
+          let alt = '';
+          let width: string | null = null;
+          let height: string | null = null;
+          if (meta) {
+            const candidate = meta.includes('|') ? meta : `|${meta}`;
+            const parsed = parseImageAltSize(candidate);
+            if (parsed.width || parsed.height) {
+              alt = parsed.alt;
+              width = parsed.width;
+              height = parsed.height;
+            } else {
+              alt = meta;
+            }
+          }
+          const altStart = firstPipe >= 0 ? i + 3 + firstPipe : closeIdx;
+          const altEnd = closeIdx;
+          out.push({
+            start: i,
+            end: closeIdx + 2,
+            alt: width || height ? `${alt}|${width ? (width.endsWith('px') ? width.slice(0, -2) : width) : ''}${height ? `x${height.endsWith('px') ? height.slice(0, -2) : height}` : ''}` : alt,
+            altStart,
+            altEnd,
+            src: rawTarget,
+            ...(width ? { width } : {}),
+            ...(height ? { height } : {}),
+            isWikilink: true,
+          });
+          i = closeIdx + 2;
+          continue;
+        }
+      }
+    }
+    // Standard or reference image: `![alt](url)` / `![alt][ref]`
+    if (line[i] === '!' && i + 1 < n && line[i + 1] === '[') {
+      const img = parseSingleImageAt(line, i, code, refMap);
+      if (img) {
+        out.push(img);
+        i = img.end;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out;
+}
+
+/**
+ * #446 / #506 — Update the display width of a Markdown image (`![alt](url)` ->
  * `![alt|50%](url)`) or HTML `<img ...>` line. Passing `'100%'` or `''`
  * restores the natural/default 100% size by removing the size override.
- * Returns the updated line text, or `null` if the line is not an image line.
+ * Returns the updated line text, or `null` if the line has no image.
  */
 export function resizeMarkdownImageLine(line: string, size: string): string | null {
   const normalizedSize = size.trim();
   const isReset = !normalizedSize || normalizedSize === '100%';
-  const mdMatch = MD_IMAGE_RESIZE_RE.exec(line);
-  if (mdMatch) {
-    const baseAlt = parseImageAltSize(mdMatch[2]).alt;
+  const mdImages = findMarkdownImagesInLine(line);
+  if (mdImages.length > 0) {
+    const first = mdImages[0];
+    const baseAlt = parseImageAltSize(first.alt).alt;
+    if (first.isWikilink) {
+      const suffix = isReset
+        ? baseAlt
+          ? `|${baseAlt}`
+          : ''
+        : baseAlt
+          ? `|${baseAlt}|${normalizedSize}`
+          : `|${normalizedSize}`;
+      return `${line.slice(0, first.altStart)}${suffix}${line.slice(first.altEnd)}`;
+    }
+    const eqSuffixRe = /\s+=\s*(?:\d{1,4}(?:%|px)?(?:\s*[x×]\s*\d{1,4}(?:%|px)?)?|[x×]\s*\d{1,4}(?:%|px)?)\s*\)$/;
+    const rawTail = line.slice(first.altEnd, first.end);
+    if (eqSuffixRe.test(rawTail) && !first.alt.includes('|')) {
+      const nextTail = rawTail.replace(eqSuffixRe, isReset ? ')' : ` =${normalizedSize})`);
+      return `${line.slice(0, first.altStart)}${baseAlt}${nextTail}${line.slice(first.end)}`;
+    }
     const nextAlt = isReset
       ? baseAlt
       : baseAlt
         ? `${baseAlt}|${normalizedSize}`
         : `|${normalizedSize}`;
-    return `${mdMatch[1]}${nextAlt}${mdMatch[3]}`;
+    const tail = rawTail.replace(eqSuffixRe, ')');
+    return `${line.slice(0, first.altStart)}${nextAlt}${tail}${line.slice(first.end)}`;
   }
 
   const htmlMatch = HTML_IMG_TAG_RE.exec(line);
@@ -95,6 +614,12 @@ export function resizeMarkdownImageLine(line: string, size: string): string | nu
     let attrs = htmlMatch[1]
       .replace(/\s+width\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
       .replace(/\s+height\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    // #499 — reuse the Markdown alt grammar so "only height" (`x250`) works
+    // for HTML images too.
+    const spec = parseImageAltSize(`|${normalizedSize}`);
+    const dims: string[] = [];
+    if (spec.width) dims.push(`width: ${spec.width};`);
+    if (spec.height) dims.push(`height: ${spec.height};`);
     if (/\bstyle\s*=\s*"([^"]*)"/i.test(attrs)) {
       attrs = attrs.replace(/\bstyle\s*=\s*"([^"]*)"/i, (_m, styleBody: string) => {
         const cleaned = styleBody
@@ -102,12 +627,16 @@ export function resizeMarkdownImageLine(line: string, size: string): string | nu
           .replace(/^;\s*|\s*;$/g, '')
           .trim();
         if (isReset) return cleaned ? `style="${cleaned}"` : '';
-        const dim = normalizeImageDimension(normalizedSize);
-        return `style="${cleaned ? `${cleaned}; ` : ''}width: ${dim};"`;
+        return `style="${cleaned ? `${cleaned}; ` : ''}${dims.join(' ')}"`;
       });
     } else if (!isReset) {
-      const dim = normalizeImageDimension(normalizedSize);
-      attrs = `${attrs.trimEnd()} width="${dim.endsWith('px') ? dim.slice(0, -2) : dim}" style="width: ${dim};"`;
+      const wAttr = spec.width
+        ? ` width="${spec.width.endsWith('px') ? spec.width.slice(0, -2) : spec.width}"`
+        : '';
+      const hAttr = spec.height
+        ? ` height="${spec.height.endsWith('px') ? spec.height.slice(0, -2) : spec.height}"`
+        : '';
+      attrs = `${attrs.trimEnd()}${wAttr}${hAttr} style="${dims.join(' ')}"`;
     }
     const cleanAttrs = attrs.replace(/\s{2,}/g, ' ').trim();
     const selfClose = htmlMatch[2] ? ' /' : '';
@@ -120,3 +649,21 @@ export function resizeMarkdownImageLine(line: string, size: string): string | nu
   return null;
 }
 
+
+/**
+ * #561 — `true` when the whole line is one Markdown image and nothing else.
+ *
+ * Live mode renders such a line as the picture; keeping that decision (and the
+ * "there is also a source line to show" decision that follows from it) in one
+ * tested place beats a regex duplicated across the editor front ends.
+ */
+export function isStandaloneImageLine(
+  line: string,
+  refMap?: ReadonlyMap<string, string>,
+): boolean {
+  if (!line.includes('![') || line.includes('\n')) return false;
+  const spans = findMarkdownImagesInLine(line, refMap);
+  if (spans.length !== 1) return false;
+  const span = spans[0]!;
+  return line.slice(0, span.start).trim() === '' && line.slice(span.end).trim() === '';
+}

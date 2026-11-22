@@ -27,6 +27,8 @@ const { t } = useI18n();
 
 const PAT_HELP_URL =
   'https://github.com/settings/tokens/new?scopes=repo&description=SoloMD%20sync';
+const GITEE_PAT_HELP_URL =
+  'https://gitee.com/profile/personal_access_tokens/new';
 
 const tokenInput = ref('');
 const tokenSaving = ref(false);
@@ -36,12 +38,17 @@ const creatingRepo = ref(false);
 const linking = ref(false);
 const showAdvanced = ref(false);
 
-// v2.6.3 — multi-provider + E2EE state
-// PR #150 narrowed this to 'github' | 'gitea'; restored to the full set —
-// GitLab and custom HTTPS remotes have been supported since v2.6.3 and are
-// still reachable through the clone-URL path below.
-const providerChoice = ref<'github' | 'gitlab' | 'gitea' | 'custom'>('github');
+// v2.6.3 / #602 — multi-provider + first-class Gitee (码云) + E2EE state
+const providerChoice = ref<'github' | 'gitee' | 'gitlab' | 'codeberg' | 'gitea' | 'custom'>('github');
+const isGiteaFamily = computed(() => providerChoice.value === 'gitea' || providerChoice.value === 'codeberg');
+const isGitee = computed(() => providerChoice.value === 'gitee');
 const giteaCloneUrl = ref('');
+const giteeTokenInput = ref('');
+const giteeTokenSaving = ref(false);
+const giteeRepoName = ref('');
+const giteeRepoPrivate = ref(true);
+const giteeCreatingRepo = ref(false);
+const giteeCloneUrl = ref('');
 // Gitee IKEQJ5 — GitLab and custom HTTPS remotes have no repo-list API to
 // browse, so pasting a clone URL is the ONLY way to link one. There was no
 // field for it: picking "Custom HTTPS git URL" led to a token box and then an
@@ -81,7 +88,7 @@ function tSync(key: string, params?: Record<string, string | number>): string {
     pulledToast: 'giteaPulledToast',
     repoCreatedToast: 'giteaRepoCreatedToast',
   };
-  const actual = providerChoice.value === 'gitea' ? (gitea[key] ?? key) : key;
+  const actual = isGiteaFamily.value ? (gitea[key] ?? key) : key;
   return t(`githubSync.${actual}`, params);
 }
 
@@ -121,18 +128,27 @@ async function commitE2eeUpgrade() {
 }
 
 onMounted(async () => {
-  await sync.refreshHasToken();
+  await Promise.all([sync.refreshHasToken(), sync.refreshHasGiteeToken()]);
   if (workspace.currentFolder) {
     await sync.refreshStatus(workspace.currentFolder);
     // Sync provider choice with the linked workspace's provider so the
-    // correct setup flow (GitHub / Gitea) is shown.
+    // correct setup flow (GitHub / Gitee / Codeberg / Gitea) is shown.
     if (sync.status?.provider) {
-      providerChoice.value = sync.status.provider as any;
+      if (sync.status.provider === 'gitea' && /codeberg\.org/i.test(sync.status.remote_url ?? '')) {
+        providerChoice.value = 'codeberg';
+      } else if (/gitee\.com/i.test(sync.status.remote_url ?? '') && sync.status.provider === 'gitee') {
+        providerChoice.value = 'gitee';
+      } else {
+        providerChoice.value = sync.status.provider as any;
+      }
     }
   }
-  // Initialize Gitea state when the active (or linked) provider is Gitea.
-  if (sync.status?.provider === 'gitea' || providerChoice.value === 'gitea') {
+  // Initialize Gitea/Codeberg state when the active (or linked) provider is Gitea/Codeberg.
+  if (sync.status?.provider === 'gitea' || isGiteaFamily.value) {
     await initGiteaState();
+  }
+  if (sync.status?.provider === 'gitee' || isGitee.value) {
+    await initGiteeState();
   }
   // GitHub-specific preloading only when GitHub is the active provider.
   if (providerChoice.value === 'github' && sync.hasToken && !sync.isLinked) {
@@ -145,7 +161,14 @@ onMounted(async () => {
 /** Reconnect after the saved token went bad: drop the dead credential so the
  *  sign-in form reappears (the workspace ↔ repo link is kept). */
 async function reconnect() {
-  await sync.clearToken();
+  if (isGiteaFamily.value) {
+    await sync.clearGiteaToken();
+    giteaStep.value = 'token';
+  } else if (isGitee.value) {
+    await sync.clearGiteeToken();
+  } else {
+    await sync.clearToken();
+  }
 }
 
 watch(
@@ -158,8 +181,10 @@ watch(
 watch(
   () => providerChoice.value,
   (p) => {
-    if (p === 'gitea') {
+    if (p === 'gitea' || p === 'codeberg') {
       void initGiteaState();
+    } else if (p === 'gitee') {
+      void initGiteeState();
     }
   },
 );
@@ -241,7 +266,7 @@ async function link(remoteUrl: string) {
   try {
     await sync.link(workspace.currentFolder, remoteUrl, {
       encrypted: enableE2ee.value,
-      provider: providerChoice.value,
+      provider: isGiteaFamily.value ? 'gitea' : providerChoice.value,
     });
     toasts.success(t('githubSync.linkedToast'));
   } catch (e) {
@@ -305,18 +330,74 @@ async function unlink() {
   }
 }
 
+const gitProgressActive = ref(false);
+const gitProgressPercent = ref(0);
+const gitProgressDirection = ref<'push' | 'pull' | ''>('');
+const gitProgressLogs = ref<string[]>([]);
+let gitProgressTimer: number | null = null;
+
+function fmtGitLogTime(): string {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+function appendGitLog(msg: string) {
+  if (!msg) return;
+  gitProgressLogs.value.push(`[${fmtGitLogTime()}] ${msg}`);
+  if (gitProgressLogs.value.length > 100) {
+    gitProgressLogs.value.splice(0, gitProgressLogs.value.length - 100);
+  }
+}
+
+function startGitProgress(dir: 'push' | 'pull', startMsg: string) {
+  if (gitProgressTimer !== null) {
+    window.clearInterval(gitProgressTimer);
+    gitProgressTimer = null;
+  }
+  gitProgressActive.value = true;
+  gitProgressPercent.value = 10;
+  gitProgressDirection.value = dir;
+  gitProgressLogs.value = [];
+  appendGitLog(startMsg);
+  gitProgressTimer = window.setInterval(() => {
+    if (gitProgressPercent.value < 88) {
+      gitProgressPercent.value = Math.min(88, gitProgressPercent.value + 7);
+    }
+  }, 350);
+}
+
+function finishGitProgress(ok: boolean, finalMsg: string) {
+  if (gitProgressTimer !== null) {
+    window.clearInterval(gitProgressTimer);
+    gitProgressTimer = null;
+  }
+  gitProgressActive.value = false;
+  if (ok) {
+    gitProgressPercent.value = 100;
+  }
+  appendGitLog(finalMsg);
+}
+
 async function pushNow() {
   if (!workspace.currentFolder) return;
   if (!commitMsg.value.trim()) {
     toasts.warning(t('githubSync.commitMsgEmptyError'));
     return;
   }
+  const msgText = commitMsg.value.trim();
+  startGitProgress('push', `${t('githubSync.pushing')} (${linkedRepoLabel.value || workspace.currentFolder}) — "${msgText}"`);
   try {
-    await sync.push(workspace.currentFolder, commitMsg.value.trim());
+    await sync.push(workspace.currentFolder, msgText);
     commitMsg.value = '';
-    toasts.success(tSync('pushedToast'));
+    const okMsg = tSync('pushedToast');
+    finishGitProgress(true, `✅ ${okMsg}`);
+    toasts.success(okMsg);
   } catch (e) {
     const errType = classifyPushError(e);
+    finishGitProgress(false, `❌ ${t('githubSync.pushFailed')}: ${e}`);
     if (errType === 'protected-branch') {
       toasts.warning(t('githubSync.pushBlockedByBranchProtection'), 8000);
     } else if (errType === 'non-fast-forward') {
@@ -329,17 +410,25 @@ async function pushNow() {
 
 async function pullNow() {
   if (!workspace.currentFolder) return;
+  startGitProgress('pull', `${t('githubSync.pulling')} (${linkedRepoLabel.value || workspace.currentFolder})…`);
   try {
     const r = await sync.pull(workspace.currentFolder);
     if (r.kind === 'up_to_date') {
-      toasts.info(t('githubSync.upToDate'));
+      const msg = t('githubSync.upToDate');
+      finishGitProgress(true, `✅ ${msg}`);
+      toasts.info(msg);
     } else if (r.kind === 'conflicts') {
-      toasts.warning(t('githubSync.pullConflicts', { n: String(r.conflicts.length) }));
+      const msg = t('githubSync.pullConflicts', { n: String(r.conflicts.length) });
+      finishGitProgress(false, `⚠️ ${msg}`);
+      toasts.warning(msg);
     } else {
-      toasts.success(tSync('pulledToast'));
+      const msg = tSync('pulledToast');
+      finishGitProgress(true, `✅ ${msg}`);
+      toasts.success(msg);
       window.dispatchEvent(new CustomEvent('solomd:remote-pulled'));
     }
   } catch (e) {
+    finishGitProgress(false, `❌ ${t('githubSync.pullFailed')}: ${e}`);
     const errType = classifyPullError(e);
     if (errType === 'auth') {
       // Handled by store.tokenInvalid flag → reconnect banner
@@ -380,6 +469,110 @@ function openPATHelp() {
   void openUrl(PAT_HELP_URL);
 }
 
+function openGiteePATHelp() {
+  void openUrl(GITEE_PAT_HELP_URL);
+}
+
+// ─── Gitee (码云) helpers (#602) ─────────────────────────────
+
+let _initGiteeBusy = false;
+async function initGiteeState() {
+  if (_initGiteeBusy) return;
+  _initGiteeBusy = true;
+  try {
+    await sync.refreshHasGiteeToken();
+    if (sync.hasGiteeToken) {
+      await Promise.all([
+        sync.refreshGiteeUser(),
+        !sync.isLinked ? sync.listGiteeRepos().catch(() => {}) : Promise.resolve(),
+      ]);
+    }
+  } finally {
+    _initGiteeBusy = false;
+  }
+}
+
+async function saveGiteeToken() {
+  const tok = giteeTokenInput.value.trim();
+  if (!tok) return;
+  giteeTokenSaving.value = true;
+  try {
+    await sync.setGiteeToken(tok);
+    giteeTokenInput.value = '';
+    toasts.success(t('githubSync.tokenSavedToast'));
+    await sync.listGiteeRepos().catch((e) => {
+      toasts.error(`${t('githubSync.tokenInvalid')}: ${e}`);
+      void sync.clearGiteeToken();
+    });
+  } catch (e) {
+    toasts.error(String(e));
+    void sync.clearGiteeToken();
+  } finally {
+    giteeTokenSaving.value = false;
+  }
+}
+
+async function clearGiteeToken() {
+  if (sync.status?.linked && workspace.currentFolder) {
+    await sync.unlink(workspace.currentFolder).catch(() => {});
+  }
+  await sync.clearGiteeToken();
+  toasts.info(t('githubSync.tokenClearedToast'));
+}
+
+async function refreshGiteeRepos() {
+  try {
+    await sync.listGiteeRepos();
+  } catch (e) {
+    toasts.error(String(e));
+  }
+}
+
+async function linkGiteeRepo(cloneUrl: string) {
+  if (!workspace.currentFolder) {
+    toasts.warning(t('githubSync.noWorkspace'));
+    return;
+  }
+  if (!settings.autoGitEnabled) settings.toggleAutoGit();
+  linking.value = true;
+  try {
+    await sync.link(workspace.currentFolder, cloneUrl, {
+      encrypted: enableE2ee.value,
+      provider: 'gitee',
+    });
+    toasts.success(t('githubSync.linkedToast'));
+  } catch (e) {
+    toasts.error(`${t('githubSync.linkFailed')}: ${e}`);
+  } finally {
+    linking.value = false;
+  }
+}
+
+async function linkGiteeClone() {
+  const url = giteeCloneUrl.value.trim();
+  if (!url) return;
+  await linkGiteeRepo(url);
+  giteeCloneUrl.value = '';
+}
+
+async function createGiteeRepoAction() {
+  const name = giteeRepoName.value.trim();
+  if (!name) return;
+  giteeCreatingRepo.value = true;
+  try {
+    const repo = await sync.createGiteeRepo(name, giteeRepoPrivate.value);
+    toasts.success(tSync('repoCreatedToast', { name: repo.full_name }));
+    giteeRepoName.value = '';
+    if (workspace.currentFolder) {
+      await linkGiteeRepo(repo.clone_url);
+    }
+  } catch (e) {
+    toasts.error(`${t('githubSync.repoCreateFailed')}: ${e}`);
+  } finally {
+    giteeCreatingRepo.value = false;
+  }
+}
+
 // ─── Gitea helpers ──────────────────────────────────────────
 
 let _initGiteaBusy = false;
@@ -387,6 +580,19 @@ async function initGiteaState() {
   if (_initGiteaBusy) return;
   _initGiteaBusy = true;
   try {
+    if (providerChoice.value === 'codeberg') {
+      const codebergUrl = 'https://codeberg.org';
+      giteaUrlInput.value = codebergUrl;
+      await sync.setGiteaUrl(codebergUrl);
+      await sync.refreshHasGiteaToken();
+      if (sync.hasGiteaToken) {
+        giteaStep.value = 'ready';
+        await sync.listGiteaRepos(codebergUrl).catch(() => {});
+      } else {
+        giteaStep.value = 'token';
+      }
+      return;
+    }
     const saved = await sync.getGiteaUrl();
     if (saved) {
       giteaUrlInput.value = saved;
@@ -517,23 +723,17 @@ const linkedRepoLabel = computed(() => {
 
 <template>
   <section class="ghs">
-    <h3 class="ghs__heading">{{ providerChoice === 'gitea' ? 'Gitea sync' : t('githubSync.heading') }}</h3>
-    <p class="ghs__intro">{{ providerChoice === 'gitea' ? t('githubSync.giteaIntro') : t('githubSync.intro') }}</p>
+    <h3 class="ghs__heading">{{ providerChoice === 'gitee' ? (settings.language === 'zh' ? 'Gitee（码云）同步' : 'Gitee sync') : providerChoice === 'codeberg' ? 'Codeberg sync' : providerChoice === 'gitea' ? 'Gitea sync' : t('githubSync.heading') }}</h3>
+    <p class="ghs__intro">{{ isGitee ? (settings.language === 'zh' ? '通过 Gitee（码云）国内高速 Git 仓库直连同步你的本地知识库，无需代理。' : 'Sync your vault directly with Gitee (gitee.com) via Personal Access Token.') : isGiteaFamily ? t('githubSync.giteaIntro') : t('githubSync.intro') }}</p>
 
-    <!-- Provider picker — always visible so the user can choose their sync
-         backend before anything else happens. This is the single picker for
-         the whole panel: PR #150 introduced it, and it structurally fixes what
-         #229 patched around, namely that the provider used to be selectable
-         only after a token had been saved — which a self-hosted user could never
-         reach, because their token was validated against api.github.com,
-         rejected, and deleted. The duplicate pickers #229 added to State 1 and
-         State 2 were removed in favour of this one. -->
     <div class="ghs-card" style="padding: 8px 12px;">
       <div class="ghs-sub-title" style="margin-top: 0;">{{ t('githubSync.providerTitle') }}</div>
       <div class="ghs-row">
         <select v-model="providerChoice" class="ghs-select" style="flex: 1;">
           <option value="github">GitHub</option>
+          <option value="gitee">{{ settings.language === 'zh' ? 'Gitee（码云，国内直连推荐）' : 'Gitee (gitee.com)' }}</option>
           <option value="gitlab">GitLab</option>
+          <option value="codeberg">Codeberg</option>
           <option value="gitea">Gitea / Forgejo (self-hosted)</option>
           <option value="custom">{{ t('githubSync.customProvider') }}</option>
         </select>
@@ -543,11 +743,6 @@ const linkedRepoLabel = computed(() => {
       </p>
     </div>
 
-    <!-- v3.0 — first-time-setup hint. macOS prompts the user once for
-         the GitHub PAT and (if E2EE on) once for the encryption key.
-         Both prompts have "Always Allow" — clicking it once silences
-         all future runs. We surface this proactively so users don't
-         think the prompts are spam. -->
     <div class="ghs-keychain-hint">
       <span class="ghs-keychain-hint__icon">🔑</span>
       <div>
@@ -558,11 +753,11 @@ const linkedRepoLabel = computed(() => {
 
     <!-- Token-expired banner: the saved PAT was rejected by the provider (401 /
          Bad credentials). Sync is paused until the user reconnects. -->
-    <div v-if="sync.tokenInvalid || sync.giteaTokenInvalid" class="ghs-authwarn">
+    <div v-if="sync.tokenInvalid || sync.giteaTokenInvalid || sync.giteeTokenInvalid" class="ghs-authwarn">
       <span class="ghs-authwarn__icon">⚠️</span>
       <div class="ghs-authwarn__body">
-        <strong>{{ providerChoice === 'gitea' ? t('githubSync.giteaTokenExpiredTitle') : t('githubSync.tokenExpiredTitle') }}</strong>
-        <p>{{ providerChoice === 'gitea' ? t('githubSync.giteaTokenExpiredBanner') : t('githubSync.tokenExpiredBanner') }}</p>
+        <strong>{{ isGiteaFamily ? t('githubSync.giteaTokenExpiredTitle') : t('githubSync.tokenExpiredTitle') }}</strong>
+        <p>{{ isGiteaFamily ? t('githubSync.giteaTokenExpiredBanner') : t('githubSync.tokenExpiredBanner') }}</p>
       </div>
       <button class="ghs-btn ghs-btn--primary" @click="reconnect">
         {{ t('githubSync.reconnectBtn') }}
@@ -581,12 +776,34 @@ const linkedRepoLabel = computed(() => {
     <!-- ──────────────────────────────────────────────────────────────── -->
     <!-- State 1: no PAT — sign-in form                                   -->
     <!-- ──────────────────────────────────────────────────────────────── -->
-    <!-- Gitea has its own URL-then-token flow below; every other provider
-         (GitHub, GitLab, custom HTTPS) signs in with a bare token here. PR
-         #150 had narrowed this to `providerChoice === 'github'`, which left
-         GitLab / custom users with no card at all. The provider picker itself
-         now lives once, at the top of the panel. -->
-    <div v-if="providerChoice !== 'gitea' && !sync.hasToken" class="ghs-card">
+    <div v-if="isGitee && !sync.hasGiteeToken" class="ghs-card">
+      <div class="ghs-card__title">{{ settings.language === 'zh' ? '连接 Gitee（码云）私人令牌' : 'Connect with Gitee Personal Access Token' }}</div>
+      <p class="ghs-help">
+        {{ settings.language === 'zh'
+          ? '粘贴 Gitee 私人令牌（勾选 projects 与 user_info 权限），保存于系统钥匙串中，即可拉取仓库列表或一键创建私有知识库。'
+          : 'Paste a Gitee Personal Access Token (with projects & user_info scopes) to browse or create repositories.' }}
+      </p>
+      <div class="ghs-row">
+        <input
+          v-model="giteeTokenInput"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          class="ghs-input ghs-input--mono"
+          :placeholder="settings.language === 'zh' ? '粘贴 Gitee 私人令牌…' : 'Paste Gitee Personal Access Token…'"
+        />
+      </div>
+      <div class="ghs-row">
+        <button class="ghs-btn ghs-btn--primary" :disabled="giteeTokenSaving || !giteeTokenInput.trim()" @click="saveGiteeToken">
+          {{ giteeTokenSaving ? t('githubSync.tokenSaving') : t('githubSync.tokenSaveBtn') }}
+        </button>
+        <button class="ghs-btn" @click="openGiteePATHelp">
+          {{ settings.language === 'zh' ? '前往 Gitee 生成私人令牌 ↗' : 'Generate Gitee Token ↗' }}
+        </button>
+      </div>
+    </div>
+
+    <div v-else-if="!isGiteaFamily && !isGitee && !sync.hasToken" class="ghs-card">
       <div class="ghs-card__title">{{ t('githubSync.signInTitle') }}</div>
       <p class="ghs-help">{{ t('githubSync.signInHint') }}</p>
       <p v-if="providerChoice !== 'github'" class="ghs-help">
@@ -615,8 +832,8 @@ const linkedRepoLabel = computed(() => {
       <p class="ghs-fineprint">{{ t('githubSync.tokenScopeHint') }}</p>
     </div>
 
-    <!-- ─── Gitea: no URL / no token yet ──────────────────────────── -->
-    <div v-else-if="providerChoice === 'gitea' && (!sync.hasGiteaToken || giteaStep !== 'ready')" class="ghs-card">
+    <!-- ─── Gitea / Codeberg: no URL / no token yet ───────────────── -->
+    <div v-else-if="isGiteaFamily && (!sync.hasGiteaToken || giteaStep !== 'ready')" class="ghs-card">
       <!-- Step 1: Gitea server URL -->
       <div v-if="giteaStep === 'url'">
         <div class="ghs-card__title">{{ t('githubSync.giteaUrlTitle') }}</div>
@@ -660,7 +877,7 @@ const linkedRepoLabel = computed(() => {
           >
             {{ giteaTokenSaving ? t('githubSync.tokenSaving') : t('githubSync.tokenSaveBtn') }}
           </button>
-          <button class="ghs-btn" @click="giteaStep = 'url'">
+          <button v-if="providerChoice !== 'codeberg'" class="ghs-btn" @click="giteaStep = 'url'">
             {{ t('githubSync.backBtn') }}
           </button>
         </div>
@@ -676,8 +893,11 @@ const linkedRepoLabel = computed(() => {
              comes from api.github.com, so for GitLab / custom remotes it stays
              null and "signed in as …" would be a lie (#229) — those fall back
              to a neutral title. -->
-        <template v-if="providerChoice === 'gitea'">
+        <template v-if="isGiteaFamily">
           {{ t('githubSync.giteaSignedInAs', { user: sync.giteaUser?.login ?? '…' }) }}
+        </template>
+        <template v-else-if="isGitee">
+          {{ t('githubSync.signedInAs', { user: sync.giteeUser?.login ?? '…' }) }}
         </template>
         <template v-else-if="providerChoice === 'github'">
           {{ t('githubSync.signedInAs', { user: sync.user?.login ?? '…' }) }}
@@ -759,8 +979,8 @@ const linkedRepoLabel = computed(() => {
           </div>
         </div>
 
-        <!-- Gitea — repo picker (token ready) -->
-        <div v-if="providerChoice === 'gitea' && giteaStep === 'ready'" class="ghs-subblock">
+        <!-- Gitea / Codeberg — repo picker (token ready) -->
+        <div v-if="isGiteaFamily && giteaStep === 'ready'" class="ghs-subblock">
           <div class="ghs-sub-title">{{ t('githubSync.giteaSignedInAs', { user: sync.giteaUser?.login ?? '…' }) }}</div>
 
           <!-- Create new repo on Gitea -->
@@ -848,6 +1068,90 @@ const linkedRepoLabel = computed(() => {
           </div>
         </div>
 
+        <!-- #602 — Gitee (码云): create new + pick existing + paste clone URL -->
+        <div v-if="isGitee && sync.hasGiteeToken" class="ghs-subblock">
+          <div class="ghs-subblock" style="border: none; padding-top: 0;">
+            <div class="ghs-sub-title">{{ t('githubSync.createNewTitle') }}</div>
+            <div class="ghs-row">
+              <input
+                v-model="giteeRepoName"
+                type="text"
+                class="ghs-input"
+                :placeholder="t('githubSync.newRepoPlaceholder')"
+              />
+            </div>
+            <div class="ghs-row">
+              <label class="ghs-checkbox">
+                <input v-model="giteeRepoPrivate" type="checkbox" />
+                {{ t('githubSync.privateRepo') }}
+              </label>
+            </div>
+            <div class="ghs-row">
+              <button
+                class="ghs-btn ghs-btn--primary"
+                :disabled="giteeCreatingRepo || !giteeRepoName.trim()"
+                @click="createGiteeRepoAction"
+              >
+                {{ giteeCreatingRepo ? t('githubSync.creatingRepo') : t('githubSync.createAndLinkBtn') }}
+              </button>
+            </div>
+          </div>
+
+          <div class="ghs-subblock">
+            <div class="ghs-sub-title">{{ t('githubSync.pickExistingTitle') }}</div>
+            <div v-if="sync.giteeLoading" class="ghs-help">{{ t('githubSync.loadingRepos') }}</div>
+            <div v-else-if="!sync.giteeRepos.length" class="ghs-help">
+              {{ t('githubSync.noReposFound') }}
+              <button class="ghs-btn ghs-btn--small" @click="refreshGiteeRepos">{{ t('githubSync.refreshRepos') }}</button>
+            </div>
+            <ul v-else class="ghs-repolist">
+              <li v-for="r in sync.giteeRepos" :key="r.full_name" class="ghs-repolist__item">
+                <div class="ghs-repolist__meta">
+                  <span class="ghs-repolist__name">{{ r.full_name }}</span>
+                  <span v-if="r.private" class="ghs-repolist__pill">{{ t('githubSync.privateBadge') }}</span>
+                </div>
+                <button
+                  class="ghs-btn ghs-btn--small"
+                  :disabled="linking"
+                  @click="linkGiteeRepo(r.clone_url)"
+                >
+                  {{ t('githubSync.linkBtn') }}
+                </button>
+              </li>
+            </ul>
+
+            <div class="ghs-subblock">
+              <div class="ghs-sub-title">{{ t('githubSync.giteaCloneUrlTitle') }}</div>
+              <div class="ghs-row">
+                <input
+                  v-model="giteeCloneUrl"
+                  type="text"
+                  class="ghs-input ghs-input--mono"
+                  placeholder="https://gitee.com/owner/repo.git"
+                />
+              </div>
+              <div class="ghs-row">
+                <button
+                  class="ghs-btn ghs-btn--primary"
+                  :disabled="linking || !giteeCloneUrl.trim()"
+                  @click="linkGiteeClone"
+                >
+                  {{ t('githubSync.linkBtn') }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="ghs-row">
+            <button class="ghs-btn ghs-btn--ghost" @click="clearGiteeToken">
+              {{ t('githubSync.signOutBtn') }}
+            </button>
+            <button class="ghs-btn ghs-btn--ghost" @click="refreshGiteeRepos">
+              {{ t('githubSync.refreshRepos') }}
+            </button>
+          </div>
+        </div>
+
         <!-- Pick existing (GitHub only — repo list API is GitHub-shaped) -->
         <div v-if="providerChoice === 'github'" class="ghs-subblock">
           <div class="ghs-sub-title">{{ t('githubSync.pickExistingTitle') }}</div>
@@ -873,11 +1177,7 @@ const linkedRepoLabel = computed(() => {
           </ul>
         </div>
 
-        <!-- Sign-out is not GitHub-specific: `clearToken` drops whichever
-             provider's token is saved. Gating it on GitHub stranded GitLab /
-             custom users with a token they could not remove. Refreshing the
-             repo list stays GitHub-only — it is the only provider we list. -->
-        <div v-if="providerChoice !== 'gitea'" class="ghs-row">
+        <div v-if="!isGiteaFamily && !isGitee" class="ghs-row">
           <button class="ghs-btn ghs-btn--ghost" @click="clearToken">
             {{ t('githubSync.signOutBtn') }}
           </button>
@@ -942,6 +1242,34 @@ const linkedRepoLabel = computed(() => {
         >
           {{ sync.pulling ? t('githubSync.pulling') : t('githubSync.pullNow') }}
         </button>
+      </div>
+
+      <div
+        v-if="gitProgressActive || gitProgressLogs.length > 0"
+        class="ghs-progress-card"
+      >
+        <div class="ghs-progress-head">
+          <span>
+            {{
+              gitProgressActive
+                ? (gitProgressDirection === 'pull' ? t('githubSync.pulling') : t('githubSync.pushing'))
+                : (settings.language === 'zh' ? '📋 Git 同步进度与日志' : '📋 Git Sync Progress & Log')
+            }}
+          </span>
+          <span class="ghs-progress-pct">{{ gitProgressPercent }}%</span>
+        </div>
+        <div class="ghs-progress-track">
+          <div
+            class="ghs-progress-fill"
+            :class="{ 'ghs-progress-fill--active': gitProgressActive }"
+            :style="{ width: `${Math.max(2, Math.min(100, gitProgressPercent))}%` }"
+          />
+        </div>
+        <div class="ghs-log-box">
+          <div v-for="(line, i) in gitProgressLogs" :key="i" class="ghs-log-line">
+            {{ line }}
+          </div>
+        </div>
       </div>
 
       <!-- v3.0 — upgrade plaintext-linked workspace to E2EE. Closed-by-default
@@ -1413,5 +1741,75 @@ const linkedRepoLabel = computed(() => {
   font-size: 11px;
   color: var(--text-muted);
   line-height: 1.6;
+}
+.ghs-progress-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated, rgba(127, 127, 127, 0.06));
+}
+.ghs-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.ghs-progress-pct {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.ghs-progress-track {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.18);
+  overflow: hidden;
+}
+.ghs-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent, #3b82f6);
+  transition: width 0.2s ease;
+}
+.ghs-progress-fill--active {
+  background: linear-gradient(
+    90deg,
+    var(--accent, #3b82f6) 0%,
+    rgba(96, 165, 250, 0.95) 50%,
+    var(--accent, #3b82f6) 100%
+  );
+  background-size: 200% 100%;
+  animation: ghs-shimmer 1.5s linear infinite;
+}
+@keyframes ghs-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+.ghs-log-box {
+  max-height: 110px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg-primary, rgba(0, 0, 0, 0.12));
+  border: 1px solid var(--border);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+.ghs-log-line {
+  word-break: break-all;
 }
 </style>

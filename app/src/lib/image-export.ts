@@ -9,7 +9,7 @@
 
 // html2pdf.js bundles html2canvas; we import it directly for image-only use.
 // @ts-ignore — no types
-import { initMermaid } from './mermaid-lazy';
+import { renderMermaidCached } from './mermaid-lazy';
 import { sanitizeModernColors } from './export-colors';
 import { renderMarkdown, extractImageRoot } from './markdown';
 import { loadRenderDeps } from './render-deps';
@@ -121,6 +121,7 @@ const IMAGE_CSS = `
   .img-page table { border-collapse: collapse; margin: 1.3em 0; width: 100%; font-size: .95em; }
   /* #370 — long unbreakable runs break inside the cell, not past the card. */
   .img-page th, .img-page td { border: 1px solid #e6e2d8; padding: 7px 13px; text-align: left; overflow-wrap: anywhere; word-break: break-word; }
+  .img-page th::after, .img-page td::after { content: '\\00a0'; display: inline-block; width: 0; overflow: hidden; visibility: hidden; }
   .img-page .cell-nowrap { white-space: nowrap; }
   .img-page thead th { background: #ffe7cc; font-weight: 700; border-bottom: 2px solid #ff9f40; }
   .img-page hr { border: none; border-top: 1px solid #e6e2d8; margin: 2em 0; }
@@ -146,32 +147,25 @@ const IMAGE_CSS = `
   .img-footer .brand { color: #ff9f40; font-weight: 600; }
 `;
 
-let mermaidId = 0;
-
 async function processMermaidBlocks(container: HTMLElement) {
   const blocks = container.querySelectorAll('pre > code.language-mermaid');
   if (!blocks.length) return;
-  const mermaid = await initMermaid({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    theme: 'default',
-  });
+  // #522 — shared serial queue + cache; the export container is detached.
   for (const block of Array.from(blocks)) {
     const pre = block.parentElement as HTMLElement | null;
     if (!pre) continue;
     const code = (block.textContent || '').trim();
-    const id = `img-mmd-${++mermaidId}`;
-    try {
-      const { svg } = await mermaid.render(id, code);
+    const result = await renderMermaidCached('default', code);
+    if (result.svg) {
       const wrap = document.createElement('div');
       wrap.className = 'mermaid-block';
-      wrap.innerHTML = svg;
+      wrap.innerHTML = result.svg;
       pre.replaceWith(wrap);
-    } catch (e) {
+    } else {
       // Say why where the diagram would have been, like Preview does.
       const err = document.createElement('pre');
       err.className = 'mermaid-error';
-      err.textContent = `Mermaid error: ${(e as Error).message}`;
+      err.textContent = `Mermaid error: ${result.error ?? 'unknown error'}`;
       pre.replaceWith(err);
     }
   }

@@ -56,11 +56,12 @@ interface Line {
   heading: boolean;
   /** Block construct (fence, heading, hr, table, math, HTML block) that cannot be lazy list continuation. */
   blockBreak: boolean;
-  item: { num: number; delim: string; numFrom: number; numTo: number } | null;
+  item: { num: number; delim: string; numFrom: number; numTo: number; missingSpace?: boolean } | null;
 }
 
 const QUOTE = /^((?:[ \t]*>[ \t]?)*)/;
 const ORDERED = /^([ \t]*)(\d{1,9})([.)])(?=[ \t]|$)/;
+const ORDERED_CJK_NO_SPACE = /^([ \t]*)(\d{1,3})([.)])(?=[\u3400-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef“”‘’（【《「『])/;
 const BULLET = /^[ \t]*[-*+](?=[ \t]|$)/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const ATX_HEADING = /^[ \t]{0,3}#{1,6}(?!#)/;
@@ -111,9 +112,20 @@ function parseLines(text: string): Line[] {
       line.blockBreak = true;
     } else {
       const m = rest.match(ORDERED);
+      const mNoSpace = !m ? rest.match(ORDERED_CJK_NO_SPACE) : null;
       if (m) {
         const numFrom = start + quoteStr.length + m[1].length;
         line.item = { num: Number(m[2]), delim: m[3], numFrom, numTo: numFrom + m[2].length };
+        line.listMarker = true;
+      } else if (mNoSpace) {
+        const numFrom = start + quoteStr.length + mNoSpace[1].length;
+        line.item = {
+          num: Number(mNoSpace[2]),
+          delim: mNoSpace[3],
+          numFrom,
+          numTo: numFrom + mNoSpace[2].length,
+          missingSpace: true,
+        };
         line.listMarker = true;
       } else if (BULLET.test(rest)) {
         line.listMarker = true;
@@ -133,12 +145,24 @@ function parseLines(text: string): Line[] {
   return out;
 }
 
+export interface RenumberOptions {
+  /** Renumber even if all items currently have the same number (e.g. `1. a\n1. b`). */
+  forceConsecutive?: boolean;
+  /** Start numbering each touched list at `1` even if its first item has another number. */
+  resetFirstToOne?: boolean;
+}
+
 /**
  * Renumber every ordered list overlapping `[from, to]` (offsets in `text`,
  * widened by a line on each side — deleting an item joins its neighbours).
  * Returns the changes in ascending order, or an empty array.
  */
-export function renumberChanges(text: string, from: number, to: number): TextChange[] {
+export function renumberChanges(
+  text: string,
+  from: number,
+  to: number,
+  options?: RenumberOptions,
+): TextChange[] {
   const lines = parseLines(text);
   const lineAt = (pos: number) => {
     let lo = 0;
@@ -151,7 +175,17 @@ export function renumberChanges(text: string, from: number, to: number): TextCha
     return lo;
   };
   const firstLine = Math.max(0, lineAt(from) - 1);
-  const lastLine = Math.min(lines.length - 1, lineAt(to) + 1);
+  const toLine = lineAt(to);
+  let lastLine = Math.min(lines.length - 1, toLine + 1);
+  if (options?.resetFirstToOne) {
+    const toIndent = lines[toLine].indent;
+    while (
+      lastLine + 1 < lines.length &&
+      (lines[lastLine].indent > toIndent || lines[lastLine].blank)
+    ) {
+      lastLine++;
+    }
+  }
 
   const assigned = new Set<number>();
   const changes: TextChange[] = [];
@@ -197,13 +231,31 @@ export function renumberChanges(text: string, from: number, to: number): TextCha
       break;
     }
     for (const k of items) assigned.add(k);
-    if (last < firstLine || i > lastLine || items.length < 2) continue;
+    if (last < firstLine || i > lastLine) continue;
+    const startNum = options?.resetFirstToOne ? 1 : lines[items[0]].item!.num;
+    const anyMissingSpace = items.some((k) => lines[k].item!.missingSpace);
+    if (items.length < 2 && lines[items[0]].item!.num === startNum) continue;
     const nums = items.map((k) => lines[k].item!.num);
-    if (nums.every((n) => n === nums[0])) continue;
+    if (
+      !options?.forceConsecutive &&
+      !options?.resetFirstToOne &&
+      !anyMissingSpace &&
+      nums.every((n) => n === nums[0])
+    ) {
+      continue;
+    }
     nums.forEach((n, idx) => {
-      const want = nums[0] + idx;
-      if (n === want) return;
+      const want = startNum + idx;
       const it = lines[items[idx]].item!;
+      if (it.missingSpace) {
+        changes.push({
+          from: it.numFrom,
+          to: it.numTo + it.delim.length,
+          insert: `${want}${it.delim} `,
+        });
+        return;
+      }
+      if (n === want) return;
       changes.push({ from: it.numFrom, to: it.numTo, insert: String(want) });
     });
   }

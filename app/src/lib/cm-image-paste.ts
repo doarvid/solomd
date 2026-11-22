@@ -22,6 +22,7 @@ import { isContentUri, isSafPath, sniffImageExt } from './image-source';
 import { fromSafPath, safEnsureSubdir, safList, safCreate, safWriteBase64 } from './saf-fs';
 import { insideFence } from './list-continuation';
 import { clipboardTableToMarkdown } from './table-paste';
+import { clipboardHtmlToMarkdown } from './html-paste';
 
 export interface ImagePasteOptions {
   getFilePath: () => string | undefined;
@@ -41,10 +42,10 @@ export interface ImagePasteOptions {
     key: string,
     params?: Record<string, unknown>,
   ) => void;
-  /** v4.3.5 — `shared` (`_assets/`) vs `per-file` (`<stem>.assets/`).
+  /** v4.3.5 — `shared` (`_assets/`) vs `per-file` (`<stem>.assets/`) vs `base64` (#413).
    *  Defaults to `shared` if absent (back-compat for callers that haven't
    *  been updated yet). */
-  getAttachmentMode?: () => 'shared' | 'per-file' | 'custom';
+  getAttachmentMode?: () => 'shared' | 'per-file' | 'custom' | 'base64';
   /** #88 — folder name for the `shared` attachment mode (default `_assets`).
    *  `per-file` mode always uses `<stem>.assets/` regardless of this. */
   getAssetsDirName?: () => string;
@@ -52,6 +53,8 @@ export interface ImagePasteOptions {
    *  Supports `${filename}` (note stem). Relative templates resolve against
    *  the note's folder; absolute paths are used as-is. */
   getCustomPath?: () => string;
+  /** #606 — Target format for pasted raster images (`png` default, `webp`, or `jpg`). */
+  getPastedImageFormat?: () => 'png' | 'webp' | 'jpg';
 }
 
 /** Minimal front-matter imageRoot parser (kept local to avoid import cycles). */
@@ -132,7 +135,7 @@ function basenameNoExt(p: string): string {
 function resolveAssetsDir(
   filePath: string,
   sepCh: string,
-  mode: 'shared' | 'per-file' | 'custom',
+  mode: 'shared' | 'per-file' | 'custom' | 'base64',
   sharedDirName: string,
   customPath?: string,
 ): { dir: string; urlPrefix: string } {
@@ -484,16 +487,148 @@ async function performUpload(
   }
 }
 
+const EXT_TO_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+  tiff: 'image/tiff',
+};
+
+/** #413 — Convert raw image bytes into an inline `![](data:image/...;base64,...)` Markdown string. */
+export function bytesToMarkdownBase64Image(bytes: Uint8Array, ext: string): string {
+  const mime = EXT_TO_MIME[ext.toLowerCase()] || 'image/png';
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  const b64 =
+    typeof btoa === 'function' ? btoa(binary) : Buffer.from(bytes).toString('base64');
+  return `![](data:${mime};base64,${b64})`;
+}
+
+/** #606 — Convert pasted raster image bytes to the user's configured target
+ *  format (`png`, `webp`, or `jpg`). Preserves animated `gif` and vector `svg`
+ *  untouched. Falls back to the Rust `convert_image_format` command when
+ *  WKWebView's `<canvas>.toBlob('image/webp')` silently emits `'image/png'`. */
+export async function convertPastedImageBytes(
+  bytes: Uint8Array,
+  ext: string,
+  targetFormat?: 'png' | 'webp' | 'jpg',
+): Promise<{ bytes: Uint8Array; ext: string }> {
+  const normExt = ext.toLowerCase() === 'jpeg' ? 'jpg' : ext.toLowerCase();
+  if (!targetFormat || normExt === 'gif' || normExt === 'svg' || normExt === targetFormat) {
+    return { bytes, ext: normExt };
+  }
+  const targetMime =
+    targetFormat === 'webp'
+      ? 'image/webp'
+      : targetFormat === 'jpg'
+        ? 'image/jpeg'
+        : 'image/png';
+  const quality = targetFormat === 'png' ? undefined : 0.86;
+
+  // 1) Try fast browser `<canvas>` encoding first, verifying `blob.type === targetMime`
+  //    (Safari / WKWebView silently falls back to `image/png` on unsupported MIME types).
+  if (typeof document !== 'undefined') {
+    try {
+      const srcMime = EXT_TO_MIME[normExt] || 'image/png';
+      const srcBlob = new Blob([bytes as unknown as BlobPart], { type: srcMime });
+      let width = 0;
+      let height = 0;
+      let drawSource: CanvasImageSource | null = null;
+      let closeBitmap: (() => void) | null = null;
+
+      if (typeof createImageBitmap === 'function') {
+        const bmp = await createImageBitmap(srcBlob);
+        width = bmp.width;
+        height = bmp.height;
+        drawSource = bmp;
+        closeBitmap = () => bmp.close();
+      } else if (typeof Image !== 'undefined' && typeof URL !== 'undefined') {
+        const url = URL.createObjectURL(srcBlob);
+        try {
+          const imgEl = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const el = new Image();
+            el.onload = () => resolve(el);
+            el.onerror = (e) => reject(e);
+            el.src = url;
+          });
+          width = imgEl.naturalWidth || imgEl.width;
+          height = imgEl.naturalHeight || imgEl.height;
+          drawSource = imgEl;
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      }
+
+      if (drawSource && width > 0 && height > 0) {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        try {
+          if (ctx) {
+            if (targetFormat === 'jpg') {
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, width, height);
+            }
+            ctx.drawImage(drawSource, 0, 0);
+            const outBlob = await new Promise<Blob | null>((resolve) =>
+              canvas.toBlob(resolve, targetMime, quality),
+            );
+            if (outBlob && outBlob.type === targetMime) {
+              return { bytes: new Uint8Array(await outBlob.arrayBuffer()), ext: targetFormat };
+            }
+          }
+        } finally {
+          closeBitmap?.();
+        }
+      }
+    } catch {
+      /* fall through to Rust converter */
+    }
+  }
+
+  // 2) Fallback: native Rust `image` crate encoder (`convert_image_format`)
+  try {
+    const converted = await invoke<number[]>('convert_image_format', {
+      data: Array.from(bytes),
+      format: targetFormat,
+      quality: 86,
+    });
+    if (converted && converted.length > 0) {
+      return { bytes: new Uint8Array(converted), ext: targetFormat };
+    }
+  } catch (err) {
+    console.warn('[cm-image-paste] convert_image_format fallback failed, keeping original format', err);
+  }
+
+  return { bytes, ext: normExt };
+}
+
 /**
  * Persist image bytes locally and return the markdown link to insert, or null
  * on failure. Used by the Windows plain-textarea editor (which inserts text via
  * a callback rather than a CodeMirror view). No upload — kept simple.
  */
 export async function saveImageBytes(
-  bytes: Uint8Array,
-  ext: string,
+  rawBytes: Uint8Array,
+  rawExt: string,
   opts: ImagePasteOptions,
 ): Promise<string | null> {
+  const { bytes, ext } = await convertPastedImageBytes(
+    rawBytes,
+    rawExt,
+    opts.getPastedImageFormat?.(),
+  );
+  if (opts.getAttachmentMode?.() === 'base64') {
+    return bytesToMarkdownBase64Image(bytes, ext);
+  }
   const { fullPath, insertText } = await prepareLocalTarget(makeFilename(ext), opts);
   return (await writeBytes(fullPath, bytes)) ? insertText : null;
 }
@@ -506,10 +641,18 @@ export async function saveImageBytes(
  */
 async function saveAndInsert(
   view: EditorView,
-  bytes: Uint8Array,
-  ext: string,
+  rawBytes: Uint8Array,
+  rawExt: string,
   opts: ImagePasteOptions,
+  convertFormat = false,
 ): Promise<void> {
+  const { bytes, ext } = convertFormat
+    ? await convertPastedImageBytes(rawBytes, rawExt, opts.getPastedImageFormat?.())
+    : { bytes: rawBytes, ext: rawExt };
+  if (opts.getAttachmentMode?.() === 'base64') {
+    insertAtCursor(view, bytesToMarkdownBase64Image(bytes, ext));
+    return;
+  }
   const filename = makeFilename(ext);
   const up = opts.getUploader ? opts.getUploader(filename) : null;
   const local = await prepareLocalTarget(filename, opts);
@@ -569,6 +712,63 @@ export function isEmptyClipboardEvent(cd: DataTransfer | null): boolean {
 }
 
 /**
+ * #541 — Extract plain text from a ClipboardEvent's `DataTransfer` across both
+ * standard `'text/plain'` and Wayland / X11 / GSConnect MIME variants
+ * (`'text/plain;charset=utf-8'`, `'UTF8_STRING'`, `'STRING'`, `'text'`).
+ */
+export function getPlainTextFromClipboardData(cd: DataTransfer | null): string {
+  if (!cd || typeof cd.getData !== 'function') return '';
+  const mimeCandidates = [
+    'text/plain',
+    'text/plain;charset=utf-8',
+    'text/plain;charset=UTF-8',
+    'UTF8_STRING',
+    'STRING',
+    'text',
+  ];
+  for (const mime of mimeCandidates) {
+    try {
+      const val = cd.getData(mime);
+      if (val) return val;
+    } catch {
+      /* ignore unsupported MIME type */
+    }
+  }
+  return '';
+}
+
+/**
+ * #541 — Read plain text from the OS clipboard when WebKitGTK's paste event
+ * carries empty `clipboardData` (e.g. Ubuntu 26.04 GNOME Wayland + GSConnect).
+ * Tries `@tauri-apps/plugin-clipboard-manager` first, then `navigator.clipboard`,
+ * and finally the Rust `clipboard_read_text_fallback` command (`wl-paste` / `xclip`).
+ */
+export async function readClipboardTextFallback(): Promise<string> {
+  try {
+    const { readText } = await import('@tauri-apps/plugin-clipboard-manager');
+    const t = await readText();
+    if (t) return t;
+  } catch {
+    /* fall through */
+  }
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+      const t = await navigator.clipboard.readText();
+      if (t) return t;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const t = await invoke<string>('clipboard_read_text_fallback');
+    if (t) return t;
+  } catch {
+    /* fall through */
+  }
+  return '';
+}
+
+/**
  * Read an image straight off the OS clipboard through the Tauri clipboard
  * plugin (arboard, from Rust) and re-encode it as PNG. `null` when the
  * clipboard holds no image or the plugin is unavailable (iOS, a browser).
@@ -611,22 +811,31 @@ export async function handleTextareaImagePaste(
 ): Promise<boolean> {
   const cd = event.clipboardData;
   if (isEmptyClipboardEvent(cd)) {
-    // Image-only clipboard on WebKitGTK: ask the OS clipboard directly.
+    // #541 — Image-only or Wayland GSConnect clipboard on WebKitGTK: ask the OS
+    // clipboard directly for an image first, then fall back to clipboard text.
     event.preventDefault();
     const png = await readClipboardImageAsPng();
-    if (!png) return false;
-    const text = await saveOrUploadText(png, 'png', opts);
-    if (text) insert(text);
-    return true;
+    if (png) {
+      const text = await saveOrUploadText(png, 'png', opts);
+      if (text) insert(text);
+      return true;
+    }
+    const fallbackText = await readClipboardTextFallback();
+    if (fallbackText) {
+      insert(fallbackText);
+      return true;
+    }
+    return false;
   }
   if (!cd || !cd.items) return false;
+  const plainFromCd = getPlainTextFromClipboardData(cd);
   // #460 — Excel / WPS / spreadsheet cells put an image bitmap on the clipboard
   // alongside `text/html` (`<table>`) and `text/plain` (TSV). Convert tabular
   // clipboard content into a Markdown table before checking `image/*` items.
   try {
     const mdTable = clipboardTableToMarkdown(
       cd.getData?.('text/html'),
-      cd.getData?.('text/plain'),
+      plainFromCd,
     );
     if (mdTable) {
       event.preventDefault();
@@ -644,7 +853,41 @@ export async function handleTextareaImagePaste(
       if (f) images.push({ blob: f, ext: extFromName(f.name) || extFromMime(item.type) });
     }
   }
-  if (images.length === 0) return false;
+  if (images.length === 0) {
+    // #308 — Rich-text HTML paste (from web pages, Word, Docs, Notion, etc.)
+    // converted to clean Markdown when no image file is on the clipboard.
+    try {
+      const mdHtml = clipboardHtmlToMarkdown(
+        cd.getData?.('text/html'),
+        plainFromCd,
+      );
+      if (mdHtml) {
+        event.preventDefault();
+        insert(mdHtml);
+        return true;
+      }
+    } catch {
+      /* ignore clipboard read errors */
+    }
+    // #541 — If `text/plain` was empty on WebKitGTK/Wayland (e.g. GSConnect)
+    // while an alternate MIME type or OS clipboard fallback holds text, insert it.
+    const stdPlain = cd.getData?.('text/plain') || '';
+    if (!stdPlain) {
+      if (plainFromCd) {
+        event.preventDefault();
+        insert(plainFromCd);
+        return true;
+      }
+      event.preventDefault();
+      const fallbackText = await readClipboardTextFallback();
+      if (fallbackText) {
+        insert(fallbackText);
+        return true;
+      }
+      return false;
+    }
+    return false;
+  }
   event.preventDefault();
   for (const img of images) {
     const bytes = await readFileAsUint8(img.blob);
@@ -661,10 +904,18 @@ export async function handleTextareaImagePaste(
  * upload before returning (no placeholder, unlike the CodeMirror path).
  */
 async function saveOrUploadText(
-  bytes: Uint8Array,
-  ext: string,
+  rawBytes: Uint8Array,
+  rawExt: string,
   opts: ImagePasteOptions,
 ): Promise<string | null> {
+  const { bytes, ext } = await convertPastedImageBytes(
+    rawBytes,
+    rawExt,
+    opts.getPastedImageFormat?.(),
+  );
+  if (opts.getAttachmentMode?.() === 'base64') {
+    return bytesToMarkdownBase64Image(bytes, ext);
+  }
   const filename = makeFilename(ext);
   const up = opts.getUploader ? opts.getUploader(filename) : null;
   const local = await prepareLocalTarget(filename, opts);
@@ -721,7 +972,7 @@ async function handlePaste(
   event.preventDefault();
   for (const img of images) {
     const bytes = await readFileAsUint8(img.blob);
-    await saveAndInsert(view, bytes, img.ext, opts);
+    await saveAndInsert(view, bytes, img.ext, opts, true);
   }
   return true;
 }
@@ -763,6 +1014,39 @@ async function copyOrWriteLocal(srcPath: string, dstPath: string): Promise<void>
   await invoke('copy_file', { src: srcPath, dst: dstPath });
 }
 
+const IMAGE_EXT_SET = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'bmp',
+  'svg',
+  'avif',
+  'tiff',
+  'tif',
+  'ico',
+]);
+
+function isImageExtension(ext: string): boolean {
+  return IMAGE_EXT_SET.has(ext.toLowerCase());
+}
+
+function attachmentBasename(srcPath: string): string {
+  const norm = srcPath.replace(/\\/g, '/');
+  const raw = norm.slice(norm.lastIndexOf('/') + 1).trim();
+  const safe = raw.replace(/[\\/:*?"<>|\r\n]+/g, '_');
+  return safe || `attachment-${timestamp()}-${randSuffix()}`;
+}
+
+function toAttachmentMarkdownLink(imageInsertText: string, label: string): string {
+  // Convert `![](url)` into `[label](url)`
+  const m = /^!\[[^\]]*\]\(([\s\S]*)\)$/.exec(imageInsertText.trim());
+  const url = m ? m[1] : imageInsertText;
+  const safeLabel = label.replace(/[\[\]]/g, '');
+  return `[${safeLabel || 'attachment'}](${url})`;
+}
+
 /**
  * Insert a markdown image reference for an OS file path that the user
  * dragged into the window. Unlike paste/drop on the editor DOM (where we
@@ -788,7 +1072,31 @@ export async function insertImageFromPath(
     await saveAndInsert(view, bytes, sniffImageExt(bytes) || extFromName(srcPath) || 'png', opts);
     return;
   }
-  const ext = extFromName(srcPath) || 'png';
+  const rawExt = extFromName(srcPath);
+  // #152 — Non-image file attachment (`editor.insertAttachment`): preserve the
+  // original filename inside `_assets/` and insert `[filename.ext](_assets/filename.ext)`.
+  if (rawExt && !isImageExtension(rawExt)) {
+    const filename = attachmentBasename(srcPath);
+    const local = await prepareLocalTarget(filename, opts);
+    try {
+      await copyOrWriteLocal(srcPath, local.fullPath);
+    } catch (err) {
+      reportFailure(opts, err);
+      return;
+    }
+    insertAtCursor(view, toAttachmentMarkdownLink(local.insertText, filename));
+    return;
+  }
+  const ext = rawExt || 'png';
+  if (opts.getAttachmentMode?.() === 'base64') {
+    try {
+      const raw = await invoke<number[]>('read_binary_file', { path: srcPath });
+      insertAtCursor(view, bytesToMarkdownBase64Image(new Uint8Array(raw), ext));
+    } catch (err) {
+      reportFailure(opts, err);
+    }
+    return;
+  }
   const filename = makeFilename(ext);
   const up = opts.getUploader ? opts.getUploader(filename) : null;
   const local = await prepareLocalTarget(filename, opts);
@@ -850,7 +1158,28 @@ export async function imageTextFromPath(
     }
     return saveOrUploadText(bytes, sniffImageExt(bytes) || extFromName(srcPath) || 'png', opts);
   }
-  const ext = extFromName(srcPath) || 'png';
+  const rawExt = extFromName(srcPath);
+  if (rawExt && !isImageExtension(rawExt)) {
+    const filename = attachmentBasename(srcPath);
+    const local = await prepareLocalTarget(filename, opts);
+    try {
+      await copyOrWriteLocal(srcPath, local.fullPath);
+      return toAttachmentMarkdownLink(local.insertText, filename);
+    } catch (err) {
+      reportFailure(opts, err);
+      return null;
+    }
+  }
+  const ext = rawExt || 'png';
+  if (opts.getAttachmentMode?.() === 'base64') {
+    try {
+      const raw = await invoke<number[]>('read_binary_file', { path: srcPath });
+      return bytesToMarkdownBase64Image(new Uint8Array(raw), ext);
+    } catch (err) {
+      reportFailure(opts, err);
+      return null;
+    }
+  }
   const filename = makeFilename(ext);
   const up = opts.getUploader ? opts.getUploader(filename) : null;
   const local = await prepareLocalTarget(filename, opts);
@@ -884,16 +1213,30 @@ export function imagePasteExtension(opts: ImagePasteOptions) {
       // BEFORE any awaits, so the browser never inserts the image fallback.
       const cd = event.clipboardData;
       if (isEmptyClipboardEvent(cd)) {
-        // Image-only clipboard on WebKitGTK: the event is empty, so read the
-        // image from the OS clipboard (Tauri plugin) and insert that.
+        // #541 — Image-only or Wayland GSConnect clipboard on WebKitGTK: the
+        // event is empty, so read the image from the OS clipboard first, and if
+        // there is no image, fall back to reading clipboard text (`readText` /
+        // `wl-paste` / `xclip`).
         event.preventDefault();
         void (async () => {
           const png = await readClipboardImageAsPng();
-          if (png) await saveAndInsert(view, png, 'png', opts);
+          if (png) {
+            await saveAndInsert(view, png, 'png', opts, true);
+            return;
+          }
+          const fallbackText = await readClipboardTextFallback();
+          if (fallbackText) {
+            view.dispatch({
+              ...view.state.replaceSelection(fallbackText),
+              userEvent: 'input.paste',
+              scrollIntoView: true,
+            });
+          }
         })();
         return true;
       }
       if (!cd || !cd.items) return false;
+      const plainFromCd = getPlainTextFromClipboardData(cd);
       // #460 — Convert Excel / WPS / HTML / TSV table pastes to a GFM Markdown
       // table (unless pasting inside a fenced code block) before the image-paste
       // check consumes spreadsheet bitmap previews as PNGs.
@@ -903,7 +1246,7 @@ export function imagePasteExtension(opts: ImagePasteOptions) {
         if (!insideFence(view.state.doc.toString(), lineStart)) {
           const mdTable = clipboardTableToMarkdown(
             cd.getData?.('text/html'),
-            cd.getData?.('text/plain'),
+            plainFromCd,
           );
           if (mdTable) {
             event.preventDefault();
@@ -926,7 +1269,59 @@ export function imagePasteExtension(opts: ImagePasteOptions) {
           break;
         }
       }
-      if (!hasImage) return false;
+      if (!hasImage) {
+        // #308 — Rich-text HTML paste (from web pages, Word, Docs, Notion, etc.)
+        // converted to clean Markdown when not inside a fenced code block.
+        try {
+          const sel = view.state.selection.main;
+          const lineStart = view.state.doc.lineAt(sel.from).from;
+          if (!insideFence(view.state.doc.toString(), lineStart)) {
+            const mdHtml = clipboardHtmlToMarkdown(
+              cd.getData?.('text/html'),
+              plainFromCd,
+            );
+            if (mdHtml) {
+              event.preventDefault();
+              view.dispatch({
+                ...view.state.replaceSelection(mdHtml),
+                userEvent: 'input.paste',
+                scrollIntoView: true,
+              });
+              return true;
+            }
+          }
+        } catch {
+          /* ignore clipboard read errors */
+        }
+        // #541 — On Linux Wayland + GSConnect, `cd.getData('text/plain')` can be
+        // empty even when `cd.types` is non-empty (e.g. `text/plain;charset=utf-8`
+        // or `UTF8_STRING`, or WebKitGTK fails to read the Wayland offer).
+        const stdPlain = cd.getData?.('text/plain') || '';
+        if (!stdPlain) {
+          if (plainFromCd) {
+            event.preventDefault();
+            view.dispatch({
+              ...view.state.replaceSelection(plainFromCd),
+              userEvent: 'input.paste',
+              scrollIntoView: true,
+            });
+            return true;
+          }
+          event.preventDefault();
+          void (async () => {
+            const fallbackText = await readClipboardTextFallback();
+            if (fallbackText) {
+              view.dispatch({
+                ...view.state.replaceSelection(fallbackText),
+                userEvent: 'input.paste',
+                scrollIntoView: true,
+              });
+            }
+          })();
+          return true;
+        }
+        return false;
+      }
       event.preventDefault();
       void handlePaste(event, view, opts);
       return true;

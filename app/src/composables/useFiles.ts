@@ -3,7 +3,7 @@ import { requestRevealInTree } from './useFileTreeReveal';
 import { inject } from 'vue';
 import { windowChromeOptions } from '../lib/window-chrome-options';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save as saveDialog, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { documentDir, desktopDir, homeDir, join } from '@tauri-apps/api/path';
 import { isIOS, isAndroid, isMacOS } from '../lib/platform';
@@ -19,7 +19,7 @@ import { loadSafImageDataUrl } from '../lib/image-resolve';
 import { openPath as openWithSystemDefault } from '@tauri-apps/plugin-opener';
 import { useI18n } from '../i18n';
 import type { FileReadResult, Tab } from '../types';
-import { isSafPath, fromSafPath, safRead, safWrite, safLaunchPicker } from '../lib/saf-fs';
+import { isSafPath, toSafPath, fromSafPath, safList, safCreate, safRead, safWrite, safLaunchPicker } from '../lib/saf-fs';
 import { shouldSaveTab, shouldPromptOnClose } from '../lib/browser-tab-guards';
 import { baseNameOf, fileNameOf, claimImportName, joinInFolder } from '../lib/import-plan';
 import { newFileDirFor, treeSelection } from '../lib/new-file-target';
@@ -333,6 +333,44 @@ export function useFiles() {
 
     const ext = (path.split('.').pop() || '').toLowerCase();
 
+    // #505 — Open `.textpack` (ZIP bundle) or `.textbundle` (directory bundle).
+    if (ext === 'textpack') {
+      try {
+        const { extractTextPackArchive } = await import('../lib/textbundle');
+        const rawBytes = await invoke<number[]>('read_binary_file', { path });
+        const sep = path.includes('\\') ? '\\' : '/';
+        const lastSep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        const parentDir = lastSep > 0 ? path.slice(0, lastSep) : '';
+        const fileName = lastSep >= 0 ? path.slice(lastSep + 1) : path;
+        const stem = fileName.replace(/\.textpack$/i, '') || 'Bundle';
+        const assetsFolder = `${stem}.assets`;
+        const unpacked = extractTextPackArchive(new Uint8Array(rawBytes), assetsFolder);
+        if (parentDir) {
+          if (unpacked.assets.length > 0) {
+            const absAssetsDir = `${parentDir}${sep}${assetsFolder}`;
+            await invoke('fs_create_dir', { path: absAssetsDir }).catch(() => {});
+            for (const asset of unpacked.assets) {
+              await invoke('write_binary_file', {
+                path: `${absAssetsDir}${sep}${asset.name}`,
+                data: Array.from(asset.bytes),
+              });
+            }
+          }
+          const mdPath = `${parentDir}${sep}${stem}.md`;
+          await invoke('write_file', { path: mdPath, content: unpacked.markdown, encoding: 'UTF-8' });
+          path = mdPath;
+        }
+      } catch (e) {
+        toasts.error(t('toast.openFailed', { error: String(e) }));
+        return;
+      }
+    } else if (ext === 'textbundle') {
+      const sep = path.includes('\\') ? '\\' : '/';
+      const candidateMd = `${path.replace(/[/\\]+$/, '')}${sep}text.markdown`;
+      const exists = await invoke<boolean>('fs_file_exists', { path: candidateMd }).catch(() => false);
+      path = exists ? candidateMd : `${path.replace(/[/\\]+$/, '')}${sep}text.md`;
+    }
+
     // If it's a convertible format, convert to Markdown first.
     // #356 — except an HTML file clicked in the file tree: that is a text
     // file in the user's own folder (often one we just exported), and a click
@@ -424,6 +462,9 @@ export function useFiles() {
     opts: { bypassNewWindow?: boolean } = {},
   ) {
     const ext = (path.split('.').pop() || '').toLowerCase();
+    if (ext === 'textpack' || ext === 'textbundle') {
+      return openPath(path, opts);
+    }
     const isImage = IMAGE_EXTENSIONS.has(ext);
     const isTextLike = TEXT_LINK_EXTENSIONS.has(ext);
     if (settings.openLinkedFilesExternally && !isImage && !isTextLike) {
@@ -710,10 +751,10 @@ export function useFiles() {
       // ContentResolver (see lib/saf-fs.ts).
       try {
         // Launch and mark that a pick is in flight; App.vue resolves the result
-        // on resume (the picker backgrounds our WebView, so we can't await it
-        // inline — the JS poll loop is lost across the transition).
+        // on resume / focus / WebView callback / background poll (#608).
         localStorage.setItem('solomd:saf-picking', '1');
         await safLaunchPicker();
+        window.dispatchEvent(new Event('solomd:saf-pick-poll'));
       } catch (e) {
         localStorage.removeItem('solomd:saf-picking');
         toasts.error(String(e));
@@ -816,8 +857,71 @@ export function useFiles() {
    *  save dialog had already created the (empty) document, which is how
    *  "Save As produced a 0-byte file" happened on Android. */
   async function writeContentUri(uri: string, payload: string): Promise<void> {
-    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-    await writeTextFile(uri as unknown as string, payload);
+    try {
+      const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+      await writeTextFile(uri as unknown as string, payload);
+    } catch {
+      await invoke('saf_write_content_uri', { uri, content: payload });
+    }
+  }
+
+  /** #608 — When an Android SAF folder (`workspace.safTreeUri`) is open and the
+   *  user saves a brand-new untitled note (`!tab.filePath`), create the file
+   *  directly inside the active SAF folder (or selected tree subfolder) via
+   *  `safCreate` so tapping `+` -> typing -> Save writes straight into the open
+   *  folder and refreshes `FileTree.vue` without forcing a broken Save-As picker. */
+  async function safResolveNewFilePath(tab: Tab): Promise<string | null> {
+    const treeUri = workspace.safTreeUri;
+    const rootFolder = workspace.currentFolder;
+    if (!treeUri || !rootFolder || !isSafPath(rootFolder)) return null;
+    const targetDir = newFileDirFor(treeSelection(), tabs.activeTab?.filePath);
+    const parentSafPath = targetDir && isSafPath(targetDir) ? targetDir : rootFolder;
+    const parentDocId = fromSafPath(parentSafPath);
+
+    const rawName =
+      deriveNameFromHeading(tab) ||
+      tab.fileName ||
+      (tab.language === 'markdown' ? 'Untitled.md' : 'Untitled.txt');
+    const hasExt = /\.[a-z0-9]+$/i.test(rawName);
+    const fname = hasExt ? rawName : `${rawName}.${tab.language === 'markdown' ? 'md' : 'txt'}`;
+
+    let taken = new Set<string>();
+    try {
+      const entries = await safList(treeUri, parentDocId);
+      taken = new Set(entries.map((e) => e.name.toLowerCase()));
+    } catch {
+      /* ignore listing errors; createDoc will still succeed */
+    }
+    const dot = fname.lastIndexOf('.');
+    const stem = dot > 0 ? fname.slice(0, dot) : fname;
+    const ext = dot > 0 ? fname.slice(dot) : '';
+    let finalName = fname;
+    for (let i = 2; taken.has(finalName.toLowerCase()) && i < 1000; i++) {
+      finalName = `${stem} ${i}${ext}`;
+    }
+    const mime = tab.language === 'markdown' ? 'text/markdown' : 'text/plain';
+    const docId = await safCreate(treeUri, parentDocId, finalName, mime);
+    return toSafPath(docId);
+  }
+
+  /** Map a standalone `content://.../document/<docId>` URI back to `saf:<docId>`
+   *  when it belongs to the currently open Android SAF vault. */
+  function mapContentUriToSafPath(uri: string): string {
+    const treeUri = workspace.safTreeUri;
+    const rootFolder = workspace.currentFolder;
+    if (!treeUri || !rootFolder || !isSafPath(rootFolder)) return uri;
+    const m = /\/document\/([^/?#]+)/.exec(uri);
+    if (!m) return uri;
+    try {
+      const docId = decodeURIComponent(m[1]);
+      const rootDocId = fromSafPath(rootFolder);
+      if (docId === rootDocId || docId.startsWith(`${rootDocId}/`) || (rootDocId.endsWith(':') && docId.startsWith(rootDocId))) {
+        return toSafPath(docId);
+      }
+    } catch {
+      /* keep raw content:// URI */
+    }
+    return uri;
   }
 
   /** Display name for a content:// URI ("…%2Fnote.md" → "note.md"). */
@@ -852,6 +956,16 @@ export function useFiles() {
         path = await iosResolvePath(tab);
         iosCopy = true;
       }
+    } else if (!path && isAndroid() && workspace.safTreeUri && isSafPath(workspace.currentFolder)) {
+      // #608 — Saving a brand-new untitled note while an Android SAF folder is
+      // open: create the note directly inside the open SAF folder so tapping
+      // `+` -> typing -> Save writes straight to the vault and refreshes the tree.
+      try {
+        path = (await safResolveNewFilePath(tab)) ?? undefined;
+      } catch (e) {
+        console.warn('[saveTab] safResolveNewFilePath failed, falling back to saveTabAs', e);
+      }
+      if (!path) return saveTabAs(tab);
     } else if (!path) {
       return saveTabAs(tab);
     }
@@ -875,6 +989,24 @@ export function useFiles() {
         // ContentResolver route as the original save.
         await writeContentUri(path, payload);
       } else {
+        if (settings.confirmSaveMissingFile && !iosCopy) {
+          const exists = await invoke<boolean>('fs_file_exists', { path });
+          if (exists === false) {
+            if (opts.silent) {
+              return false;
+            }
+            const ok = await confirmDialog(
+              t('dialog.missingFileBody', { name: tab.fileName, path }),
+              {
+                title: t('dialog.missingFileTitle'),
+                kind: 'warning',
+                okLabel: t('dialog.missingFileConfirm'),
+                cancelLabel: t('dialog.missingFileCancel'),
+              },
+            );
+            if (!ok) return false;
+          }
+        }
         // Recorded first: the watcher event for this write can arrive before
         // markSaved below, and must not read as an outside change.
         noteOwnWrite(path, payload);
@@ -885,16 +1017,17 @@ export function useFiles() {
         });
       }
       tabs.markSaved(tab.id, path);
+      delete (tab as any).saveFailed;
       if (!isSaf && !isContentUri) {
         workspace.pushRecent(path);
         // v2.5: feed the ⌘P quick-switcher's MFU ranking.
         recentEdits.recordEdit(path);
-        // v2.2: notify the AutoGit composable so the debounced auto-commit
-        // pipeline picks up this save. Listener is in `useAutoCommit.ts`.
-        window.dispatchEvent(
-          new CustomEvent('solomd:saved', { detail: { filePath: path } }),
-        );
       }
+      // #608 — Always dispatch `solomd:saved` (including Android SAF / content://
+      // saves) so `FileTree.vue` refreshes immediately and displays newly saved notes.
+      window.dispatchEvent(
+        new CustomEvent('solomd:saved', { detail: { filePath: path } }),
+      );
       if (!opts.silent) {
         if (isIOS() && iosCopy) {
           const fname = path.split(/[\\/]/).pop() ?? path;
@@ -906,6 +1039,7 @@ export function useFiles() {
       return true;
     } catch (e) {
       console.error('save failed', e);
+      (tab as any).saveFailed = true;
       const errStr = String(e);
       if (!opts.silent) {
         toasts.warning(
@@ -914,7 +1048,9 @@ export function useFiles() {
             : `Cannot overwrite "${tab.fileName}" (read-only or permission denied) — choose where to Save As`,
           6500,
         );
-        return await saveTabAs(tab, { suggestCopyName: true });
+        const savedAs = await saveTabAs(tab, { suggestCopyName: true });
+        if (savedAs) delete (tab as any).saveFailed;
+        return savedAs;
       }
       toasts.error(t('toast.saveFailed', { error: errStr }), 6000);
       return false;
@@ -961,8 +1097,14 @@ export function useFiles() {
       const isContentUri = path.startsWith('content://');
       if (isContentUri) {
         await writeContentUri(path, payload);
-        tabs.markSaved(tab.id, path);
-        const fileName = contentUriName(path);
+        const mappedPath = mapContentUriToSafPath(path);
+        tabs.markSaved(tab.id, mappedPath);
+        window.dispatchEvent(
+          new CustomEvent('solomd:saved', { detail: { filePath: mappedPath } }),
+        );
+        const fileName = isSafPath(mappedPath)
+          ? mappedPath.split(/[\\/:]/).pop() ?? contentUriName(path)
+          : contentUriName(path);
         toasts.success(t('toast.savedAs', { name: fileName }));
         return true;
       }
@@ -1000,6 +1142,30 @@ export function useFiles() {
   // filePath 时会走 saveTabAs 弹对话框 —— 所以短路必须发生在 saveTab 里，
   // 不在 saveActive 里（saveActiveAs 也要挡）。
 
+  /** Save all open tabs that have unsaved changes. */
+  async function saveAll(): Promise<void> {
+    window.dispatchEvent(new Event('solomd:flush-content-sync'));
+    const targets = tabs.tabs.filter((tab) =>
+      tab.filePath ? tabs.isDirty(tab.id) : tab.content !== tab.savedContent,
+    );
+    if (targets.length === 0) {
+      if (tabs.activeTab && !tabs.activeTab.filePath) {
+        await saveTab(tabs.activeTab);
+        return;
+      }
+      toasts.info(t('toast.allSaved'));
+      return;
+    }
+    let savedCount = 0;
+    for (const tab of targets) {
+      const ok = await saveTab(tab, { silent: true });
+      if (ok) savedCount += 1;
+    }
+    if (savedCount > 0) {
+      toasts.success(t('toast.savedAll', { count: savedCount }));
+    }
+  }
+
   // #85 — auto-save on window blur. Persist every dirty tab that already has
   // a file path, silently (no per-file toast). Untitled tabs are skipped on
   // purpose: saving them would pop a Save-As dialog, which is jarring when
@@ -1012,6 +1178,14 @@ export function useFiles() {
     window.dispatchEvent(new Event('solomd:flush-content-sync'));
     for (const tab of tabs.tabs) {
       if (tab.filePath && tabs.isDirty(tab.id)) {
+        if (!isSafPath(tab.filePath)) {
+          try {
+            const exists = await invoke<boolean>('fs_exists', { path: tab.filePath });
+            if (!exists) continue;
+          } catch {
+            // If fs_exists is unavailable, proceed with normal saveTab check.
+          }
+        }
         await saveTab(tab, { silent: true });
       }
     }
@@ -1067,6 +1241,7 @@ export function useFiles() {
     filePickerStartDir,
     saveActive,
     saveActiveAs,
+    saveAll,
     // Exposed for the task panel: ticking a checkbox in a file that happens to
     // be open has to go through the tab, not straight to disk, or the tab's
     // in-memory copy would silently overwrite it on the next save.

@@ -152,13 +152,19 @@ function relativeFilePath(fullPath: string): string {
   return fullPath.split(/[\\/]/).pop() || fullPath;
 }
 
-async function onTabAction(action: 'close' | 'closeLeft' | 'closeRight' | 'closeOthers' | 'closeSaved' | 'closeAll' | 'revealInFolder' | 'revealInFileTree' | 'copyFileName' | 'copyFilePath' | 'copyRelativePath') {
+async function onTabAction(action: 'close' | 'closeLeft' | 'closeRight' | 'closeOthers' | 'closeSaved' | 'closeAll' | 'revealInFolder' | 'revealInFileTree' | 'copyFileName' | 'copyFilePath' | 'copyRelativePath' | 'openInNewWindow') {
   const m = ctxMenu.value;
   closeCtxMenu();
   if (!m) return;
   const list = tabs.tabs;
   const idx = list.findIndex((t) => t.id === m.tabId);
   if (idx < 0) return;
+  if (action === 'openInNewWindow') {
+    const path = list[idx]?.filePath;
+    if (!path) return;
+    files.spawnAuxWindow(path);
+    return;
+  }
   if (action === 'copyFileName') {
     const name = list[idx]?.fileName;
     if (!name) return;
@@ -485,7 +491,6 @@ onBeforeUnmount(() => {
   <div
     class="pane-tabbar"
     :class="`pane-tabbar--${placement}`"
-    :data-tauri-drag-region="placement === 'header' ? '' : undefined"
   >
     <div class="tabs" ref="tabsEl" @wheel.prevent="onTabsWheel">
       <!-- The loop variable is `tab`, not `t`: `t` is the i18n function in
@@ -549,12 +554,11 @@ onBeforeUnmount(() => {
         <Icon name="plus" :size="16" />
       </button>
     </div>
-    <!-- Empty strip space after the "+" (browser-style). In the header this
-         is what drags the window; the tabs themselves never do. -->
-    <div
-      class="tabs__filler"
-      :data-tauri-drag-region="placement === 'header' ? '' : undefined"
-    ></div>
+    <!-- Empty strip space after the "+" (browser-style). Window dragging on
+         macOS is driven explicitly by Toolbar.vue's onTitleBarMouseDown (never
+         via data-tauri-drag-region, which double-fires startDragging on
+         Windows and causes click-through to background apps, #630). -->
+    <div class="tabs__filler"></div>
     <button
       v-if="canClosePane"
       class="tabbar__btn tabbar__close-pane"
@@ -644,6 +648,7 @@ onBeforeUnmount(() => {
           {{ settings.language === 'zh' ? '复制相对路径' : 'Copy Relative Path' }}
         </button>
         <div class="ctx-sep" />
+        <button class="ctx-item" :disabled="!ctxFlags?.hasFilePath" @click="onTabAction('openInNewWindow')">{{ t('tabMenu.openInNewWindow') }}</button>
         <button class="ctx-item" :disabled="!ctxFlags?.hasFilePath" @click="onTabAction('revealInFolder')">{{ t(revealLabelKey('tabMenu.revealInFolder')) }}</button>
         <button class="ctx-item" :disabled="!ctxFlags?.hasFilePath" @click="onTabAction('revealInFileTree')">{{ t('tabMenu.revealInFileTree') }}</button>
         <div class="ctx-sep" />
@@ -733,9 +738,21 @@ onBeforeUnmount(() => {
   color: var(--text-2);
 }
 .tab--active {
+  position: relative;
   background: var(--fill-1);
   color: var(--text);
-  font-weight: 540;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.tab--active::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 .tab--active:hover {
   background: var(--fill-2);

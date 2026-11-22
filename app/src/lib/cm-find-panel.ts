@@ -28,12 +28,18 @@ import {
   replaceNext,
   setSearchQuery,
 } from '@codemirror/search';
-import type { EditorState } from '@codemirror/state';
+import {
+  EditorSelection,
+  type EditorState,
+  type SelectionRange,
+  type Transaction,
+} from '@codemirror/state';
 import { runScopeHandlers, type EditorView, type Panel, type ViewUpdate } from '@codemirror/view';
 
 export interface FindPanelLabels {
   find: string;
   replace: string;
+  toggleReplace?: string;
   prev: string;
   next: string;
   matchCase: string;
@@ -44,8 +50,65 @@ export interface FindPanelLabels {
   close: string;
 }
 
+/**
+ * #419 — Expand or collapse the Replace row inside an open `.cm-find` panel.
+ */
+export function setFindPanelReplaceExpanded(host: ParentNode, open: boolean): void {
+  const panel = host.querySelector<HTMLElement>('.cm-find');
+  if (!panel) return;
+  const row = panel.querySelector<HTMLElement>('.cm-find__row--replace');
+  const btn = panel.querySelector<HTMLButtonElement>('button[name="toggleReplace"]');
+  if (!row || !btn) return;
+  row.hidden = !open;
+  panel.classList.toggle('cm-find--replace-open', open);
+  btn.textContent = open ? '▾' : '▸';
+  btn.setAttribute('aria-expanded', String(open));
+}
+
+/**
+ * #436 — Select all occurrences of the current selection (or word at caret)
+ * across the document, even when multiple cursors are already active (unlike
+ * `@codemirror/search`'s `selectSelectionMatches`, which bails out whenever
+ * `ranges.length > 1` or `main.empty`).
+ */
+export function selectAllOccurrencesCommand(target: {
+  state: EditorState;
+  dispatch: (tr: Transaction) => void;
+}): boolean {
+  const { state } = target;
+  let main = state.selection.main;
+  if (main.empty) {
+    const word = state.wordAt(main.head);
+    if (!word) return false;
+    main = EditorSelection.range(word.from, word.to);
+  }
+  const needle = state.sliceDoc(main.from, main.to);
+  if (!needle || needle.includes('\n')) return false;
+  const query = new SearchQuery({ search: needle });
+  if (!query.valid) return false;
+  const ranges: SelectionRange[] = [];
+  let mainIdx = 0;
+  const cur = query.getCursor(state, 0);
+  for (let step = cur.next(); !step.done; step = cur.next()) {
+    if (ranges.length >= COUNT_LIMIT) break;
+    if (step.value.from === main.from) mainIdx = ranges.length;
+    ranges.push(EditorSelection.range(step.value.from, step.value.to));
+  }
+  if (ranges.length === 0) return false;
+  target.dispatch(
+    state.update({
+      selection: EditorSelection.create(ranges, mainIdx),
+      userEvent: 'select.search.matches',
+    }),
+  );
+  return true;
+}
+
 /** Stop counting here — "1000+" is all anyone needs past that. */
 const COUNT_LIMIT = 1000;
+/** Debounce live-typing query commits on large documents so rapid typing never stalls. */
+const LARGE_DOC_DEBOUNCE_CHARS = 24_000;
+const LARGE_DOC_DEBOUNCE_MS = 60;
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -86,7 +149,23 @@ export function replaceCurrent(view: EditorView): boolean {
   if (target.from !== from || target.to !== to) {
     view.dispatch({ selection: { anchor: target.from, head: target.to } });
   }
-  return replaceNext(view);
+  const beforeLen = view.state.doc.length;
+  const replaced = replaceNext(view);
+  // Guard zero-length regexp matches (`^`, `$`, `\b`, `a*`): if `target.from === target.to`
+  // and `replaceNext` left the selection anchored at the same origin, advance by 1
+  // past the inserted text so repeated Replace clicks progress instead of looping.
+  if (replaced && target.from === target.to) {
+    const delta = Math.max(0, view.state.doc.length - beforeLen);
+    const curSel = view.state.selection.main;
+    if (curSel.from <= target.from + delta && curSel.empty) {
+      const nextAnchor = Math.min(view.state.doc.length, target.from + delta + 1);
+      const nextHit = matchFrom(view.state, query, nextAnchor);
+      if (nextHit && nextHit.from >= nextAnchor) {
+        view.dispatch({ selection: { anchor: nextHit.from, head: nextHit.to } });
+      }
+    }
+  }
+  return replaced;
 }
 
 export function createFindPanel(view: EditorView, labels: FindPanelLabels): Panel {
@@ -125,7 +204,10 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
     return b;
   };
   const toggle = (name: string, title: string, glyph: string, key: 'caseSensitive' | 'regexp' | 'wholeWord') => {
-    const b = iconBtn(name, title, glyph, () => commit({ [key]: !query[key] }));
+    const b = iconBtn(name, title, glyph, () => {
+      flushPendingCommit();
+      commit({ [key]: !query[key] });
+    });
     b.setAttribute('aria-pressed', 'false');
     return b;
   };
@@ -140,16 +222,52 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
   const reBtn = toggle('re', labels.regexp, '.*', 'regexp');
   const wordBtn = toggle('word', labels.wholeWord, 'W', 'wholeWord');
 
+  let replaceRow: HTMLDivElement | null = null;
+  let expandBtn: HTMLButtonElement | null = null;
+  const isReplaceOpen = () => !!replaceRow && !replaceRow.hidden;
+
+  const setReplaceOpen = (open: boolean) => {
+    if (replaceRow) replaceRow.hidden = !open;
+    dom.classList.toggle('cm-find--replace-open', open);
+    if (expandBtn) {
+      expandBtn.textContent = open ? '▾' : '▸';
+      expandBtn.setAttribute('aria-expanded', String(open));
+    }
+  };
+
   const findRow = el('div', { class: 'cm-find__row' });
+  if (!view.state.readOnly) {
+    expandBtn = iconBtn(
+      'toggleReplace',
+      labels.toggleReplace || labels.replace,
+      '▸',
+      () => {
+        const next = !isReplaceOpen();
+        setReplaceOpen(next);
+        if (!next && document.activeElement === replaceField) {
+          findField.focus();
+        }
+      },
+    );
+    expandBtn.setAttribute('aria-expanded', 'false');
+    findRow.append(expandBtn);
+  }
   findRow.append(
     findField,
     count,
-    iconBtn('prev', labels.prev, '‹', () => findPrevious(view)),
-    iconBtn('next', labels.next, '›', () => findNext(view)),
+    iconBtn('prev', labels.prev, '‹', () => {
+      flushPendingCommit();
+      findPrevious(view);
+    }),
+    iconBtn('next', labels.next, '›', () => {
+      flushPendingCommit();
+      findNext(view);
+    }),
     caseBtn,
     reBtn,
     wordBtn,
     iconBtn('close', labels.close, '✕', () => {
+      clearCommitTimer();
       closeSearchPanel(view);
       view.focus();
     }),
@@ -157,16 +275,44 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
   const dom = el('div', { class: 'cm-search cm-find', role: 'search' });
   dom.append(findRow);
   if (!view.state.readOnly) {
-    const replaceRow = el('div', { class: 'cm-find__row' });
+    replaceRow = el('div', { class: 'cm-find__row cm-find__row--replace' });
+    replaceRow.hidden = true;
     replaceRow.append(
       replaceField,
-      textBtn('replace', labels.replaceOne, () => replaceCurrent(view)),
-      textBtn('replaceAll', labels.replaceAll, () => replaceAll(view)),
+      textBtn('replace', labels.replaceOne, () => {
+        flushPendingCommit();
+        replaceCurrent(view);
+      }),
+      textBtn('replaceAll', labels.replaceAll, () => {
+        flushPendingCommit();
+        replaceAll(view);
+      }),
     );
     dom.append(replaceRow);
   }
 
+  let commitTimer: ReturnType<typeof setTimeout> | null = null;
+  let recountTimer: ReturnType<typeof setTimeout> | null = null;
+  function clearCommitTimer() {
+    if (commitTimer !== null) {
+      clearTimeout(commitTimer);
+      commitTimer = null;
+    }
+    if (recountTimer !== null) {
+      clearTimeout(recountTimer);
+      recountTimer = null;
+    }
+  }
+  function flushPendingCommit() {
+    if (commitTimer !== null) {
+      clearTimeout(commitTimer);
+      commitTimer = null;
+      commit();
+    }
+  }
+
   function commit(patch: Partial<{ caseSensitive: boolean; regexp: boolean; wholeWord: boolean }> = {}) {
+    clearCommitTimer();
     const next = new SearchQuery({
       search: findField.value,
       replace: replaceField.value,
@@ -176,6 +322,21 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
       literal: query.literal,
     });
     if (!next.eq(query)) view.dispatch({ effects: setSearchQuery.of(next) });
+  }
+
+  function scheduleInputCommit() {
+    if (
+      findField.value.length > 0 &&
+      (view.state.doc.length > LARGE_DOC_DEBOUNCE_CHARS || query.regexp)
+    ) {
+      if (commitTimer !== null) clearTimeout(commitTimer);
+      commitTimer = setTimeout(() => {
+        commitTimer = null;
+        commit();
+      }, LARGE_DOC_DEBOUNCE_MS);
+      return;
+    }
+    commit();
   }
 
   function recount() {
@@ -222,7 +383,7 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
     });
     field.addEventListener('input', (e) => {
       if (composing || (e as InputEvent).isComposing) return;
-      commit();
+      scheduleInputCommit();
     });
   }
 
@@ -240,6 +401,7 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
           findField.focus();
           findField.select();
         } else {
+          clearCommitTimer();
           closeSearchPanel(view);
           view.focus();
         }
@@ -248,7 +410,12 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
       if (k === 'h' || e.code === 'KeyH') {
         e.preventDefault();
         e.stopPropagation();
-        if (e.target === replaceField) {
+        if (!isReplaceOpen()) {
+          setReplaceOpen(true);
+          replaceField.focus();
+          replaceField.select();
+        } else if (e.target === replaceField) {
+          clearCommitTimer();
           closeSearchPanel(view);
           view.focus();
         } else {
@@ -259,14 +426,17 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
       }
     }
     if (runScopeHandlers(view, e, 'search-panel')) {
+      clearCommitTimer();
       e.preventDefault();
       return;
     }
     if (e.key === 'Enter' && e.target === findField) {
       e.preventDefault();
+      flushPendingCommit();
       (e.shiftKey ? findPrevious : findNext)(view);
     } else if (e.key === 'Enter' && e.target === replaceField) {
       e.preventDefault();
+      flushPendingCommit();
       replaceCurrent(view);
     }
   });
@@ -280,6 +450,9 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
     // As the stock panel: a fresh bar takes the caret, text selected.
     mount() {
       findField.select();
+    },
+    destroy() {
+      clearCommitTimer();
     },
     update(update: ViewUpdate) {
       let queryChanged = false;
@@ -300,8 +473,25 @@ export function createFindPanel(view: EditorView, labels: FindPanelLabels): Pane
         }
         syncToggles();
       }
-      if (queryChanged || update.docChanged) recount();
-      else if (update.selectionSet) renderCount();
+      if (queryChanged) {
+        if (recountTimer !== null) {
+          clearTimeout(recountTimer);
+          recountTimer = null;
+        }
+        recount();
+      } else if (update.docChanged) {
+        if (update.state.doc.length > LARGE_DOC_DEBOUNCE_CHARS) {
+          if (recountTimer !== null) clearTimeout(recountTimer);
+          recountTimer = setTimeout(() => {
+            recountTimer = null;
+            recount();
+          }, 120);
+        } else {
+          recount();
+        }
+      } else if (update.selectionSet) {
+        renderCount();
+      }
     },
   };
 }

@@ -4,6 +4,8 @@ pub mod store_review;
 pub mod iap;
 pub mod ios_folder;
 pub mod commands;
+pub mod set_default;
+pub mod convert;
 // Image-bed (图床) upload: PicGo / shell command / sm.ms / S3-compatible / GitHub.
 pub mod image_upload;
 pub mod search;
@@ -215,6 +217,12 @@ pub fn run() {
             {
                 use tauri::Manager;
                 if let Some(win) = app.get_webview_window("main") {
+                    // #633 — Explicitly re-apply the window icon before showing
+                    // so Windows 11 taskbar / Alt+Tab always receives WM_SETICON
+                    // for frameless hidden-at-startup windows (`decorations: false`).
+                    if let Some(icon) = app.default_window_icon().cloned() {
+                        let _ = win.set_icon(icon);
+                    }
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
@@ -254,6 +262,10 @@ pub fn run() {
             commands::print_webview,
             commands::print_webview_to_pdf,
             commands::copy_file,
+            commands::download_and_install_update,
+            commands::cancel_update_download,
+            set_default::set_as_default_markdown_editor,
+            convert::convert_file_to_markdown,
             storage_android::android_has_all_files_access,
             storage_android::android_request_all_files_access,
             storage_android::android_system_insets,
@@ -269,6 +281,9 @@ pub fn run() {
             saf_android::saf_write,
             saf_android::saf_write_base64,
             saf_android::saf_read_content_uri_base64,
+            saf_android::saf_write_content_uri,
+            saf_android::saf_all_files_access_status,
+            saf_android::saf_request_all_files_access,
             saf_android::saf_create,
             saf_android::saf_delete,
             image_upload::upload_image,
@@ -277,7 +292,10 @@ pub fn run() {
             commands::fs_create_dir,
             commands::fs_delete,
             commands::fs_dir_exists,
+            commands::fs_file_exists,
             commands::webview_runtime_version,
+            commands::clipboard_read_text_fallback,
+            commands::vim_switch_input_method,
             commands::fs_rename,
             commands::fs_move,
             commands::fs_list_dirs,
@@ -322,6 +340,7 @@ pub fn run() {
             acp::acp_set_mode,
             acp::acp_list_sessions,
             acp::acp_read_session,
+            ai_proxy::ai_discover_opr_providers,
             ollama::ollama_detect,
             ollama::ollama_pull,
             ollama::ollama_cancel_pull,
@@ -334,6 +353,12 @@ pub fn run() {
             git_history::git_init_workspace,
             #[cfg(not(target_os = "android"))]
             git_history::git_auto_commit,
+            #[cfg(not(target_os = "android"))]
+            git_history::git_stage,
+            #[cfg(not(target_os = "android"))]
+            git_history::git_cli_pull,
+            #[cfg(not(target_os = "android"))]
+            git_history::git_cli_push,
             #[cfg(not(target_os = "android"))]
             git_history::git_file_history,
             #[cfg(not(target_os = "android"))]
@@ -416,6 +441,7 @@ pub fn run() {
             themes::theme_install,
             themes::theme_uninstall,
             themes::theme_list_installed,
+            themes::theme_get_dir,
             #[cfg(not(target_os = "android"))]
             github_sync::github_set_token,
             #[cfg(not(target_os = "android"))]
@@ -467,6 +493,18 @@ pub fn run() {
             github_sync::gitea_list_repos,
             #[cfg(not(target_os = "android"))]
             github_sync::gitea_create_vault_repo,
+            #[cfg(not(target_os = "android"))]
+            github_sync::gitee_set_token,
+            #[cfg(not(target_os = "android"))]
+            github_sync::gitee_clear_token,
+            #[cfg(not(target_os = "android"))]
+            github_sync::gitee_has_token,
+            #[cfg(not(target_os = "android"))]
+            github_sync::gitee_user,
+            #[cfg(not(target_os = "android"))]
+            github_sync::gitee_list_repos,
+            #[cfg(not(target_os = "android"))]
+            github_sync::gitee_create_vault_repo,
             cloud_folder::cloud_folder_detect,
             cloud_folder::device_id_get_or_create,
             cloud_folder::session_save,
@@ -475,6 +513,19 @@ pub fn run() {
             webdav_sync::webdav_test_connection,
             webdav_sync::webdav_push_workspace,
             webdav_sync::webdav_pull_workspace,
+            webdav_sync::cloud_vault_push_workspace,
+            webdav_sync::cloud_vault_pull_workspace,
+            webdav_sync::cloud_vault_detect_local_dirs,
+            webdav_sync::cloud_api_build_quick_auth_url,
+            webdav_sync::cloud_api_start_device_auth,
+            webdav_sync::cloud_api_poll_device_auth,
+            webdav_sync::cloud_api_push_workspace,
+            webdav_sync::cloud_api_pull_workspace,
+            webdav_sync::sync_save_file_snapshot,
+            webdav_sync::sync_list_file_versions,
+            webdav_sync::sync_get_file_version_diff,
+            webdav_sync::sync_restore_file_version,
+            webdav_sync::sync_prune_file_versions,
             crypto::crypto_status,
             crypto::crypto_set_passphrase,
             crypto::crypto_clear_passphrase,
@@ -527,6 +578,7 @@ pub fn run() {
             workspace_index::workspace_index_referenced_by,
             commands::update_frontmatter_property,
             commands::delete_frontmatter_property,
+            commands::convert_image_format,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

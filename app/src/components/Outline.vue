@@ -3,7 +3,13 @@ import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useTabsStore } from '../stores/tabs';
 import { useSettingsStore } from '../stores/settings';
 import { useI18n } from '../i18n';
-import { extractOutline, type OutlineItem } from '../lib/markdown';
+import {
+  extractOutline,
+  parseOutlineSegments,
+  reorderMarkdownHeadingSection,
+  stripOutlineFormatting,
+  type OutlineItem,
+} from '../lib/markdown';
 import Icons from './Icons.vue';
 import PanelHeader from './panel/PanelHeader.vue';
 
@@ -25,6 +31,41 @@ const settings = useSettingsStore();
 const { t } = useI18n();
 const listRef = ref<HTMLUListElement | null>(null);
 const collapsedByTab = ref<Record<string, number[]>>({});
+const dragSourceLine = ref<number | null>(null);
+const dragOverLine = ref<number | null>(null);
+
+function onOutlineDragStart(line: number, ev: DragEvent) {
+  dragSourceLine.value = line;
+  if (ev.dataTransfer) {
+    ev.dataTransfer.effectAllowed = 'move';
+    ev.dataTransfer.setData('text/plain', String(line));
+  }
+}
+
+function onOutlineDragOver(line: number, ev: DragEvent) {
+  if (dragSourceLine.value == null || dragSourceLine.value === line) return;
+  ev.preventDefault();
+  dragOverLine.value = line;
+}
+
+function onOutlineDrop(targetLine: number, ev: DragEvent) {
+  ev.preventDefault();
+  const srcLine = dragSourceLine.value;
+  dragSourceLine.value = null;
+  dragOverLine.value = null;
+  const tab = activeMarkdownTab.value;
+  if (!tab || srcLine == null || srcLine === targetLine) return;
+  const pos = srcLine < targetLine ? 'after' : 'before';
+  const next = reorderMarkdownHeadingSection(tab.content, srcLine, targetLine, pos);
+  if (next !== tab.content) {
+    tabs.setContent(tab.id, next);
+  }
+}
+
+function onOutlineDragEnd() {
+  dragSourceLine.value = null;
+  dragOverLine.value = null;
+}
 
 // ---------------------------------------------------------------------------
 // v3.1.x keyboard jump (vimium-style)
@@ -126,11 +167,44 @@ function flattenVisible(
   return out;
 }
 
+function collectBranchLines(nodes: OutlineNode[]): number[] {
+  const out: number[] = [];
+  for (const node of nodes) {
+    if (node.children.length > 0) {
+      out.push(node.item.line);
+      out.push(...collectBranchLines(node.children));
+    }
+  }
+  return out;
+}
+
+const tree = computed(() => buildTree(items.value));
+const branchLines = computed(() => collectBranchLines(tree.value));
+const collapsedSet = computed(() => new Set(collapsedLinesFor(activeMarkdownTab.value?.id)));
+const anyCollapsed = computed(() =>
+  branchLines.value.some((line) => collapsedSet.value.has(line)),
+);
+const allCollapsed = computed(
+  () =>
+    branchLines.value.length > 0 &&
+    branchLines.value.every((line) => collapsedSet.value.has(line)),
+);
+
 const visibleItems = computed(() => {
-  const tree = buildTree(items.value);
-  const collapsed = new Set(collapsedLinesFor(activeMarkdownTab.value?.id));
-  return flattenVisible(tree, collapsed);
+  return flattenVisible(tree.value, collapsedSet.value);
 });
+
+function collapseAll() {
+  const tabId = activeMarkdownTab.value?.id;
+  if (!tabId || !branchLines.value.length) return;
+  setCollapsedLines(tabId, [...branchLines.value].sort((a, b) => a - b));
+}
+
+function expandAll() {
+  const tabId = activeMarkdownTab.value?.id;
+  if (!tabId) return;
+  setCollapsedLines(tabId, []);
+}
 
 function toggleCollapsed(line: number) {
   const tabId = activeMarkdownTab.value?.id;
@@ -266,15 +340,45 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onWindowKey));
     <PanelHeader
       :title="t('toolbar.outline')"
       @close="tabs.activeId && tabs.toggleOutline(tabs.activeId)"
-    />
+    >
+      <template v-if="branchLines.length > 0">
+        <button
+          class="rp-icon-btn"
+          type="button"
+          :disabled="!anyCollapsed"
+          :title="t('outline.expandAll')"
+          :aria-label="t('outline.expandAll')"
+          data-testid="outline-expand-all"
+          @click="expandAll"
+        >
+          <Icons name="unfold-all" :size="14" />
+        </button>
+        <button
+          class="rp-icon-btn"
+          type="button"
+          :disabled="allCollapsed"
+          :title="t('outline.collapseAll')"
+          :aria-label="t('outline.collapseAll')"
+          data-testid="outline-collapse-all"
+          @click="collapseAll"
+        >
+          <Icons name="fold-all" :size="14" />
+        </button>
+      </template>
+    </PanelHeader>
     <div v-if="!visibleItems.length" class="rp-empty">{{ t('outline.empty') }}</div>
     <ul ref="listRef" class="outline__list rp-body rp-list" v-else>
       <li
         v-for="(it, i) in visibleItems"
         :key="`${it.line}-${it.text}`"
-        :class="['outline__item', 'rp-row', `outline__item--h${it.level}`, { 'outline__item--active': i === activeIndex, 'is-active': i === activeIndex }]"
+        draggable="true"
+        :class="['outline__item', 'rp-row', `outline__item--h${it.level}`, { 'outline__item--active': i === activeIndex, 'is-active': i === activeIndex, 'outline__item--dragover': dragOverLine === it.line }]"
         :style="{ '--outline-pl': 4 + it.depth * 14 + 'px' }"
         @click="emit('goto', it.line)"
+        @dragstart="onOutlineDragStart(it.line, $event)"
+        @dragover="onOutlineDragOver(it.line, $event)"
+        @drop="onOutlineDrop(it.line, $event)"
+        @dragend="onOutlineDragEnd"
       >
         <button
           v-if="it.hasChildren"
@@ -290,9 +394,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onWindowKey));
         <button
           class="outline__label"
           @click.stop="emit('goto', it.line)"
-          :title="it.text"
+          :title="stripOutlineFormatting(it.text)"
         >
-          {{ it.text }}
+          <template v-for="(seg, si) in parseOutlineSegments(it.text)" :key="si">
+            <mark v-if="seg.mark" class="outline__mark">{{ seg.text }}</mark>
+            <template v-else>{{ seg.text }}</template>
+          </template>
         </button>
         <span
           v-if="labelAt(i)"
@@ -332,6 +439,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onWindowKey));
 .outline__item--active {
   font-weight: 500;
 }
+.outline__item--dragover {
+  outline: 1px dashed var(--accent, #ff9f40);
+  background: var(--fill-1);
+}
 .outline__twisty {
   flex: 0 0 16px;
   width: 16px;
@@ -370,6 +481,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onWindowKey));
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
+}
+.outline__mark {
+  background: var(--mark-bg, rgba(255, 212, 0, 0.52));
+  color: inherit;
+  padding: 0 0.2em;
+  border-radius: 3px;
 }
 .outline__keylabel {
   flex: 0 0 auto;

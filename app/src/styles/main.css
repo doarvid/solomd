@@ -51,20 +51,22 @@
   --type-green: #3a9d4e;
   --type-yellow: #c9a227;
 
-  /* Markdown element colors (light) */
-  --md-h1: #1f1e1c;
-  --md-h2: #1f1e1c;
-  --md-h3: #1f1e1c;
-  --md-h4: #2f2e2b;
-  --md-h5: #3f3d39;
-  --md-h6: #5e5b55;
+  /* Markdown element colors (light) — 6 distinct heading hues + separate code/quote surfaces (#588/#589) */
+  --md-h1: #182232;
+  --md-h2: #1d4f91;
+  --md-h3: #1f6f78;
+  --md-h4: #2d6a4f;
+  --md-h5: #7c4d12;
+  --md-h6: #6b5b7b;
   --md-strong: #1f1e1c;
   --md-em: #1f1e1c;
   --md-link: #b4561b;
   --md-url: #78756e;
   --md-code: #1f1e1c;
-  --md-code-bg: #f6f5f2;
-  --md-quote: #5e5b55;
+  --md-code-bg: #f3f4f6;
+  --md-quote: #555049;
+  --md-quote-bg: #fcf8f1;
+  --md-quote-border: #e07b39;
   --md-list: #78756e;
   --md-hr: #dedcd6;
 
@@ -146,20 +148,22 @@
   --type-green: #6cc77f;
   --type-yellow: #e0c350;
 
-  /* Markdown element colors (dark) */
-  --md-h1: #f2f0ec;
-  --md-h2: #f2f0ec;
-  --md-h3: #eceae6;
-  --md-h4: #d8d6d1;
-  --md-h5: #c2bfba;
-  --md-h6: #a9a6a0;
+  /* Markdown element colors (dark) — 6 distinct heading hues + separate code/quote surfaces (#588/#589) */
+  --md-h1: #f5f3ef;
+  --md-h2: #79b8ff;
+  --md-h3: #56d4dd;
+  --md-h4: #7ee787;
+  --md-h5: #f2cc60;
+  --md-h6: #d2a8ff;
   --md-strong: #f2f0ec;
   --md-em: #eceae6;
   --md-link: #f4a26b;
   --md-url: #8c8984;
   --md-code: #eceae6;
-  --md-code-bg: #262628;
-  --md-quote: #a9a6a0;
+  --md-code-bg: #24262a;
+  --md-quote: #b8b3ab;
+  --md-quote-bg: #2b2722;
+  --md-quote-border: #f0965a;
   --md-list: #8c8984;
   --md-hr: #3a3a3d;
 
@@ -188,11 +192,12 @@
   --text-faint: #616e88;
   --accent: #88c0d0;
   --accent-fg: #2e3440;
-  --md-h1: #eceff4; --md-h2: #e5e9f0; --md-h3: #d8dee9;
-  --md-h4: #c8ced8; --md-h5: #a8b0c0; --md-h6: #8890a0;
+  --md-h1: #eceff4; --md-h2: #88c0d0; --md-h3: #81a1c1;
+  --md-h4: #8fbcbb; --md-h5: #ebcb8b; --md-h6: #b48ead;
   --md-strong: #eceff4; --md-em: #d8dee9; --md-link: #88c0d0;
-  --md-url: #5e81ac; --md-code: #bf616a; --md-code-bg: #3b4252;
-  --md-quote: #616e88; --md-list: #88c0d0; --md-hr: #4c566a;
+  --md-url: #5e81ac; --md-code: #bf616a; --md-code-bg: #363d4c;
+  --md-quote: #c8d0df; --md-quote-bg: #3e4758; --md-quote-border: #88c0d0;
+  --md-list: #88c0d0; --md-hr: #4c566a;
   --syn-keyword: #81a1c1; --syn-string: #a3be8c; --syn-number: #b48ead;
   --syn-comment: #616e88; --syn-function: #88c0d0; --syn-variable: #d8dee9;
   --syn-type: #8fbcbb; --syn-property: #88c0d0; --syn-operator: #81a1c1;
@@ -210,11 +215,12 @@
   --text-faint: #93a1a1;
   --accent: #268bd2;
   --accent-fg: #fdf6e3;
-  --md-h1: #073642; --md-h2: #586e75; --md-h3: #657b83;
-  --md-h4: #839496; --md-h5: #93a1a1; --md-h6: #93a1a1;
+  --md-h1: #073642; --md-h2: #268bd2; --md-h3: #2aa198;
+  --md-h4: #859900; --md-h5: #b58900; --md-h6: #6c71c4;
   --md-strong: #073642; --md-em: #586e75; --md-link: #268bd2;
-  --md-url: #2aa198; --md-code: #d33682; --md-code-bg: #eee8d5;
-  --md-quote: #93a1a1; --md-list: #cb4b16; --md-hr: #d3cbb7;
+  --md-url: #2aa198; --md-code: #d33682; --md-code-bg: #ede7d3;
+  --md-quote: #586e75; --md-quote-bg: #f6efdc; --md-quote-border: #b58900;
+  --md-list: #cb4b16; --md-hr: #d3cbb7;
   --syn-keyword: #859900; --syn-string: #2aa198; --syn-number: #d33682;
   --syn-comment: #93a1a1; --syn-function: #268bd2; --syn-variable: #657b83;
   --syn-type: #b58900; --syn-property: #268bd2; --syn-operator: #657b83;
@@ -233,11 +239,12 @@
   --text-faint: #586e75;
   --accent: #268bd2;
   --accent-fg: #fdf6e3;
-  --md-h1: #93a1a1; --md-h2: #839496; --md-h3: #657b83;
-  --md-h4: #586e75; --md-h5: #586e75; --md-h6: #586e75;
+  --md-h1: #fdf6e3; --md-h2: #268bd2; --md-h3: #2aa198;
+  --md-h4: #859900; --md-h5: #b58900; --md-h6: #6c71c4;
   --md-strong: #93a1a1; --md-em: #839496; --md-link: #268bd2;
-  --md-url: #2aa198; --md-code: #d33682; --md-code-bg: #073642;
-  --md-quote: #586e75; --md-list: #cb4b16; --md-hr: #0a4050;
+  --md-url: #2aa198; --md-code: #d33682; --md-code-bg: #06333f;
+  --md-quote: #93a1a1; --md-quote-bg: #0b3c49; --md-quote-border: #2aa198;
+  --md-list: #cb4b16; --md-hr: #0a4050;
   --syn-keyword: #859900; --syn-string: #2aa198; --syn-number: #d33682;
   --syn-comment: #586e75; --syn-function: #268bd2; --syn-variable: #839496;
   --syn-type: #b58900; --syn-property: #268bd2; --syn-operator: #839496;
@@ -256,11 +263,12 @@
   --text-faint: #75715e;
   --accent: #f92672;
   --accent-fg: #ffffff;
-  --md-h1: #f8f8f2; --md-h2: #f8f8f2; --md-h3: #e8e8d2;
-  --md-h4: #a6a68a; --md-h5: #a6a68a; --md-h6: #75715e;
+  --md-h1: #f8f8f2; --md-h2: #a6e22e; --md-h3: #66d9ef;
+  --md-h4: #fd971f; --md-h5: #e6db74; --md-h6: #ae81ff;
   --md-strong: #f8f8f2; --md-em: #e6db74; --md-link: #66d9ef;
-  --md-url: #a6e22e; --md-code: #f92672; --md-code-bg: #3e3d32;
-  --md-quote: #75715e; --md-list: #a6e22e; --md-hr: #49483e;
+  --md-url: #a6e22e; --md-code: #f92672; --md-code-bg: #33342c;
+  --md-quote: #cfcfc2; --md-quote-bg: #3d3b30; --md-quote-border: #fd971f;
+  --md-list: #a6e22e; --md-hr: #49483e;
   --syn-keyword: #f92672; --syn-string: #e6db74; --syn-number: #ae81ff;
   --syn-comment: #75715e; --syn-function: #a6e22e; --syn-variable: #f8f8f2;
   --syn-type: #66d9ef; --syn-property: #a6e22e; --syn-operator: #f92672;
@@ -278,11 +286,12 @@
   --text-faint: #8b949e;
   --accent: #0366d6;
   --accent-fg: #ffffff;
-  --md-h1: #24292e; --md-h2: #24292e; --md-h3: #586069;
-  --md-h4: #6a737d; --md-h5: #8b949e; --md-h6: #8b949e;
+  --md-h1: #1f2328; --md-h2: #0969da; --md-h3: #1a7f37;
+  --md-h4: #8250df; --md-h5: #9a6700; --md-h6: #57606a;
   --md-strong: #24292e; --md-em: #24292e; --md-link: #0366d6;
   --md-url: #0366d6; --md-code: #d73a49; --md-code-bg: #f6f8fa;
-  --md-quote: #6a737d; --md-list: #e36209; --md-hr: #d0d7de;
+  --md-quote: #57606a; --md-quote-bg: #f0f6fc; --md-quote-border: #0969da;
+  --md-list: #e36209; --md-hr: #d0d7de;
   --syn-keyword: #d73a49; --syn-string: #032f62; --syn-number: #005cc5;
   --syn-comment: #6a737d; --syn-function: #6f42c1; --syn-variable: #24292e;
   --syn-type: #e36209; --syn-property: #005cc5; --syn-operator: #d73a49;
@@ -301,14 +310,39 @@
   --text-faint: #6272a4;
   --accent: #bd93f9;
   --accent-fg: #282a36;
-  --md-h1: #f8f8f2; --md-h2: #f8f8f2; --md-h3: #bfbfdc;
-  --md-h4: #bfbfdc; --md-h5: #6272a4; --md-h6: #6272a4;
+  --md-h1: #ff79c6; --md-h2: #bd93f9; --md-h3: #8be9fd;
+  --md-h4: #50fa7b; --md-h5: #ffb86c; --md-h6: #f1fa8c;
   --md-strong: #f8f8f2; --md-em: #f1fa8c; --md-link: #8be9fd;
-  --md-url: #50fa7b; --md-code: #ff79c6; --md-code-bg: #44475a;
-  --md-quote: #6272a4; --md-list: #50fa7b; --md-hr: #44475a;
+  --md-url: #50fa7b; --md-code: #ff79c6; --md-code-bg: #343746;
+  --md-quote: #d6d6ec; --md-quote-bg: #3c3f52; --md-quote-border: #bd93f9;
+  --md-list: #50fa7b; --md-hr: #44475a;
   --syn-keyword: #ff79c6; --syn-string: #f1fa8c; --syn-number: #bd93f9;
   --syn-comment: #6272a4; --syn-function: #50fa7b; --syn-variable: #f8f8f2;
   --syn-type: #8be9fd; --syn-property: #50fa7b; --syn-operator: #ff79c6;
+}
+
+/* ---- Lucius (Eye-Care / 护眼) (#358) ---- */
+:root[data-theme="lucius"] {
+  color-scheme: light;
+  --bg: #eef3eb;
+  --bg-elev: #e3ece0;
+  --bg-hover: rgba(40, 51, 40, 0.055);
+  --bg-active: rgba(40, 51, 40, 0.095);
+  --border: #cfd9ca;
+  --text: #283328;
+  --text-muted: #526352;
+  --text-faint: #7c8f7c;
+  --accent: #3a7d44;
+  --accent-fg: #ffffff;
+  --md-h1: #163d22; --md-h2: #1f5c35; --md-h3: #23636b;
+  --md-h4: #4c6b28; --md-h5: #785a28; --md-h6: #526352;
+  --md-strong: #1e291e; --md-em: #283328; --md-link: #2b6cb0;
+  --md-url: #526352; --md-code: #2e6f40; --md-code-bg: #e1eadc;
+  --md-quote: #465746; --md-quote-bg: #e8efe2; --md-quote-border: #3a7d44;
+  --md-list: #3a7d44; --md-hr: #cfd9ca;
+  --syn-keyword: #2e6f40; --syn-string: #3b7a57; --syn-number: #8c5a2b;
+  --syn-comment: #7c8f7c; --syn-function: #2b5b84; --syn-variable: #283328;
+  --syn-type: #7a5c2e; --syn-property: #2b5b84; --syn-operator: #2e6f40;
 }
 
 * {
@@ -410,6 +444,20 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* Shared search-match mark styling across Preview, Live Edit rendered blocks, and TableWidget */
+mark.ps-mark {
+  background: var(--search-match-bg, rgba(255, 208, 0, 0.48));
+  color: inherit;
+  padding: 1px 0;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--search-match-border, rgba(208, 140, 0, 0.5));
+}
+mark.ps-mark.ps-mark--current {
+  background: var(--search-match-current-bg, #ff8c00);
+  color: var(--search-match-current-fg, #ffffff);
+  box-shadow: 0 0 0 1px var(--search-match-current-bg, #ff8c00);
+}
+
 /* Scrollbars: styles/scrollbars.css (5.0). */
 
 /* ============================================================
@@ -499,9 +547,12 @@ button:disabled {
      to become the safe area instead, or a full-height panel puts its close
      button under the notch and its footer under the home indicator — measured
      on an iOS simulator: panel top 16 against a 62px inset, bottom 940 against
-     a 956px viewport with a 34px inset. */
-  padding: calc(env(safe-area-inset-top) + 8px) calc(env(safe-area-inset-right) + 8px)
-    calc(env(safe-area-inset-bottom) + 8px) calc(env(safe-area-inset-left) + 8px);
+     a 956px viewport with a 34px inset. Android WebView reports env() as 0,
+     so include --android-safe-top/bottom (#153). */
+  padding: calc(max(env(safe-area-inset-top, 0px), var(--android-safe-top, 0px)) + 8px)
+    calc(env(safe-area-inset-right, 0px) + 8px)
+    calc(max(env(safe-area-inset-bottom, 0px), var(--android-safe-bottom, 0px)) + 8px)
+    calc(env(safe-area-inset-left, 0px) + 8px);
 }
 :root.narrow-viewport .ds-modal__panel {
   width: 100% !important;
@@ -554,7 +605,7 @@ button:disabled {
    screen a thumb can actually reach. */
 :root.narrow-viewport .reading-view__controls {
   top: auto;
-  bottom: max(16px, calc(env(safe-area-inset-bottom, 0px) + 8px));
+  bottom: max(16px, calc(max(env(safe-area-inset-bottom, 0px), var(--android-safe-bottom, 0px)) + 8px));
   right: max(16px, calc(env(safe-area-inset-right, 0px) + 8px));
 }
 /* Both the window buttons and the plain close button — the latter is the one
@@ -608,32 +659,191 @@ button:disabled {
 /* Markdown extension styles (front-matter, task list, mark, footnotes) */
 .md-frontmatter {
   margin: 0 0 1rem;
-  padding: 0.6rem 0.9rem;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   background: var(--bg-hover);
   font-size: 0.85rem;
-  border-radius: 0 4px 4px 0;
+  border-radius: 6px;
+}
+.md-frontmatter__summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  user-select: none;
+  list-style: none;
+}
+.md-frontmatter__summary::-webkit-details-marker {
+  display: none;
+}
+.md-frontmatter__summary::before {
+  content: '▸';
+  font-size: 0.75em;
+  transition: transform 0.14s ease;
+}
+.md-frontmatter[open] > .md-frontmatter__summary::before {
+  transform: rotate(90deg);
+}
+.md-frontmatter[open] > .md-frontmatter__summary {
+  margin-bottom: 0.45rem;
+}
+.md-frontmatter__count {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--fill-1, rgba(128, 128, 128, 0.12));
+  font-size: 0.72rem;
+  font-weight: 500;
 }
 .md-frontmatter dl {
   display: grid;
   grid-template-columns: max-content 1fr;
   column-gap: 0.9rem;
-  row-gap: 0.25rem;
+  row-gap: 0.3rem;
   margin: 0;
+  align-items: baseline;
 }
 .md-frontmatter dt {
   font-weight: 600;
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 0.85em;
+  font-size: 0.84em;
 }
 .md-frontmatter dd {
   margin: 0;
   color: var(--text);
+  min-width: 0;
+  word-break: break-word;
+}
+.md-frontmatter-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.md-frontmatter-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+  font-size: 0.82em;
+  line-height: 1.45;
+}
+.md-frontmatter-bool {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 0.82em;
+  font-family: var(--font-mono);
+}
+.md-frontmatter-bool--true {
+  background: color-mix(in srgb, #16a34a 14%, transparent);
+  color: #16a34a;
+}
+.md-frontmatter-bool--false {
+  background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+  color: var(--text-muted);
+}
+.md-frontmatter-date {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+.md-frontmatter-empty {
+  color: var(--text-muted);
+}
+.md-frontmatter-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .md-frontmatter--raw {
   white-space: pre-wrap;
   font-family: var(--font-mono);
+}
+
+/* #626 — Live Edit collapsible YAML frontmatter card */
+.cm-frontmatter-card {
+  margin: 4px 0 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-sidebar, var(--bg-hover));
+  font-family: var(--font-sans);
+  font-size: 13px;
+  overflow: hidden;
+}
+.cm-frontmatter-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-2);
+}
+.cm-frontmatter-card__head:hover {
+  background: var(--fill-1);
+}
+.cm-frontmatter-card__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.cm-frontmatter-card__badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--fill-1);
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 500;
+}
+.cm-frontmatter-card__edit {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.cm-frontmatter-card__edit:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.cm-frontmatter-card__body {
+  padding: 6px 12px 9px;
+  border-top: 1px solid var(--hairline);
+}
+.cm-frontmatter-card__grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 12px;
+  row-gap: 5px;
+  align-items: baseline;
+}
+.cm-frontmatter-card__key {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+.cm-frontmatter-card__val {
+  font-size: 12.5px;
+  color: var(--text);
+  min-width: 0;
+  word-break: break-word;
+}
+.cm-frontmatter-card__err {
+  font-size: 12px;
+  color: var(--danger, #dc2626);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
 }
 
 /* GitHub-style callouts (> [!NOTE] …) — global so preview, live-edit blocks
@@ -704,15 +914,26 @@ button:disabled {
   color: var(--accent);
   text-decoration: underline;
 }
-/* #347 — the text PDF's table-of-contents page: a titled page rather than the
-   on-screen card, with a dotted leader to each entry's page number
+/* #347 / #566 — the PDF's table-of-contents page: a titled page rather than
+   the on-screen card, with a dotted leader to each entry's page number
    (lib/print-pages.ts fills the numbers; an entry without one drops the
    leader). */
-.solomd-print-content > .md-toc:first-child {
+.solomd-print-content .md-toc {
   border: none;
   background: transparent;
   padding: 0;
   margin: 0;
+}
+.solomd-print-content > h1:first-child:has(+ .md-toc),
+.solomd-print-content h1.pdf-doc-title {
+  text-align: center;
+  border-bottom: none !important;
+  padding-bottom: 0;
+}
+.solomd-print-content > .md-toc:first-child + hr,
+.solomd-print-content > h1:first-child + .md-toc + hr,
+.solomd-print-content hr.pdf-toc-hr {
+  display: none !important;
 }
 .solomd-print-content .md-toc__title {
   font-size: 1.6em;
@@ -742,7 +963,7 @@ button:disabled {
 }
 
 mark {
-  background: rgba(255, 159, 64, 0.28);
+  background: var(--mark-bg, rgba(255, 212, 0, 0.52));
   color: inherit;
   padding: 0 0.18em;
   border-radius: 2px;
@@ -849,12 +1070,39 @@ div.mermaidTooltip {
     overflow-x: visible !important;
   }
   body.solomd-printing .md-toc {
-    break-inside: avoid-page;
     background: transparent;
+    border: none;
+    padding: 0;
   }
-  /* #347 — a TOC at the top of the document (Settings → PDF "table of
-   * contents", or a leading [TOC]) is a page of its own. */
-  body.solomd-printing .solomd-print-content > .md-toc:first-child {
+  /* #607 / #595 — Honor merged-book chapter page breaks (`<hr data-solomd-page-break="1">`)
+   * in native vector print-to-PDF exports as well as `withPrintPagination` measurements. */
+  body.solomd-printing .solomd-print-content hr[data-solomd-page-break="1"] {
+    break-after: page;
+    page-break-after: always;
+    border: none !important;
+    margin: 0 !important;
+    height: 0 !important;
+  }
+  body.solomd-printing .solomd-print-content .pdf-book-cover {
+    padding: 180px 24px 120px;
+    text-align: center;
+    break-after: page;
+    page-break-after: always;
+  }
+  body.solomd-printing .solomd-print-content .pdf-book-cover__title {
+    font-size: 2.2em;
+    font-weight: 700;
+    line-height: 1.35;
+    word-break: break-word;
+  }
+  /* #347 / #566 / #614 — a TOC at the top of the document (Settings → PDF "table of
+   * contents", a leading [TOC], H1 + [TOC], or .pdf-book-cover + [TOC] in merged
+   * / batch folder PDF export) is always a page of its own, never sharing its
+   * final page with body text. */
+  body.solomd-printing .solomd-print-content > .md-toc:first-child,
+  body.solomd-printing .solomd-print-content > h1:first-child + .md-toc,
+  body.solomd-printing .solomd-print-content .pdf-book-cover + .md-toc,
+  body.solomd-printing .solomd-print-content .md-toc.md-toc--lead {
     break-after: page;
     page-break-after: always;
   }
@@ -904,8 +1152,10 @@ body.solomd-printing {
   --md-link: #0b5cad;
   --md-url: #0b5cad;
   --md-code: #1f2328;
-  --md-code-bg: #f6f8fa;
-  --md-quote: #6a6a6a;
+  --md-code-bg: #f3f5f8;
+  --md-quote: #555555;
+  --md-quote-bg: #fbf8f1;
+  --md-quote-border: #d0873c;
   --md-list: #59636e;
   --md-hr: #c0bdb3;
   --syn-keyword: #a626a4;
@@ -945,8 +1195,10 @@ body.solomd-printing {
   --md-link: #ff9f40;
   --md-url: #ffb874;
   --md-code: #ff9f9f;
-  --md-code-bg: #2a2a2a;
-  --md-quote: #888888;
+  --md-code-bg: #26282c;
+  --md-quote: #b8b1a6;
+  --md-quote-bg: #2d2923;
+  --md-quote-border: #ffa54d;
   --md-list: #ff9f40;
   --md-hr: #444444;
   --syn-keyword: #c678dd;

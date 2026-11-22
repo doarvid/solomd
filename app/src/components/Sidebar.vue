@@ -14,7 +14,7 @@
  * The sidebar owns the width (settings.fileTreeWidth) and the resize handle;
  * only the middle part scrolls.
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import Icon from './Icons.vue';
 import FileTree from './FileTree.vue';
 import ViewsPanel from './ViewsPanel.vue';
@@ -23,13 +23,15 @@ import { useSettingsStore } from '../stores/settings';
 import { useWorkspaceStore } from '../stores/workspace';
 import { useWorkspaceIndexStore } from '../stores/workspaceIndex';
 import { useTabsStore } from '../stores/tabs';
+import { useGitHistoryStore } from '../stores/gitHistory';
 import { useFiles } from '../composables/useFiles';
 import { useInbox } from '../composables/useInbox';
 import { useInboxView } from '../composables/useInboxView';
 import { useDailyNotes } from '../composables/useDailyNotes';
+import { useGitQuickActions } from '../composables/useGitQuickActions';
 import { shortcutLabel } from '../lib/keybindings';
 import { isMobile, usesCommandKey } from '../lib/platform';
-import { isSafPath } from '../lib/saf-fs';
+import { isSafPath, safRecoverVaultForPath } from '../lib/saf-fs';
 import { parentDirOf } from '../lib/new-file-target';
 import { useI18n } from '../i18n';
 
@@ -56,9 +58,22 @@ const files = useFiles();
 const inbox = useInbox();
 const inboxView = useInboxView();
 const daily = useDailyNotes();
+const gitHistory = useGitHistoryStore();
+const gitQuick = useGitQuickActions();
 const { t } = useI18n();
 
 const hasFolder = computed(() => !!workspace.currentFolder);
+
+// #620 — Probe git status whenever a folder opens so the main-UI Git quick
+// actions (`add` / `pull` / `push`) appear immediately without having to open
+// the History panel first.
+watch(
+  () => workspace.currentFolder,
+  (folder) => {
+    void gitHistory.refreshStatus(folder);
+  },
+  { immediate: true },
+);
 
 // ── search field ────────────────────────────────────────────────────────────
 // The chord that works right now (#180): read from the user's bindings.
@@ -138,6 +153,75 @@ function openRecent(path: string) {
   void files.openPath(path, { bypassNewWindow: true });
 }
 
+// ── #205 Virtual Workspace (scattered files with aliases & notes) ───────────
+const editingVirtualPath = ref<string | null>(null);
+const editingVirtualAlias = ref('');
+const editingVirtualNote = ref('');
+
+const virtualDisplayItems = computed(() =>
+  workspace.virtualItems.map((it) => {
+    const parts = it.path.split(/[\\/]/).filter(Boolean);
+    const fileName = parts[parts.length - 1] ?? it.path;
+    const parentName = parts.length > 1 ? parts[parts.length - 2] : '';
+    return {
+      path: it.path,
+      displayName: it.alias || fileName,
+      subtitle: it.note || parentName,
+      alias: it.alias ?? '',
+      note: it.note ?? '',
+    };
+  }),
+);
+
+const canPinActiveTabToVirtual = computed(() => {
+  const fp = tabs.activeTab?.filePath;
+  if (!fp) return false;
+  return !workspace.virtualItems.some((it) => it.path === fp);
+});
+
+function pinActiveTabToVirtual() {
+  const fp = tabs.activeTab?.filePath;
+  if (!fp) return;
+  workspace.addVirtualItem(fp);
+}
+
+async function addScatteredFilesToVirtual() {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'mdx', 'txt'] }],
+    });
+    if (!selected) return;
+    const list = Array.isArray(selected) ? selected : [selected];
+    for (const p of list) {
+      if (typeof p === 'string' && p.trim()) {
+        workspace.addVirtualItem(p);
+      }
+    }
+  } catch (err) {
+    console.warn('[Sidebar] addScatteredFilesToVirtual failed', err);
+  }
+}
+
+function startEditVirtualItem(item: { path: string; alias: string; note: string }) {
+  editingVirtualPath.value = item.path;
+  editingVirtualAlias.value = item.alias;
+  editingVirtualNote.value = item.note;
+}
+
+function saveEditVirtualItem(path: string) {
+  workspace.updateVirtualItem(path, {
+    alias: editingVirtualAlias.value,
+    note: editingVirtualNote.value,
+  });
+  editingVirtualPath.value = null;
+}
+
+function cancelEditVirtualItem() {
+  editingVirtualPath.value = null;
+}
+
 // ── tags ────────────────────────────────────────────────────────────────────
 const TAG_LIMIT = 8;
 const topTags = computed(() =>
@@ -164,7 +248,16 @@ const recentFolders = computed(() =>
 function openFolder() {
   void files.openFolder();
 }
-function pickFolder(path: string) {
+async function pickFolder(path: string) {
+  if (isSafPath(path) && !workspace.safVaults[path]) {
+    const recovered = await safRecoverVaultForPath(path);
+    if (recovered) {
+      workspace.setSafVault(recovered.treeUri, path, recovered.name);
+      return;
+    }
+    void files.openFolder();
+    return;
+  }
   workspace.setFolder(path);
 }
 
@@ -264,7 +357,7 @@ onBeforeUnmount(() => {
 
     <div class="sb__scroll">
       <nav v-if="phone" class="sb__cards" :aria-label="t('phone.notes')">
-        <button v-if="hasFolder" class="sb__card" type="button" @click="openToday">
+        <button v-if="hasFolder && settings.dailyNotesEnabled" class="sb__card" type="button" @click="openToday">
           <Icon name="today" :size="20" class="sb__card-icon" />
           <span class="sb__card-label">{{ t('sidebar.today') }}</span>
           <span class="sb__card-sub">{{ t('phone.daily') }}</span>
@@ -287,7 +380,7 @@ onBeforeUnmount(() => {
       </nav>
       <nav v-else class="sb__nav">
         <button
-          v-if="hasFolder"
+          v-if="hasFolder && settings.dailyNotesEnabled"
           class="sb__row"
           :class="{ 'sb__row--active': todayActive }"
           type="button"
@@ -342,6 +435,94 @@ onBeforeUnmount(() => {
           <span class="sb__row-label">{{ n.title }}</span>
         </button>
       </section>
+      <section class="sb__virtual" data-testid="virtual-workspace">
+        <div class="sb__virtual-head">
+          <span class="sb__label">{{ settings.language === 'zh' ? '虚拟工作空间' : 'Virtual Workspace' }}</span>
+          <div class="sb__virtual-actions">
+            <button
+              v-if="canPinActiveTabToVirtual"
+              class="sb__row-tool"
+              type="button"
+              :title="settings.language === 'zh' ? '将当前文档加入虚拟工作空间' : 'Pin active note to Virtual Workspace'"
+              @click="pinActiveTabToVirtual"
+            >📌</button>
+            <button
+              class="sb__row-tool"
+              type="button"
+              :title="settings.language === 'zh' ? '添加分散目录中的 Markdown 文件…' : 'Add scattered Markdown files…'"
+              @click="addScatteredFilesToVirtual"
+            >
+              <Icon name="plus" :size="14" />
+            </button>
+          </div>
+        </div>
+        <div v-if="virtualDisplayItems.length" class="sb__virtual-list">
+          <div
+            v-for="item in virtualDisplayItems"
+            :key="item.path"
+            class="sb__virtual-item"
+          >
+            <template v-if="editingVirtualPath === item.path">
+              <div class="sb__virtual-edit" @click.stop>
+                <input
+                  v-model="editingVirtualAlias"
+                  class="sb__virtual-input"
+                  :placeholder="settings.language === 'zh' ? '别名（如：前端 AGENTS.md）' : 'Alias (e.g. Frontend AGENTS.md)'"
+                  @keydown.enter.prevent="saveEditVirtualItem(item.path)"
+                  @keydown.escape.prevent="cancelEditVirtualItem"
+                />
+                <input
+                  v-model="editingVirtualNote"
+                  class="sb__virtual-input"
+                  :placeholder="settings.language === 'zh' ? '备注说明（可选）' : 'Note / comment (optional)'"
+                  @keydown.enter.prevent="saveEditVirtualItem(item.path)"
+                  @keydown.escape.prevent="cancelEditVirtualItem"
+                />
+                <div class="sb__virtual-edit-btns">
+                  <button type="button" class="sb__chip" @click="saveEditVirtualItem(item.path)">
+                    {{ settings.language === 'zh' ? '保存' : 'Save' }}
+                  </button>
+                  <button type="button" class="sb__chip" @click="cancelEditVirtualItem">
+                    {{ settings.language === 'zh' ? '取消' : 'Cancel' }}
+                  </button>
+                </div>
+              </div>
+            </template>
+            <template v-else>
+              <div
+                class="sb__row sb__row--split"
+                :class="{ 'sb__row--active': tabs.activeTab?.filePath === item.path }"
+              >
+                <button
+                  class="sb__row-main"
+                  type="button"
+                  :title="`${item.path}${item.note ? '\n备注: ' + item.note : ''}`"
+                  @click="openRecent(item.path)"
+                >
+                  <Icon name="file" :size="15" class="sb__row-icon" />
+                  <span class="sb__virtual-text">
+                    <span class="sb__row-label">{{ item.displayName }}</span>
+                    <span v-if="item.subtitle" class="sb__virtual-sub">{{ item.subtitle }}</span>
+                  </span>
+                </button>
+                <button
+                  class="sb__row-tool"
+                  type="button"
+                  :title="settings.language === 'zh' ? '设置别名与备注' : 'Edit alias & note'"
+                  @click.stop="startEditVirtualItem(item)"
+                >✎</button>
+                <button
+                  class="sb__row-tool"
+                  type="button"
+                  :title="settings.language === 'zh' ? '从虚拟工作空间移除' : 'Remove from Virtual Workspace'"
+                  @click.stop="workspace.removeVirtualItem(item.path)"
+                >×</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </section>
+
       <template v-if="hasFolder">
         <FileTree embedded />
 
@@ -419,6 +600,42 @@ onBeforeUnmount(() => {
       <div class="sb__foot-sync">
         <!-- Sync belongs to the open folder: nothing to report without one. -->
         <SyncStatusPill v-if="hasFolder" variant="footer" />
+        <!-- #620 — Quick Git Add / Pull / Push actions for any git workspace. -->
+        <div v-if="gitQuick.isGitRepo.value" class="sb__git-quick" role="group" :aria-label="t('gitQuick.groupLabel')">
+          <button
+            class="sb__git-btn"
+            type="button"
+            :disabled="gitQuick.busyAdd.value"
+            :title="t('gitQuick.addTitle')"
+            :aria-label="t('gitQuick.addTitle')"
+            @click="gitQuick.gitAdd()"
+          >
+            <Icon name="plus" :size="13" />
+            <span>{{ t('gitQuick.addShort') }}</span>
+          </button>
+          <button
+            class="sb__git-btn"
+            type="button"
+            :disabled="gitQuick.busyPull.value"
+            :title="t('gitQuick.pullTitle')"
+            :aria-label="t('gitQuick.pullTitle')"
+            @click="gitQuick.gitPull()"
+          >
+            <Icon name="download" :size="13" />
+            <span>{{ t('gitQuick.pullShort') }}</span>
+          </button>
+          <button
+            class="sb__git-btn"
+            type="button"
+            :disabled="gitQuick.busyPush.value"
+            :title="t('gitQuick.pushTitle')"
+            :aria-label="t('gitQuick.pushTitle')"
+            @click="gitQuick.gitPush()"
+          >
+            <Icon name="upload" :size="13" />
+            <span>{{ t('gitQuick.pushShort') }}</span>
+          </button>
+        </div>
       </div>
       <button
         class="sb__icon-btn"
@@ -557,8 +774,10 @@ onBeforeUnmount(() => {
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  scrollbar-width: thin;
-  scrollbar-color: var(--fill-2) transparent;
+  /* styles/scrollbars.css owns the thin bars. Setting the standard
+     scrollbar-width / scrollbar-color properties here switches those
+     ::-webkit-scrollbar rules off in WebView2, which hid the horizontal bar
+     on narrow sidebars. Leave them unset so side-scrolling stays visible. */
 }
 .sb__nav {
   flex: none;
@@ -1033,5 +1252,96 @@ onBeforeUnmount(() => {
 }
 .sb__fab:active {
   transform: scale(0.94);
+}
+.sb__virtual {
+  padding: 2px 8px 4px;
+}
+.sb__virtual-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 4px;
+}
+.sb__virtual-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.sb__virtual-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sb__virtual-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.sb__virtual-sub {
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb__virtual-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: var(--r-md);
+  background: var(--fill-1);
+}
+.sb__virtual-input {
+  width: 100%;
+  padding: 4px 6px;
+  font-size: 12px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+.sb__virtual-edit-btns {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.sb__foot-sync {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.sb__git-quick {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.sb__git-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sb__git-btn:hover:not(:disabled) {
+  background: var(--fill-1);
+  color: var(--text);
+}
+.sb__git-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 </style>

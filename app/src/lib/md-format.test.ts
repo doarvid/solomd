@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { applyFormat, type FormatKind } from './md-format.ts';
+import { applyFormat, FORMAT_KINDS, type FormatKind } from './md-format.ts';
 
 /** `|` marks the selection ends (one `|` = a bare caret). */
 function run(marked: string, kind: FormatKind): string {
@@ -52,6 +52,45 @@ test('strike and inline code toggle', () => {
   assert.equal(run('`|x|`', 'code'), '|x|');
 });
 
+test('underline, subscript and superscript are HTML-tag toggles', () => {
+  // Markdown has no syntax for these three, so the note carries the tags.
+  assert.equal(run('a |word| b', 'underline'), 'a <u>|word|</u> b');
+  assert.equal(run('a <u>|word|</u> b', 'underline'), 'a |word| b');
+  assert.equal(run('a |<u>word</u>| b', 'underline'), 'a |word| b');
+  assert.equal(run('H|2|O', 'subscript'), 'H<sub>|2|</sub>O');
+  assert.equal(run('H<sub>|2|</sub>O', 'subscript'), 'H|2|O');
+  assert.equal(run('x|2|', 'superscript'), 'x<sup>|2|</sup>');
+  assert.equal(run('x<sup>|2|</sup>', 'superscript'), 'x|2|');
+  // Each tag is its own format: the caret inside <sub> is not inside <sup>.
+  assert.equal(run('H<sub>|2|</sub>O', 'superscript'), 'H<sub><sup>|2|</sup></sub>O');
+});
+
+test('the tags are toggles from a bare caret too, word under it and all', () => {
+  assert.equal(run('fo|o', 'underline'), '<u>|foo|</u>');
+  // The word rule must not swallow the tag name (`u>foo`): the caret inside
+  // <u>foo</u> removes the pair instead of nesting a new one.
+  assert.equal(run('<u>fo|o</u>', 'underline'), '|foo|');
+  assert.equal(run('H<sub>|2|</sub>O', 'subscript'), 'H|2|O');
+  // Empty pair, and the caret between two tags removes it rather than nesting.
+  assert.equal(run('a | b', 'underline'), 'a <u>|</u> b');
+  assert.equal(run('x<u>|</u>y', 'underline'), 'x|y');
+  // CJK has no word to take, so the caret lands between the tags.
+  assert.equal(run('这是重|点内容', 'underline'), '这是重<u>|</u>点内容');
+});
+
+test('every FormatKind has a case of its own — none falls through to the heading default', () => {
+  // applyFormat's `default:` is the heading branch; if a kind is ever added to
+  // FORMAT_KINDS without a case, `Number(kind.slice(1))` is NaN and the text
+  // comes back with the empty heading prefix (a leading space) rather than the
+  // format asked for.
+  for (const kind of FORMAT_KINDS) {
+    const out = run('a\nx|y', kind);
+    for (const line of out.split('\n')) {
+      assert.ok(!line.startsWith(' '), `${kind} fell through to the heading default: ${JSON.stringify(out)}`);
+    }
+  }
+});
+
 test('highlight wraps and unwraps with ==...==, including multi-line and CJK bare caret', () => {
   assert.equal(run('先选中|需要高亮的文本|再按快捷键', 'highlight'), '先选中==|需要高亮的文本|==再按快捷键');
   assert.equal(run('先选中==|需要高亮的文本|==再按快捷键', 'highlight'), '先选中|需要高亮的文本|再按快捷键');
@@ -98,7 +137,7 @@ test('quote toggles', () => {
 });
 
 test('code block wraps whole lines and unwraps', () => {
-  assert.equal(run('x\n|let a = 1;|\ny', 'codeblock'), 'x\n```|\nlet a = 1;\n```\ny');
+  assert.equal(run('x\n|let a = 1;|\ny', 'codeblock'), 'x\n```\nlet a = 1;|\n```\ny');
   assert.equal(run('|```\nlet a = 1;\n```|', 'codeblock'), '|let a = 1;|');
 });
 
@@ -136,15 +175,17 @@ test('mixed lines are completed, not toggled off; italic does not mistake bold',
 });
 
 test('code block toggles off with the caret on a fence line or inside the block', () => {
-  // F-6A: the wrap leaves the caret on the opening fence; a second press unwraps.
-  assert.equal(run('line one|', 'codeblock'), '```|\nline one\n```');
+  // Wrap leaves the caret on the inner body line; a second press unwraps.
+  assert.equal(run('line one|', 'codeblock'), '```\nline one|\n```');
+  assert.equal(run('```\nline one|\n```', 'codeblock'), 'line one|');
   assert.equal(run('```|\nline one\n```', 'codeblock'), '|line one');
   assert.equal(run('a\n```js\nlet |x = 1;\n```\nb', 'codeblock'), 'a\nlet |x = 1;\nb');
   assert.equal(run('```\nx\n```|', 'codeblock'), 'x|');
   assert.equal(run('~~~\n|x|\n~~~', 'codeblock'), '|x|');
   assert.equal(run('```|\n```', 'codeblock'), '|');
+  assert.equal(run('|', 'codeblock'), '```\n|\n```');
   // Between two blocks is in neither: it wraps.
-  assert.equal(run('```\na\n```\nmid|\n```\nb\n```', 'codeblock'), '```\na\n```\n```|\nmid\n```\n```\nb\n```');
+  assert.equal(run('```\na\n```\nmid|\n```\nb\n```', 'codeblock'), '```\na\n```\n```\nmid|\n```\n```\nb\n```');
   // A ``` inside a ~~~ block does not end it.
   assert.equal(run('~~~\n```\nx|\n~~~', 'codeblock'), '```\nx|');
 });
@@ -216,15 +257,15 @@ test('#442: underline wraps and unwraps with <u>...</u>', () => {
 test('code block on a list soft-break line indents fences and inner line to match the list item', () => {
   assert.equal(
     run('1. 列表一\n   |', 'codeblock'),
-    '1. 列表一\n   ```|\n   \n   ```',
+    '1. 列表一\n   ```\n   |\n   ```',
   );
   assert.equal(
     run('- 列表一\n  |', 'codeblock'),
-    '- 列表一\n  ```|\n  \n  ```',
+    '- 列表一\n  ```\n  |\n  ```',
   );
   assert.equal(
     run('1. 列表一\n|', 'codeblock'),
-    '1. 列表一\n   ```|\n   \n   ```',
+    '1. 列表一\n   ```\n   |\n   ```',
   );
 });
 
@@ -234,8 +275,80 @@ test('Tab on an unindented code fence under a list item indents the whole fenced
     '1. 列表一\n   ```|\n   \n   ```\n2. 列表二',
   );
   assert.equal(
+    await tab('1. 列表一\n```\n|\n```\n2. 列表二'),
+    '1. 列表一\n   ```\n   |\n   ```\n2. 列表二',
+  );
+  assert.equal(
     await tab('1. 列表一\n   ```|\n   \n   ```\n2. 列表二', true),
     '1. 列表一\n```|\n\n```\n2. 列表二',
   );
 });
+
+test('switching a line in a list group or contiguous plain paragraph to ordered or unordered list converts the group', () => {
+  // Unordered list group -> ordered list group
+  assert.equal(run('- a\n- b|\n- c', 'ol'), '1. a\n2. b|\n3. c');
+  // Ordered list group -> unordered list group
+  assert.equal(run('1. a|\n2. b\n3. c', 'ul'), '- a|\n- b\n- c');
+  assert.equal(run('1. a\n2. b|\n3. c', 'ul'), '- a\n- b|\n- c');
+  assert.equal(run('1. a|\n2. b', 'ul'), '- a|\n- b');
+  // Mixed unordered + ordered list group -> ordered or unordered list group
+  assert.equal(run('- a|\n1. b\n2. c', 'ol'), '1. a|\n2. b\n3. c');
+  assert.equal(run('1. a\n- b|\n2. c', 'ol'), '1. a\n2. b|\n3. c');
+  assert.equal(run('1. a\n2. b\n- c|', 'ol'), '1. a\n2. b\n3. c|');
+  assert.equal(run('1. a\n- b|\n3. c', 'ul'), '- a\n- b|\n- c');
+  // Contiguous plain lines (not separated by blank lines) convert together for both ol and ul
+  assert.equal(run('first\nsec|ond\nthird', 'ol'), '1. first\n2. second|\n3. third');
+  assert.equal(run('first\nsec|ond\n\nfourth', 'ol'), '1. first\n2. second|\n\nfourth');
+  assert.equal(run('1. first\nsec|ond\nthird', 'ol'), '1. first\n2. second|\n3. third');
+  assert.equal(run('first\nsec|ond\nthird', 'ul'), '- first\n- second|\n- third');
+  assert.equal(run('first\nsec|ond\n\nfourth', 'ul'), '- first\n- second|\n\nfourth');
+  assert.equal(run('- first\nsec|ond\nthird', 'ul'), '- first\n- second|\n- third');
+});
+
+test('unordered, ordered, and task list formatting inside blockquotes keeps > in front (#513)', () => {
+  // Single blockquote line
+  assert.equal(run('> 引用内容|', 'ol'), '> 1. 引用内容|');
+  assert.equal(run('> 引用内容|', 'ul'), '> - 引用内容|');
+  assert.equal(run('> 引用内容|', 'task'), '> - [ ] 引用内容|');
+  // Toggle off restores the plain blockquote line
+  assert.equal(run('> 1. 引用内容|', 'ol'), '> 引用内容|');
+  assert.equal(run('> - 引用内容|', 'ul'), '> 引用内容|');
+  assert.equal(run('> - [ ] 引用内容|', 'task'), '> 引用内容|');
+  // Switch between list types inside a blockquote
+  assert.equal(run('> - 引用内容|', 'ol'), '> 1. 引用内容|');
+  assert.equal(run('> 1. 引用内容|', 'ul'), '> - 引用内容|');
+  assert.equal(run('> 1. 引用内容|', 'task'), '> - [ ] 引用内容|');
+  assert.equal(run('> - [ ] 引用内容|', 'ul'), '> - 引用内容|');
+  // Contiguous lines inside a blockquote convert together
+  assert.equal(run('> 第一行\n> 第二|行\n> 第三行', 'ol'), '> 1. 第一行\n> 2. 第二行|\n> 3. 第三行');
+  assert.equal(run('> 第一行\n> 第二|行\n> 第三行', 'ul'), '> - 第一行\n> - 第二行|\n> - 第三行');
+  assert.equal(run('> 1. 第一行\n> 2. 第二|行\n> 3. 第三行', 'ul'), '> - 第一行\n> - 第二行|\n> - 第三行');
+  // Multi-line selection inside a blockquote
+  assert.equal(run('> |第一行\n> 第二行|', 'task'), '|> - [ ] 第一行\n> - [ ] 第二行|');
+  // Empty blockquote line `> `
+  assert.equal(run('> |', 'ol'), '> 1. |');
+  assert.equal(run('> |', 'ul'), '> - |');
+  assert.equal(run('> |', 'task'), '> - [ ] |');
+});
+
+test('#110 / #159: Tab on an empty line below a list item indents to the parent content column', async () => {
+  // Under ordered list `1. `: 3 spaces so typing `- sub` or `1. sub` nests properly
+  assert.equal(await tab('1. 一级列表\n|'), '1. 一级列表\n   |');
+  // Under unordered list `- `: 2 spaces
+  assert.equal(await tab('- 一级列表\n|'), '- 一级列表\n  |');
+  // Under 2-digit ordered list `10. `: 4 spaces
+  assert.equal(await tab('10. 十级列表\n|'), '10. 十级列表\n    |');
+  // Shift+Tab outdents the whitespace line back to column 0
+  assert.equal(await tab('1. 一级列表\n   |', true), '1. 一级列表\n|');
+  assert.equal(await tab('- 一级列表\n  |', true), '- 一级列表\n|');
+});
+
+test('switching ordered/unordered list skips indented fenced code blocks inside list items', () => {
+  const ulWithCode = '- 第一项|\n  ```js\n  const x = 1;\n  ```\n- 第二项';
+  const olWithCode = '1. 第一项|\n  ```js\n  const x = 1;\n  ```\n2. 第二项';
+  assert.equal(run(ulWithCode, 'ol'), olWithCode);
+  assert.equal(run(olWithCode, 'ul'), ulWithCode);
+});
+
+
 

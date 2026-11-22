@@ -115,6 +115,28 @@ export interface LiveInlineHtmlSpan {
   contentTo: number;
   closeFrom: number;
   closeTo: number;
+  bgColor?: string;
+  textColor?: string;
+}
+
+const SAFE_CSS_COLOR_RE = /^(?:#[0-9a-fA-F]{3,8}|rgba?\([^;{}<>]+\)|hsla?\([^;{}<>]+\)|var\(--[a-zA-Z0-9_-]+\)|[a-zA-Z]{3,20})$/;
+
+function extractInlineMarkColors(openTag: string): { bgColor?: string; textColor?: string } {
+  const styleMatch = /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(openTag);
+  const styleVal = (styleMatch?.[1] ?? styleMatch?.[2] ?? '').trim();
+  if (!styleVal) return {};
+  let bgColor: string | undefined;
+  let textColor: string | undefined;
+  for (const decl of styleVal.split(';')) {
+    const colon = decl.indexOf(':');
+    if (colon < 0) continue;
+    const prop = decl.slice(0, colon).trim().toLowerCase();
+    const val = decl.slice(colon + 1).trim();
+    if (!SAFE_CSS_COLOR_RE.test(val)) continue;
+    if (prop === 'background-color' || prop === 'background') bgColor = val;
+    else if (prop === 'color') textColor = val;
+  }
+  return { ...(bgColor ? { bgColor } : {}), ...(textColor ? { textColor } : {}) };
 }
 
 const INLINE_TAG_KIND: Record<string, LiveInlineHtmlKind> = {
@@ -147,15 +169,114 @@ export function findInlineHtmlSpans(line: string): LiveInlineHtmlSpan[] {
     const openFrom = match.index;
     const openTo = openFrom + openToInMatch;
     const closeFrom = openFrom + closeFromInMatch;
+    const kind = INLINE_TAG_KIND[match[1].toLowerCase()];
+    const colors = kind === 'mark' ? extractInlineMarkColors(whole.slice(0, openToInMatch)) : {};
     spans.push({
-      kind: INLINE_TAG_KIND[match[1].toLowerCase()],
+      kind,
       openFrom,
       openTo,
       contentFrom: openTo,
       contentTo: closeFrom,
       closeFrom,
       closeTo: openFrom + whole.length,
+      ...colors,
     });
   }
   return spans;
 }
+
+const SUP_SPAN_RE = /(?<![\\[\]^])\^([^\s^~\\](?:[^^\s\n]*?[^\s^~\\])?)\^(?!\^)/g;
+const SUB_SPAN_RE = /(?<![\\~])~([^\s~\\](?:[^~\s\n]*?[^\s~\\])?)~(?!~)/g;
+
+/**
+ * Find Markdown superscript `^sup^` and subscript `~sub~` spans (#284) on a
+ * single line (already masked for inline code), ignoring LaTeX math `$...$`,
+ * footnote refs `[^1]`, and link URLs.
+ */
+export function findSupSubSpans(line: string): LiveInlineHtmlSpan[] {
+  const masked = line
+    .replace(/\$\$[^$\n]+\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$/g, (m) => ' '.repeat(m.length))
+    .replace(/\[\^[^\]\n]+\]/g, (m) => ' '.repeat(m.length))
+    .replace(/\]\([^)\n]*\)/g, (m) => ' '.repeat(m.length))
+    .replace(/https?:\/\/\S+/g, (m) => ' '.repeat(m.length));
+
+  const spans: LiveInlineHtmlSpan[] = [];
+  SUP_SPAN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = SUP_SPAN_RE.exec(masked)) !== null) {
+    const start = m.index;
+    const end = start + m[0].length;
+    spans.push({
+      kind: 'sup',
+      openFrom: start,
+      openTo: start + 1,
+      contentFrom: start + 1,
+      contentTo: end - 1,
+      closeFrom: end - 1,
+      closeTo: end,
+    });
+  }
+  SUB_SPAN_RE.lastIndex = 0;
+  while ((m = SUB_SPAN_RE.exec(masked)) !== null) {
+    const start = m.index;
+    const end = start + m[0].length;
+    spans.push({
+      kind: 'sub',
+      openFrom: start,
+      openTo: start + 1,
+      contentFrom: start + 1,
+      contentTo: end - 1,
+      closeFrom: end - 1,
+      closeTo: end,
+    });
+  }
+  return spans.sort((a, b) => a.openFrom - b.openFrom);
+}
+
+export interface OutlineSegment {
+  text: string;
+  mark: boolean;
+}
+
+/**
+ * Split an outline heading into plain and highlighted (`==...==` or
+ * `<mark>...</mark>`) segments while keeping inline-code spans untouched.
+ */
+export function parseOutlineSegments(text: string): OutlineSegment[] {
+  if (!text) return [];
+  const masked = maskInlineCode(text);
+  const spans: Array<{ openFrom: number; contentFrom: number; contentTo: number; closeTo: number }> = [
+    ...findMarkSpans(masked),
+    ...findInlineHtmlSpans(masked).filter((s) => s.kind === 'mark'),
+  ].sort((a, b) => a.openFrom - b.openFrom);
+
+  if (spans.length === 0) {
+    return [{ text, mark: false }];
+  }
+
+  const out: OutlineSegment[] = [];
+  let cursor = 0;
+  for (const span of spans) {
+    if (span.openFrom < cursor) continue;
+    if (span.openFrom > cursor) {
+      out.push({ text: text.slice(cursor, span.openFrom), mark: false });
+    }
+    const inner = text.slice(span.contentFrom, span.contentTo);
+    if (inner) {
+      out.push({ text: inner, mark: true });
+    }
+    cursor = span.closeTo;
+  }
+  if (cursor < text.length) {
+    out.push({ text: text.slice(cursor), mark: false });
+  }
+  return out;
+}
+
+/** Plain-text label for outline tooltips (`==高亮==` / `<mark>高亮</mark>` → `高亮`). */
+export function stripOutlineFormatting(text: string): string {
+  return parseOutlineSegments(text)
+    .map((s) => s.text)
+    .join('');
+}
+

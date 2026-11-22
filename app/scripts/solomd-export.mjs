@@ -61,7 +61,7 @@ import {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const args = { input: null, format: 'html', output: null };
+  const args = { input: null, format: 'html', output: null, toc: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--format' || a === '-f') {
@@ -70,6 +70,10 @@ function parseArgs(argv) {
       args.output = argv[++i];
     } else if (a === '--number-headings') {
       args.numberHeadings = true;
+    } else if (a === '--toc') {
+      args.toc = true;
+    } else if (a === '--no-toc') {
+      args.toc = false;
     } else if (a === '--help' || a === '-h') {
       args.help = true;
     } else if (!args.input && !a.startsWith('-')) {
@@ -80,16 +84,17 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.error(`solomd-export — convert .md to html / md / txt / docx
+  console.error(`solomd-export — convert .md to html / md / txt / docx / epub / odt / latex / rtf
 
 Usage:
-  solomd-export <input.md> [--format html|md|txt|docx] [--output <path>]
+  solomd-export <input.md> [--format html|md|txt|docx|epub|odt|latex|rtf] [--output <path>] [--toc]
 
 Options:
-  -f, --format <fmt>   Output format (default: html)
-  -o, --output <path>  Output file (default: <input>.<fmt> next to input)
+  -f, --format <fmt>     Output format (default: html)
+  -o, --output <path>    Output file (default: <input>.<fmt> next to input)
+      --toc              Include Table of Contents at the start of the document
       --number-headings  Promote numbered sections (6.2, 6.2.1) to headings
-  -h, --help           Show this help
+  -h, --help             Show this help
 
 Notes:
   - Reads the same markdown-it config as the SoloMD app
@@ -889,17 +894,35 @@ async function main() {
   const baseName = path.basename(inputPath).replace(/\.[^.]+$/, '');
   const dir = path.dirname(inputPath);
   const fmt = args.format.toLowerCase();
-  const validFormats = ['html', 'md', 'txt', 'docx'];
+  const validFormats = ['html', 'md', 'txt', 'docx', 'epub', 'odt', 'latex', 'tex', 'rtf'];
   if (!validFormats.includes(fmt)) {
     console.error(`solomd-export: unknown format: ${fmt} (try ${validFormats.join('|')})`);
     process.exit(2);
   }
 
-  const outPath = args.output ?? path.join(dir, `${baseName}.${fmt}`);
+  const ext = fmt === 'latex' ? 'tex' : fmt;
+  const outPath = args.output ?? path.join(dir, `${baseName}.${ext}`);
 
   switch (fmt) {
     case 'html': {
-      const body = renderHtml(stripFrontMatter(source));
+      let body = renderHtml(stripFrontMatter(source));
+      if (args.toc) {
+        const headings = [];
+        body = body.replace(/<h([1-6])([^>]*)>([\s\S]*?)<\/h\1>/gi, (full, lvl, attrs, inner) => {
+          const text = inner.replace(/<[^>]+>/g, '').trim();
+          const idMatch = /\bid="([^"]+)"/i.exec(attrs);
+          const id = idMatch ? idMatch[1] : `h-${headings.length + 1}`;
+          headings.push({ level: Number(lvl), id, text });
+          if (idMatch) return full;
+          return `<h${lvl}${attrs} id="${id}">${inner}</h${lvl}>`;
+        });
+        if (headings.length > 0) {
+          const items = headings
+            .map((h) => `<li style="margin-left:${(h.level - 1) * 16}px"><a href="#${h.id}">${h.text}</a></li>`)
+            .join('\n');
+          body = `<nav class="md-toc"><h2>Table of Contents</h2><ul>\n${items}\n</ul></nav>\n${body}`;
+        }
+      }
       const headCss = hasKatex(body) ? standaloneKatexCss() : '';
       fs.writeFileSync(outPath, htmlDoc(baseName, body, headCss), 'utf8');
       break;
@@ -918,6 +941,50 @@ async function main() {
       // a text placeholder.
       const buf = await markdownToDocxBuffer(source, baseName, inputPath);
       fs.writeFileSync(outPath, buf);
+      break;
+    }
+    case 'epub':
+    case 'odt':
+    case 'latex':
+    case 'tex':
+    case 'rtf': {
+      const { execFileSync } = await import('node:child_process');
+      const os = await import('node:os');
+      const pandocFmt = fmt === 'tex' ? 'latex' : fmt;
+      const pandocArgs = [
+        inputPath,
+        '--from=markdown+tex_math_dollars+pipe_tables+task_lists+strikeout+footnotes',
+        `--to=${pandocFmt}`,
+        '--standalone',
+        `--resource-path=${dir}`,
+        '-o',
+        outPath,
+      ];
+      if (args.toc) pandocArgs.push('--toc');
+      let tmpCssPath = '';
+      if (pandocFmt === 'epub') {
+        const epubCss = `
+code { font-family: Menlo, Consolas, monospace; font-size: 0.88em; background-color: #f1f5f9; color: #0f172a; padding: 0.14em 0.38em; border-radius: 4px; border: 1px solid #e2e8f0; }
+pre, div.sourceCode { background-color: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 0.85em 1em; margin: 1em 0; overflow-x: auto; line-height: 1.55; white-space: pre-wrap; word-wrap: break-word; }
+div.sourceCode > pre { background-color: transparent !important; border: none !important; padding: 0 !important; margin: 0 !important; }
+pre code, div.sourceCode code { background-color: transparent !important; border: none !important; padding: 0 !important; }
+table { width: 100%; border-collapse: collapse; margin: 1.2em 0; font-size: 0.94em; border: 1px solid #cbd5e1; }
+th, td { border: 1px solid #cbd5e1; padding: 0.52em 0.78em; text-align: left; vertical-align: top; }
+thead th, tr.header th, th { background-color: #f1f5f9; color: #0f172a; font-weight: 700; border-bottom: 2px solid #94a3b8; }
+tbody tr:nth-child(even) td, tr.even td { background-color: #f8fafc; }
+img, svg { max-width: 100%; height: auto; }
+`;
+        tmpCssPath = path.join(os.tmpdir(), `solomd-cli-epub-${process.pid}-${Date.now()}.css`);
+        fs.writeFileSync(tmpCssPath, epubCss, 'utf8');
+        pandocArgs.push(`--css=${tmpCssPath}`);
+      }
+      try {
+        execFileSync('pandoc', pandocArgs, { stdio: 'inherit' });
+      } finally {
+        if (tmpCssPath) {
+          try { fs.unlinkSync(tmpCssPath); } catch {}
+        }
+      }
       break;
     }
   }

@@ -17,6 +17,7 @@ import {
   ViewPlugin,
   ViewUpdate,
 } from '@codemirror/view';
+import { isDragging } from './cm-drag-aware';
 
 const dimmedLine = Decoration.line({ class: 'cm-line-dimmed' });
 
@@ -45,23 +46,31 @@ const focusPlugin = ViewPlugin.fromClass(
     build(view: EditorView): DecorationSet {
       const builder = new RangeSetBuilder<Decoration>();
       const doc = view.state.doc;
+      if (view.visibleRanges.length === 0) return builder.finish();
+      let minVisLine = doc.lines;
+      let maxVisLine = 1;
+      for (const { from, to } of view.visibleRanges) {
+        minVisLine = Math.min(minVisLine, doc.lineAt(from).number);
+        maxVisLine = Math.max(maxVisLine, doc.lineAt(Math.min(to, doc.length)).number);
+      }
       // Expand active line set to the full paragraph (block of contiguous
-      // non-empty lines) the cursor is in. Empty lines act as separators.
+      // non-empty lines) the cursor is in, clamped to `visibleRanges` so huge
+      // blocks without blank lines never scan the whole document.
       const activeLines = new Set<number>();
       const isBlank = (n: number) => doc.line(n).text.trim().length === 0;
       for (const range of view.state.selection.ranges) {
         const from = doc.lineAt(range.from).number;
         const to = doc.lineAt(range.to).number;
-        for (let n = from; n <= to; n++) activeLines.add(n);
-        // Walk up until a blank line (paragraph start).
+        for (let n = Math.max(minVisLine, from); n <= Math.min(maxVisLine, to); n++) {
+          activeLines.add(n);
+        }
         let up = from - 1;
-        while (up >= 1 && !isBlank(up)) {
+        while (up >= minVisLine && !activeLines.has(up) && !isBlank(up)) {
           activeLines.add(up);
           up--;
         }
-        // Walk down until a blank line (paragraph end).
         let down = to + 1;
-        while (down <= doc.lines && !isBlank(down)) {
+        while (down <= maxVisLine && !activeLines.has(down) && !isBlank(down)) {
           activeLines.add(down);
           down++;
         }
@@ -108,6 +117,15 @@ const typewriterPlugin = ViewPlugin.fromClass(
       // character/punctuation being committed. Selection settles after
       // compositionend, which fires its own update — we recenter then.
       if (update.view.composing) return;
+      // Never recenter the viewport while the user is drag-selecting with the
+      // pointer: centering `head` mid-drag fights edge auto-scroll and shifts
+      // the document under the pointer.
+      if (
+        isDragging(update.state) ||
+        update.transactions.some((tr) => tr.isUserEvent('select.pointer'))
+      ) {
+        return;
+      }
       const view = update.view;
       const head = update.state.selection.main.head;
       // Defer to avoid re-entrant dispatch inside an update pass.

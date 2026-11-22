@@ -19,11 +19,14 @@
  */
 
 import { RangeSetBuilder, StateField, StateEffect, Prec, EditorSelection, Transaction, EditorState } from '@codemirror/state';
+import yaml from 'js-yaml';
 import { keymap } from '@codemirror/view';
-import type { DecorationSet } from '@codemirror/view';
+import type { DecorationSet, ViewUpdate } from '@codemirror/view';
+import { SearchQuery, getSearchQuery, searchPanelOpen, setSearchQuery } from '@codemirror/search';
 import { syntaxTree } from '@codemirror/language';
 import { isDragging, isDragEndTransaction } from './cm-drag-aware';
 import { frozenFieldDuringComposition, isImeSafeFlushTransaction } from './cm-ime-guard';
+import { applySearchMarksIn, clearSearchMarksIn, findPreviewHitsInText } from './preview-search-hits';
 import {
   Decoration,
   EditorView,
@@ -31,12 +34,386 @@ import {
   WidgetType,
 } from '@codemirror/view';
 
+export const setExternalSearchQueryEffect = StateEffect.define<string>();
+
+// ---------------------------------------------------------------------------
+// #626 — Collapsible YAML Frontmatter Properties Widget for Live Edit.
+// ---------------------------------------------------------------------------
+let frontmatterCollapsedSession = false;
+
+function formatFmDate(d: Date): string {
+  if (Number.isNaN(d.getTime())) return String(d);
+  const iso = d.toISOString();
+  return iso.endsWith('T00:00:00.000Z') ? iso.slice(0, 10) : iso.replace('T', ' ').slice(0, 19);
+}
+
+function renderFmValueDom(val: unknown): HTMLElement {
+  const wrap = document.createElement('span');
+  wrap.className = 'cm-frontmatter-card__val';
+  if (val === null || val === undefined) {
+    wrap.classList.add('md-frontmatter-empty');
+    wrap.textContent = '—';
+    return wrap;
+  }
+  if (val instanceof Date) {
+    wrap.classList.add('md-frontmatter-date');
+    wrap.textContent = formatFmDate(val);
+    return wrap;
+  }
+  if (typeof val === 'boolean') {
+    const badge = document.createElement('span');
+    badge.className = `md-frontmatter-bool md-frontmatter-bool--${val ? 'true' : 'false'}`;
+    badge.textContent = val ? '✓ true' : '✕ false';
+    wrap.appendChild(badge);
+    return wrap;
+  }
+  if (Array.isArray(val)) {
+    if (val.length === 0) {
+      wrap.classList.add('md-frontmatter-empty');
+      wrap.textContent = '[]';
+      return wrap;
+    }
+    const chips = document.createElement('span');
+    chips.className = 'md-frontmatter-chips';
+    for (const item of val) {
+      const chip = document.createElement('span');
+      chip.className = 'md-frontmatter-chip';
+      chip.textContent =
+        item instanceof Date
+          ? formatFmDate(item)
+          : typeof item === 'object' && item !== null
+            ? JSON.stringify(item)
+            : String(item ?? '');
+      chips.appendChild(chip);
+    }
+    wrap.appendChild(chips);
+    return wrap;
+  }
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (/^https?:\/\/\S+$/i.test(trimmed)) {
+      const a = document.createElement('a');
+      a.className = 'md-frontmatter-link';
+      a.href = trimmed;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = trimmed;
+      a.addEventListener('mousedown', (e) => e.stopPropagation());
+      wrap.appendChild(a);
+      return wrap;
+    }
+    wrap.textContent = val;
+    return wrap;
+  }
+  if (typeof val === 'object') {
+    const code = document.createElement('code');
+    code.textContent = JSON.stringify(val);
+    wrap.appendChild(code);
+    return wrap;
+  }
+  wrap.textContent = String(val);
+  return wrap;
+}
+
+class FrontmatterWidget extends WidgetType {
+  readonly yamlBody: string;
+  readonly editPos: number;
+
+  constructor(yamlBody: string, editPos: number) {
+    super();
+    this.yamlBody = yamlBody;
+    this.editPos = editPos;
+  }
+
+  eq(other: FrontmatterWidget): boolean {
+    return this.yamlBody === other.yamlBody && this.editPos === other.editPos;
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const card = document.createElement('div');
+    card.className = 'cm-frontmatter-card';
+
+    let entries: [string, unknown][] | null = null;
+    let parseErr: string | null = null;
+    try {
+      const parsed = yaml.load(this.yamlBody);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        entries = Object.entries(parsed as Record<string, unknown>);
+      } else if (this.yamlBody.trim() === '') {
+        entries = [];
+      } else {
+        parseErr = 'Frontmatter must be a YAML mapping (key: value).';
+      }
+    } catch (e) {
+      parseErr = e instanceof Error ? e.message : String(e);
+    }
+
+    const head = document.createElement('div');
+    head.className = 'cm-frontmatter-card__head';
+
+    const titleWrap = document.createElement('span');
+    titleWrap.className = 'cm-frontmatter-card__title';
+    const chevron = document.createElement('span');
+    chevron.textContent = frontmatterCollapsedSession ? '▸' : '▾';
+    const label = document.createElement('span');
+    label.textContent = 'YAML Frontmatter';
+    titleWrap.appendChild(chevron);
+    titleWrap.appendChild(label);
+    if (entries) {
+      const badge = document.createElement('span');
+      badge.className = 'cm-frontmatter-card__badge';
+      badge.textContent = String(entries.length);
+      titleWrap.appendChild(badge);
+    }
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'cm-frontmatter-card__edit';
+    editBtn.textContent = 'YAML';
+    editBtn.title = 'Edit YAML frontmatter';
+    editBtn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const targetPos = Math.min(this.editPos, view.state.doc.length);
+      view.dispatch({
+        selection: { anchor: targetPos },
+        scrollIntoView: true,
+      });
+      view.focus();
+    });
+
+    head.appendChild(titleWrap);
+    head.appendChild(editBtn);
+    card.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'cm-frontmatter-card__body';
+    if (frontmatterCollapsedSession && !parseErr) {
+      body.style.display = 'none';
+    }
+
+    if (parseErr) {
+      const errEl = document.createElement('div');
+      errEl.className = 'cm-frontmatter-card__err';
+      errEl.textContent = parseErr;
+      body.appendChild(errEl);
+    } else if (entries && entries.length > 0) {
+      const grid = document.createElement('div');
+      grid.className = 'cm-frontmatter-card__grid';
+      for (const [k, v] of entries) {
+        const keyEl = document.createElement('span');
+        keyEl.className = 'cm-frontmatter-card__key';
+        keyEl.textContent = k;
+        grid.appendChild(keyEl);
+        grid.appendChild(renderFmValueDom(v));
+      }
+      body.appendChild(grid);
+    } else {
+      const emptyEl = document.createElement('span');
+      emptyEl.className = 'md-frontmatter-empty';
+      emptyEl.textContent = 'Empty frontmatter';
+      body.appendChild(emptyEl);
+    }
+
+    head.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      frontmatterCollapsedSession = !frontmatterCollapsedSession;
+      chevron.textContent = frontmatterCollapsedSession ? '▸' : '▾';
+      body.style.display = frontmatterCollapsedSession ? 'none' : '';
+    });
+
+    card.appendChild(body);
+    return card;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+export const externalSearchQueryField = StateField.define<string>({
+  create: () => '',
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setExternalSearchQueryEffect)) return e.value.trim();
+    }
+    if (tr.docChanged || searchPanelOpen(tr.state)) return '';
+    return value;
+  },
+});
+
+const externalMatchMark = Decoration.mark({ class: 'cm-searchMatch' });
+const externalSelectedMatchMark = Decoration.mark({ class: 'cm-searchMatch cm-searchMatch-selected' });
+
+export function externalSearchHighlightExtension() {
+  const highlighter = ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = this.build(view);
+      }
+      update(update: ViewUpdate) {
+        const prev = update.startState.field(externalSearchQueryField, false) ?? '';
+        const next = update.state.field(externalSearchQueryField, false) ?? '';
+        const prevPanel = searchPanelOpen(update.startState);
+        const nextPanel = searchPanelOpen(update.state);
+        if (
+          prev !== next ||
+          prevPanel !== nextPanel ||
+          (next && (update.docChanged || update.selectionSet || update.viewportChanged))
+        ) {
+          this.decorations = this.build(update.view);
+        }
+      }
+      build(view: EditorView): DecorationSet {
+        if (searchPanelOpen(view.state)) return Decoration.none;
+        const ext = view.state.field(externalSearchQueryField, false) ?? '';
+        if (!ext) return Decoration.none;
+        const sq = new SearchQuery({ search: ext });
+        if (!sq.valid) return Decoration.none;
+        const builder = new RangeSetBuilder<Decoration>();
+        const ranges = view.visibleRanges;
+        for (let i = 0; i < ranges.length; i++) {
+          let { from, to } = ranges[i];
+          while (i < ranges.length - 1 && to > ranges[i + 1].from - 500) {
+            to = ranges[++i].to;
+          }
+          const cur = sq.getCursor(view.state, from, to);
+          for (let step = cur.next(); !step.done; step = cur.next()) {
+            const m = step.value;
+            if (m.from >= m.to) continue;
+            const selected = view.state.selection.ranges.some(
+              (r) => r.from === m.from && r.to === m.to,
+            );
+            builder.add(m.from, m.to, selected ? externalSelectedMatchMark : externalMatchMark);
+          }
+        }
+        return builder.finish();
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
+
+  const clearOnEscape = keymap.of([
+    {
+      key: 'Escape',
+      run(view) {
+        const ext = view.state.field(externalSearchQueryField, false) ?? '';
+        if (!ext || searchPanelOpen(view.state)) return false;
+        view.dispatch({ effects: setExternalSearchQueryEffect.of('') });
+        return true;
+      },
+    },
+  ]);
+
+  return [externalSearchQueryField, Prec.low(highlighter), clearOnEscape];
+}
+
+function activeEditorSearchSpec(
+  state: EditorState,
+): { search: string; caseSensitive: boolean } | null {
+  if (searchPanelOpen(state)) {
+    const q = getSearchQuery(state);
+    if (q.valid && q.search.trim()) {
+      return { search: q.search, caseSensitive: q.caseSensitive };
+    }
+    return null;
+  }
+  const ext = state.field(externalSearchQueryField, false);
+  if (ext && ext.trim()) {
+    return { search: ext.trim(), caseSensitive: false };
+  }
+  return null;
+}
+
 // Block decorations (Decoration.replace with `block: true`) MUST come from a
 // StateField — CM6 throws "Block decorations may not be specified via plugins"
 // if a ViewPlugin emits them. So this whole module is a state field, not a
 // view plugin. `relayoutEffect` lets the async Mermaid render (and any other
 // out-of-band trigger) ask the field to recompute.
 const relayoutEffect = StateEffect.define<null>();
+
+/**
+ * #530 — Explicit user fold/unfold toggle for ` ```mermaid ` code blocks in
+ * Live Edit mode (`true` = fold code body and show `[+] ```mermaid` + diagram;
+ * `false` = expand code body and show `[-] ```mermaid` + code + diagram).
+ */
+export const toggleMermaidFoldEffect = StateEffect.define<{
+  line: number;
+  collapsed: boolean;
+}>();
+
+const mermaidFoldState = StateField.define<ReadonlyMap<number, boolean>>({
+  create: () => new Map(),
+  update(map, tr) {
+    for (const e of tr.effects) {
+      if (e.is(resetBlockFoldOverridesEffect)) {
+        return new Map();
+      }
+    }
+    let next: Map<number, boolean> | null = null;
+    if (tr.docChanged && map.size > 0) {
+      next = new Map();
+      for (const [oldLine, val] of map.entries()) {
+        if (oldLine >= 1 && oldLine <= tr.startState.doc.lines) {
+          const oldPos = tr.startState.doc.line(oldLine).from;
+          const newPos = tr.changes.mapPos(oldPos, 1);
+          const newLine = tr.state.doc.lineAt(Math.min(newPos, tr.state.doc.length));
+          if (/^\s*(`{3,}|~{3,})\s*(mermaid|markmap|mm|excalidraw|plantuml|puml)\s*$/i.test(newLine.text)) {
+            next.set(newLine.number, val);
+          }
+        }
+      }
+    }
+    for (const e of tr.effects) {
+      if (e.is(toggleMermaidFoldEffect)) {
+        if (!next) next = new Map(map);
+        next.set(e.value.line, e.value.collapsed);
+      }
+    }
+    return next ?? map;
+  },
+});
+
+export const toggleTableFoldEffect = StateEffect.define<{
+  line: number;
+  collapsed: boolean;
+}>();
+
+export const resetBlockFoldOverridesEffect = StateEffect.define<null>();
+
+const tableFoldState = StateField.define<ReadonlyMap<number, boolean>>({
+  create: () => new Map(),
+  update(map, tr) {
+    for (const e of tr.effects) {
+      if (e.is(resetBlockFoldOverridesEffect)) {
+        return new Map();
+      }
+    }
+    let next: Map<number, boolean> | null = null;
+    if (tr.docChanged && map.size > 0) {
+      next = new Map();
+      for (const [oldLine, val] of map.entries()) {
+        if (oldLine >= 1 && oldLine <= tr.startState.doc.lines) {
+          const oldPos = tr.startState.doc.line(oldLine).from;
+          const newPos = tr.changes.mapPos(oldPos, 1);
+          const newLine = tr.state.doc.lineAt(Math.min(newPos, tr.state.doc.length));
+          if (newLine.text.includes('|')) {
+            next.set(newLine.number, val);
+          }
+        }
+      }
+    }
+    for (const e of tr.effects) {
+      if (e.is(toggleTableFoldEffect)) {
+        if (!next) next = new Map(map);
+        next.set(e.value.line, e.value.collapsed);
+      }
+    }
+    return next ?? map;
+  },
+});
 import {
   installSvgImageFallbacks,
   isLocalSvgPath,
@@ -45,11 +422,28 @@ import {
   rewriteImageUrls,
 } from './image-resolve';
 import { renderMarkdown, extractImageRoot } from './markdown';
+import { parseTable, type TableModel } from './markdown-table';
+import {
+  HEADER_ROW,
+  applyCellEdit,
+  applyCellEditAndAppendRow,
+  cellText,
+  normalizeCellInput,
+  stepCell,
+  stepCellVertical,
+} from './table-cell-edit';
+import { undo as cmUndo, redo as cmRedo } from '@codemirror/commands';
 import { findHtmlBlockEnd } from './html-live-render';
 import { openRenderedLink } from './link-open';
-import { parseImageAltSize } from './md-image-url';
+import {
+  extractImageReferenceDefinitions,
+  findMarkdownImagesInLine,
+  parseImageAltSize,
+} from './md-image-url';
 import { plantumlSvgUrl } from './plantuml';
-import { bindMermaidInteractions, initMermaid } from './mermaid-lazy';
+import { renderMarkmapSvg } from './markmap-render';
+import { renderExcalidrawSvg } from './excalidraw';
+import { bindMermaidInteractions, peekMermaidSvg, renderMermaidCached } from './mermaid-lazy';
 import { getKatex, onRenderDepsChange, renderDepsVersion } from './render-deps';
 import {
   parseTldrawFence,
@@ -69,50 +463,14 @@ import {
 // preview), and it's part of the key, so switching theme renders fresh SVG
 // instead of reusing the light one.
 type MermaidTheme = 'dark' | 'default';
-const mermaidSvgCache = new Map<
-  string,
-  { svg: string | null; bindFunctions?: ((el: Element) => void) | null; error: string | null }
->();
-let mermaidIdSeq = 0;
-const mermaidKey = (source: string, theme: MermaidTheme) => `${theme}\u0000${source}`;
-// In-flight renders. A second caller has to wait for the same render, not
-// return straight away: the widget's toDOM relies on the promise resolving
-// only once the SVG is in the cache, to trigger the rebuild that swaps the
-// "Rendering…" placeholder for the diagram. Returning early made that rebuild
-// run before the render finished, and the placeholder stayed for good.
-const mermaidInflight = new Map<string, Promise<void>>();
-function ensureMermaidRendered(source: string, theme: MermaidTheme): Promise<void> {
-  const key = mermaidKey(source, theme);
-  const pending = mermaidInflight.get(key);
-  if (pending) return pending;
-  if (mermaidSvgCache.has(key)) return Promise.resolve();
-  // Reserve the slot first so concurrent calls don't double-render.
-  mermaidSvgCache.set(key, { svg: null, error: null });
-  const job = (async () => {
-    try {
-      const id = `cm-mmd-${++mermaidIdSeq}`;
-      const mermaid = await initMermaid({
-        startOnLoad: false,
-        securityLevel: 'strict',
-        theme,
-      });
-      const { svg, bindFunctions } = await mermaid.render(id, source);
-      mermaidSvgCache.set(key, { svg, bindFunctions, error: null });
-    } catch (e) {
-      mermaidSvgCache.set(key, { svg: null, error: (e as Error).message });
-    } finally {
-      mermaidInflight.delete(key);
-    }
-  })();
-  mermaidInflight.set(key, job);
-  return job;
-}
-
-// `^\s*!\[<alt>\](<url>)\s*$` — whole-line image with no surrounding prose.
-// Why whole-line: replacing inline images would split text in the middle and
-// break the natural reading flow of the source. We only collapse images that
-// are visually their own paragraph.
-const IMAGE_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)\s*$/;
+// #522 — the SVG cache and the serial render queue now live in mermaid-lazy,
+// shared with the preview pane. This module used to own a private cache AND
+// kick off a render for every mermaid fence while building decorations over
+// the whole document: opening a note with 50 diagrams started 50 concurrent
+// CPU-bound renders and, worse, each completion dispatched a full relayout
+// (i.e. 50 more full-document decoration builds). Renders now start only
+// from `MermaidWidget.toDOM()`, which CodeMirror calls for visible blocks,
+// so off-screen diagrams cost nothing until they scroll into view.
 
 // Pipe table heuristic: a header line, a separator (`---` / `:---:`), then
 // at least one body row. We don't try to parse the GFM grammar ourselves —
@@ -129,23 +487,61 @@ function quoteDepth(line: string): number {
 function stripQuotePrefix(line: string): string {
   return line.replace(/^\s*(?:>\s*)+/, '');
 }
+function hasUnescapedPipe(text: string): boolean {
+  const n = text.length;
+  let p = 0;
+  while (p < n) {
+    if (text[p] === '`') {
+      let ticks = 1;
+      while (p + ticks < n && text[p + ticks] === '`') ticks++;
+      let q = p + ticks;
+      let closed = -1;
+      while (q < n) {
+        if (text[q] === '`') {
+          let ticks2 = 1;
+          while (q + ticks2 < n && text[q + ticks2] === '`') ticks2++;
+          if (ticks2 === ticks) {
+            closed = q + ticks2;
+            break;
+          }
+          q += ticks2;
+        } else {
+          q++;
+        }
+      }
+      p = closed >= 0 ? closed : p + ticks;
+      continue;
+    }
+    if (text[p] === '\\' && p + 1 < n) {
+      p += 2;
+      continue;
+    }
+    if (text[p] === '|') return true;
+    p++;
+  }
+  return false;
+}
 function isPipeRow(line: string, expectedQuoteDepth?: number): boolean {
   if (expectedQuoteDepth !== undefined && quoteDepth(line) !== expectedQuoteDepth) return false;
   const trimmed = stripQuotePrefix(line).trim();
-  return trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2;
+  if (!trimmed || trimmed === '|') return false;
+  if (/^(?:[-+*]\s|\d+[.)]\s|#{1,6}\s|```|~~~)/.test(trimmed)) return false;
+  return hasUnescapedPipe(trimmed);
 }
 function isSeparatorRow(line: string, expectedQuoteDepth?: number): boolean {
+  if (expectedQuoteDepth !== undefined && quoteDepth(line) !== expectedQuoteDepth) return false;
   const trimmed = stripQuotePrefix(line).trim();
-  // `| --- | :---: |` etc. Only `:`, `-`, ` `, `|` characters allowed,
-  // and at least one `-` per cell.
-  return (
-    isPipeRow(line, expectedQuoteDepth) &&
-    // `-` must be last in the class so it's a literal, not the range `:`..`|`
-    // (which excludes `-` at 0x2D and made every real separator row fail —
-    // tables never collapsed to a widget in live-edit).
-    /^\|[\s:|-]+\|$/.test(trimmed) &&
-    /-{3,}/.test(trimmed)
-  );
+  if (!trimmed.includes('|')) return false;
+  const inner = trimmed.replace(/^\|/, '').replace(/\|$/, '');
+  const cells = inner.split('|');
+  if (cells.length === 0) return false;
+  let hasRealCell = false;
+  for (const c of cells) {
+    if (c.trim() === '') continue;
+    if (!/^\s*:?-+:?\s*$/.test(c)) return false;
+    hasRealCell = true;
+  }
+  return hasRealCell;
 }
 
 // Images report their real height only after they load, and CM6 does not
@@ -167,7 +563,10 @@ onRenderDepsChange(() => {
   } catch {}
 });
 
-function scheduleImageRelayout(): void {
+// #522 — coalesce relayout requests. Every finished mermaid render used to
+// dispatch its own event, so N diagrams triggered N full-document decoration
+// rebuilds; one timer collapses a burst into a single rebuild.
+function scheduleRelayout(): void {
   if (relayoutTimer) return;
   relayoutTimer = setTimeout(() => {
     relayoutTimer = null;
@@ -194,7 +593,7 @@ function trackImageHeights(root: HTMLElement): void {
       if (img.naturalWidth && img.naturalHeight) {
         imageNaturalSizes.set(img.src, { w: img.naturalWidth, h: img.naturalHeight });
       }
-      scheduleImageRelayout();
+      scheduleRelayout();
     };
     if (img.complete) {
       // Cache hit: `complete` is already true here, but the box gets its real
@@ -213,6 +612,7 @@ class ImageWidget extends WidgetType {
   private readonly alt: string;
   private readonly localPath: string | null;
   private readonly lineNumber: number;
+  private readonly inline: boolean;
   private readonly cleanAlt: string;
   private readonly width: string | null;
   private readonly height: string | null;
@@ -220,16 +620,25 @@ class ImageWidget extends WidgetType {
   // Plain field assignments, not TS parameter properties: node --test strips
   // types only and rejects parameter-property syntax, and the regression
   // tests below build real decorations through liveBlocksExtension().
-  constructor(src: string, alt: string, localPath: string | null = null, lineNumber: number = 0) {
+  constructor(
+    src: string,
+    alt: string,
+    localPath: string | null = null,
+    lineNumber: number = 0,
+    inline: boolean = false,
+    explicitWidth: string | null = null,
+    explicitHeight: string | null = null,
+  ) {
     super();
     this.src = src;
     this.alt = alt;
     this.localPath = localPath;
     this.lineNumber = lineNumber;
+    this.inline = inline;
     const parsed = parseImageAltSize(alt);
     this.cleanAlt = parsed.alt;
-    this.width = parsed.width;
-    this.height = parsed.height;
+    this.width = explicitWidth || parsed.width;
+    this.height = explicitHeight || parsed.height;
   }
 
   eq(other: ImageWidget): boolean {
@@ -237,16 +646,21 @@ class ImageWidget extends WidgetType {
       other.src === this.src &&
       other.alt === this.alt &&
       other.localPath === this.localPath &&
-      other.lineNumber === this.lineNumber
+      other.lineNumber === this.lineNumber &&
+      other.inline === this.inline &&
+      other.width === this.width &&
+      other.height === this.height
     );
   }
 
   toDOM(): HTMLElement {
-    const wrap = document.createElement('div');
-    wrap.className = 'cm-live-block cm-live-block--image';
+    const wrap = document.createElement(this.inline ? 'span' : 'div');
+    wrap.className = this.inline
+      ? 'cm-live-block cm-live-block--image cm-live-block--image-inline'
+      : 'cm-live-block cm-live-block--image';
     const img = document.createElement('img');
+    img.setAttribute('referrerpolicy', 'no-referrer');
     img.referrerPolicy = 'no-referrer';
-    img.src = this.src;
     img.alt = this.cleanAlt;
     img.loading = 'lazy';
     img.draggable = false;
@@ -254,6 +668,7 @@ class ImageWidget extends WidgetType {
     if (this.height) img.style.height = this.height;
     if (this.lineNumber > 0) img.dataset.solomdLine = String(this.lineNumber);
     if (this.localPath) img.dataset.solomdLocalSrc = this.localPath;
+    img.src = this.src;
     img.onerror = () => {
       // Image failed to load — fall back to a small "broken image" caption
       // rather than a giant empty box. The source text is one cursor-move
@@ -275,6 +690,698 @@ class ImageWidget extends WidgetType {
   }
 }
 
+/**
+ * #504 — Compute the character offset within a Markdown pipe-table row line
+ * (`| col0 | col1 |`) for the `colIdx`-th cell (0-based), ignoring escaped
+ * `\|` and pipes inside inline code spans. `clickRatio` (0..1) maps the
+ * horizontal click position across the trimmed cell text.
+ */
+export function findTableCellOffsetInLine(
+  lineText: string,
+  colIdx: number,
+  clickRatio = 1,
+): number {
+  const n = lineText.length;
+  const pipes: number[] = [];
+  let p = 0;
+  while (p < n) {
+    if (lineText[p] === '`') {
+      let ticks = 1;
+      while (p + ticks < n && lineText[p + ticks] === '`') ticks++;
+      let q = p + ticks;
+      let closed = -1;
+      while (q < n) {
+        if (lineText[q] === '`') {
+          let ticks2 = 1;
+          while (q + ticks2 < n && lineText[q + ticks2] === '`') ticks2++;
+          if (ticks2 === ticks) {
+            closed = q + ticks2;
+            break;
+          }
+          q += ticks2;
+        } else {
+          q++;
+        }
+      }
+      p = closed >= 0 ? closed : p + ticks;
+      continue;
+    }
+    if (lineText[p] === '\\' && p + 1 < n) {
+      p += 2;
+      continue;
+    }
+    if (lineText[p] === '|') {
+      pipes.push(p);
+    }
+    p++;
+  }
+  if (pipes.length === 0) return n;
+  const prefixLen = (lineText.match(/^\s*(?:>\s*)*/)?.[0] ?? '').length;
+  const trimmedEnd = lineText.trimEnd().length;
+  const bounds: number[] = [];
+  if (pipes[0] !== prefixLen) {
+    bounds.push(prefixLen - 1);
+  }
+  bounds.push(...pipes);
+  if (pipes[pipes.length - 1] !== trimmedEnd - 1) {
+    bounds.push(n);
+  }
+  const maxCellIdx = Math.max(0, bounds.length - 2);
+  const cellIdx = Math.max(0, Math.min(colIdx, maxCellIdx));
+  const cellStart = bounds[cellIdx] + 1;
+  const cellEnd = bounds[cellIdx + 1] ?? n;
+  const rawCell = lineText.slice(cellStart, cellEnd);
+  const firstNonSpace = rawCell.search(/\S/);
+  if (firstNonSpace < 0) {
+    return Math.min(cellStart + 1, cellEnd);
+  }
+  const lastNonSpace = rawCell.trimEnd().length;
+  const contentStart = cellStart + firstNonSpace;
+  const contentEnd = cellStart + lastNonSpace;
+  const ratio = Math.max(0, Math.min(1, Number.isFinite(clickRatio) ? clickRatio : 1));
+  return contentStart + Math.round((contentEnd - contentStart) * ratio);
+}
+
+function dedentTableSource(source: string): string {
+  const lines = source.split('\n');
+  let minIndent = Infinity;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const m = line.match(/^[ \t]*/);
+    const indent = m ? m[0].length : 0;
+    if (indent < minIndent) minIndent = indent;
+  }
+  if (!Number.isFinite(minIndent) || minIndent <= 0) return source;
+  return lines.map((line) => (line.length >= minIndent ? line.slice(minIndent) : line)).join('\n');
+}
+
+function tableIndentCols(source: string): number {
+  let minCols = Infinity;
+  for (const line of source.split('\n')) {
+    if (!line.trim()) continue;
+    const lead = /^[ \t]*/.exec(line)?.[0] ?? '';
+    let cols = 0;
+    for (const ch of lead) cols += ch === '\t' ? 4 - (cols % 4) : 1;
+    if (cols < minCols) minCols = cols;
+  }
+  return Number.isFinite(minCols) && minCols > 0 ? minCols : 0;
+}
+
+/**
+ * The cell a rebuilt table widget should re-open after a write-back.
+ *
+ * Committing a cell replaces the whole widget, so the DOM holding the caret is
+ * destroyed and cannot be focused again. The replacement reads this at build
+ * time and puts the caret back — which is why it is module state and not a
+ * field on the widget being thrown away.
+ */
+let pendingCellFocus: { from: number; row: number; col: number; at: number } | null = null;
+
+export interface ActiveTableCellSession {
+  from: number;
+  to: number;
+  row: number;
+  col: number;
+  cellEl: HTMLTableCellElement;
+  tableEl: HTMLTableElement;
+  wrapEl: HTMLElement;
+  /** Returns the up-to-date TableModel including any un-flushed edits in the active cell. */
+  getCurrentModel: () => TableModel | null;
+  /** Cancels pending blur commit (e.g. when a TableToolbar button is about to replace the whole table). */
+  cancelCommit: () => void;
+}
+
+let activeTableCellSession: ActiveTableCellSession | null = null;
+
+export function getActiveTableCellSession(
+  root?: HTMLElement | null,
+): ActiveTableCellSession | null {
+  if (!activeTableCellSession || !activeTableCellSession.cellEl.isConnected) {
+    activeTableCellSession = null;
+    return null;
+  }
+  if (root && !root.contains(activeTableCellSession.cellEl)) {
+    return null;
+  }
+  return activeTableCellSession;
+}
+
+export function requestTableCellFocus(from: number, row: number, col: number): void {
+  pendingCellFocus = { from, row, col, at: Date.now() };
+}
+
+export interface DomTableEditorAdapter {
+  source: string;
+  from: number;
+  to: number;
+  isReadOnly: () => boolean;
+  commitMarkdown: (markdown: string, nextFocus: { row: number; col: number } | null) => void;
+  exitTable: (direction: 'before' | 'after' | 'stay') => void;
+  onUndo?: () => boolean;
+  onRedo?: () => boolean;
+}
+
+export type DomTableBeginState = 'editing' | 'started' | false;
+
+export interface DomTableEditorHandle {
+  begin: (ev: MouseEvent, cell: HTMLTableCellElement) => DomTableBeginState;
+  focusCell: (row: number, col: number, caret?: 'start' | 'end') => boolean;
+}
+
+function isCaretAtCellBoundary(cell: HTMLElement, boundary: 'start' | 'end'): boolean {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return false;
+  const range = sel.getRangeAt(0);
+  if (!cell.contains(range.startContainer)) return false;
+  const testRange = document.createRange();
+  testRange.selectNodeContents(cell);
+  if (boundary === 'start') {
+    testRange.setEnd(range.startContainer, range.startOffset);
+  } else {
+    testRange.setStart(range.endContainer, range.endOffset);
+  }
+  return (testRange.toString() ?? '').length === 0;
+}
+
+function wrapCellSelectionWithMarkdown(cell: HTMLElement, marker: string): void {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  if (!cell.contains(range.commonAncestorContainer)) return;
+  const selected = range.toString();
+  const replacement = `${marker}${selected}${marker}`;
+  range.deleteContents();
+  const textNode = document.createTextNode(replacement);
+  range.insertNode(textNode);
+  const nextRange = document.createRange();
+  if (selected.length > 0) {
+    nextRange.setStart(textNode, marker.length);
+    nextRange.setEnd(textNode, marker.length + selected.length);
+  } else {
+    nextRange.setStart(textNode, marker.length);
+    nextRange.collapse(true);
+  }
+  sel.removeAllRanges();
+  sel.addRange(nextRange);
+}
+
+/**
+ * #500 — Shared in-place DOM table cell editor used by both CodeMirror's
+ * `TableWidget` and the Windows Plain Live Block Editor.
+ */
+export function bindDomTableCellEditor(
+  wrap: HTMLElement,
+  adapter: DomTableEditorAdapter,
+): DomTableEditorHandle | null {
+  const table = wrap.querySelector('table');
+  if (!table || adapter.from < 0 || adapter.to < 0) return null;
+
+  wrap.dataset.tableFrom = String(adapter.from);
+  wrap.dataset.tableTo = String(adapter.to);
+
+  const head = table.tHead;
+  let bodyRow = 0;
+  for (const row of Array.from(table.rows)) {
+    const r = head && row.parentElement === head ? HEADER_ROW : bodyRow++;
+    for (const cell of Array.from(row.cells)) {
+      cell.dataset.row = String(r);
+      cell.dataset.col = String(cell.cellIndex);
+    }
+  }
+
+  let active: { cell: HTMLTableCellElement; row: number; col: number; html: string } | null = null;
+  let written = false;
+  let suppressCommit = false;
+
+  const model = () => parseTable(adapter.source) ?? null;
+
+  const getCurrentModel = (): TableModel | null => {
+    const m = model();
+    if (!m) return null;
+    if (!active) return m;
+    const text = normalizeCellInput(active.cell.textContent ?? '');
+    if (active.row === HEADER_ROW) {
+      if (active.col >= 0 && active.col < m.header.length) {
+        const header = m.header.slice();
+        header[active.col] = text;
+        return { ...m, header };
+      }
+      return m;
+    }
+    if (active.row >= 0 && active.row < m.rows.length && active.col >= 0 && active.col < m.header.length) {
+      const rows = m.rows.map((r, idx) => {
+        if (idx !== active!.row) return r;
+        const copy = r.slice();
+        copy[active!.col] = text;
+        return copy;
+      });
+      return { ...m, rows };
+    }
+    return m;
+  };
+
+  const notifySession = () => {
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('solomd:table-cell-session'));
+    }
+  };
+
+  const syncSession = () => {
+    if (active) {
+      activeTableCellSession = {
+        from: adapter.from,
+        to: adapter.to,
+        row: active.row,
+        col: active.col,
+        cellEl: active.cell,
+        tableEl: table,
+        wrapEl: wrap,
+        getCurrentModel,
+        cancelCommit: () => {
+          suppressCommit = true;
+          leave();
+        },
+      };
+    } else if (activeTableCellSession?.wrapEl === wrap) {
+      activeTableCellSession = null;
+    }
+    notifySession();
+  };
+
+  const caretToEdge = (cell: HTMLElement, edge: 'start' | 'end' = 'end') => {
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    range.collapse(edge === 'start');
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  };
+
+  const leave = (): { row: number; col: number; text: string } | null => {
+    const a = active;
+    if (!a) return null;
+    active = null;
+    const text = a.cell.textContent ?? '';
+    a.cell.classList.remove('cm-live-table__cell--editing');
+    a.cell.removeAttribute('contenteditable');
+    a.cell.removeAttribute('spellcheck');
+    a.cell.removeAttribute('tabindex');
+    if (!written) {
+      a.cell.innerHTML = a.html;
+    }
+    syncSession();
+    return { row: a.row, col: a.col, text };
+  };
+
+  const commit = (
+    focus: { row: number; col: number } | null,
+    appendRow = false,
+  ): boolean => {
+    const done = leave();
+    if (!done || written || suppressCommit) return false;
+    if (appendRow) {
+      const appended = applyCellEditAndAppendRow(adapter.source, done.row, done.col, done.text);
+      if (!appended) return false;
+      written = true;
+      const targetFocus = focus ?? { row: appended.nextRow, col: appended.nextCol };
+      pendingCellFocus = {
+        from: adapter.from,
+        row: targetFocus.row,
+        col: targetFocus.col,
+        at: Date.now(),
+      };
+      adapter.commitMarkdown(appended.markdown, targetFocus);
+      return true;
+    }
+    const markdown = applyCellEdit(adapter.source, done.row, done.col, done.text);
+    if (!markdown) return false;
+    written = true;
+    if (focus) {
+      pendingCellFocus = { from: adapter.from, row: focus.row, col: focus.col, at: Date.now() };
+    }
+    adapter.commitMarkdown(markdown, focus);
+    return true;
+  };
+
+  const start = (cell: HTMLTableCellElement): boolean => {
+    if (adapter.isReadOnly()) return false;
+    const m = model();
+    if (!m) return false;
+    const row = Number(cell.dataset.row ?? HEADER_ROW);
+    const col = Number(cell.dataset.col ?? cell.cellIndex);
+    if (col < 0 || col >= m.header.length) return false;
+    if (row !== HEADER_ROW && (row < 0 || row >= m.rows.length)) return false;
+    clearSearchMarksIn(cell);
+    active = { cell, row, col, html: cell.innerHTML };
+    cell.textContent = cellText(m, row, col);
+    cell.classList.add('cm-live-table__cell--editing');
+    cell.setAttribute('contenteditable', 'true');
+    cell.setAttribute('spellcheck', 'false');
+    cell.setAttribute('tabindex', '-1');
+    cell.focus({ preventScroll: true });
+    syncSession();
+    return true;
+  };
+
+  const scrollCellIntoView = (cell: HTMLTableCellElement): void => {
+    try {
+      cell.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    } catch {
+      // Fallback for non-standard scrollIntoView implementations.
+    }
+    const scroller = wrap.closest?.('.plain-live-host, .cm-scroller') as HTMLElement | null;
+    if (!scroller || typeof cell.getBoundingClientRect !== 'function' || typeof scroller.getBoundingClientRect !== 'function') {
+      return;
+    }
+    const cellRect = cell.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    if (!(scrollerRect.height > 0) || !(cellRect.height > 0)) return;
+    const pad = 8;
+    if (cellRect.top < scrollerRect.top + pad) {
+      scroller.scrollTop -= scrollerRect.top + pad - cellRect.top;
+    } else if (cellRect.bottom > scrollerRect.bottom - pad) {
+      scroller.scrollTop += cellRect.bottom - (scrollerRect.bottom - pad);
+    }
+  };
+
+  const focusCell = (row: number, col: number, caret: 'start' | 'end' = 'end'): boolean => {
+    const cell = wrap.querySelector<HTMLTableCellElement>(
+      `[data-row="${row}"][data-col="${col}"]`,
+    );
+    if (!cell || !start(cell)) return false;
+    caretToEdge(cell, caret);
+    scrollCellIntoView(cell);
+    return true;
+  };
+
+  let cleanupFirstPressDrag: (() => void) | null = null;
+
+  const begin = (ev: MouseEvent, cell: HTMLTableCellElement): DomTableBeginState => {
+    if (adapter.isReadOnly()) return false;
+    const row = Number(cell.dataset.row ?? HEADER_ROW);
+    const col = Number(cell.dataset.col ?? cell.cellIndex);
+    if (active && active.cell === cell) {
+      // Already editing this cell: do NOT preventDefault on mousedown so the
+      // browser natively repositions the caret at the clicked glyph, selects
+      // words on double-click, and supports native mouse-drag text selection.
+      return 'editing';
+    }
+    cleanupFirstPressDrag?.();
+    cleanupFirstPressDrag = null;
+    if (active) commit({ row, col });
+    if (written) return 'started';
+    if (!start(cell)) return false;
+
+    const range = caretRangeAt(ev.clientX, ev.clientY);
+    const sel = typeof window !== 'undefined' ? window.getSelection?.() : null;
+    if (range && cell.contains(range.startContainer)) {
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    } else {
+      caretToEdge(cell, 'end');
+    }
+
+    // Also support click-and-drag text selection right on the very first press
+    // that enters the cell (where mousedown had to replace rendered HTML with
+    // plain text and preventDefault).
+    if (
+      sel &&
+      sel.rangeCount > 0 &&
+      typeof window !== 'undefined' &&
+      typeof window.addEventListener === 'function'
+    ) {
+      const initRange = sel.getRangeAt(0);
+      const anchorNode = initRange.startContainer;
+      const anchorOffset = initRange.startOffset;
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+      let dragging = false;
+      const stopDrag = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', stopDrag);
+        window.removeEventListener('blur', stopDrag);
+        if (cleanupFirstPressDrag === stopDrag) cleanupFirstPressDrag = null;
+      };
+      const onMove = (moveEv: MouseEvent) => {
+        if (!active || active.cell !== cell || !cell.isConnected) {
+          stopDrag();
+          return;
+        }
+        if ((moveEv.buttons & 1) === 0) {
+          stopDrag();
+          return;
+        }
+        if (!dragging && Math.abs(moveEv.clientX - startX) + Math.abs(moveEv.clientY - startY) < 3) {
+          return;
+        }
+        dragging = true;
+        const headRange = caretRangeAt(moveEv.clientX, moveEv.clientY);
+        if (headRange && cell.contains(headRange.startContainer) && typeof sel.setBaseAndExtent === 'function') {
+          sel.setBaseAndExtent(anchorNode, anchorOffset, headRange.startContainer, headRange.startOffset);
+        }
+      };
+      cleanupFirstPressDrag = stopDrag;
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', stopDrag);
+      window.addEventListener('blur', stopDrag);
+    }
+
+    return 'started';
+  };
+
+  wrap.addEventListener(
+    'keydown',
+    (ev: KeyboardEvent) => {
+      if (!active) return;
+      const here = { row: active.row, col: active.col };
+      const isMod = ev.metaKey || ev.ctrlKey;
+
+      // Formatting, Select-All & Undo/Redo shortcuts inside cell
+      if (isMod && !ev.altKey) {
+        const lower = ev.key.toLowerCase();
+        if (lower === 'a' && !ev.shiftKey) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const sel = window.getSelection();
+          if (sel) {
+            const range = document.createRange();
+            range.selectNodeContents(active.cell);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+          return;
+        }
+        if (lower === 'b' && !ev.shiftKey) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          wrapCellSelectionWithMarkdown(active.cell, '**');
+          notifySession();
+          return;
+        }
+        if (lower === 'i' && !ev.shiftKey) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          wrapCellSelectionWithMarkdown(active.cell, '*');
+          notifySession();
+          return;
+        }
+        if (lower === 'e' && !ev.shiftKey) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          wrapCellSelectionWithMarkdown(active.cell, '`');
+          notifySession();
+          return;
+        }
+        if (lower === 'z' && !ev.shiftKey && adapter.onUndo) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          leave();
+          pendingCellFocus = { from: adapter.from, row: here.row, col: here.col, at: Date.now() };
+          adapter.onUndo();
+          return;
+        }
+        if (((lower === 'z' && ev.shiftKey) || (lower === 'y' && !ev.shiftKey)) && adapter.onRedo) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          leave();
+          pendingCellFocus = { from: adapter.from, row: here.row, col: here.col, at: Date.now() };
+          adapter.onRedo();
+          return;
+        }
+      }
+
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        leave();
+        adapter.exitTable('stay');
+        return;
+      }
+
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (isMod) {
+          commit(null);
+          adapter.exitTable('after');
+          return;
+        }
+        const m = model();
+        const next = m ? stepCellVertical(m, here.row, here.col, ev.shiftKey ? -1 : 1) : null;
+        const target = next ?? here;
+        if (commit(target)) return;
+        if (next && focusCell(next.row, next.col, 'end')) return;
+        return;
+      }
+
+      if (ev.key === 'Tab') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const m = model();
+        const next = m ? stepCell(m, here.row, here.col, ev.shiftKey ? -1 : 1) : null;
+        if (!next && !ev.shiftKey && m) {
+          // Pressing Tab on the very last cell of the table appends a new row like Excel.
+          commit({ row: m.rows.length, col: 0 }, true);
+          return;
+        }
+        if (commit(next)) return;
+        if (next && focusCell(next.row, next.col, 'end')) return;
+        leave();
+        adapter.exitTable(ev.shiftKey ? 'before' : 'after');
+        return;
+      }
+
+      if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+        if (ev.shiftKey || ev.altKey || isMod) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const dir: -1 | 1 = ev.key === 'ArrowUp' ? -1 : 1;
+        const m = model();
+        const next = m ? stepCellVertical(m, here.row, here.col, dir) : null;
+        if (next) {
+          if (commit(next)) return;
+          focusCell(next.row, next.col, 'end');
+          return;
+        }
+        commit(null);
+        adapter.exitTable(dir < 0 ? 'before' : 'after');
+        return;
+      }
+
+      if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
+        if (ev.shiftKey || ev.altKey || isMod) return;
+        const isLeft = ev.key === 'ArrowLeft';
+        if (!isCaretAtCellBoundary(active.cell, isLeft ? 'start' : 'end')) {
+          return;
+        }
+        const m = model();
+        const next = m ? stepCell(m, here.row, here.col, isLeft ? -1 : 1) : null;
+        if (!next) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (commit(next)) return;
+        focusCell(next.row, next.col, isLeft ? 'end' : 'start');
+      }
+    },
+    true,
+  );
+
+  // #616 — Prevent regular caret/selection/typing keys (ArrowLeft, ArrowRight,
+  // Shift+Arrow*, Home/End, Backspace, Vim keys) from bubbling out of the
+  // active contenteditable cell into CodeMirror / Vim / window handlers.
+  wrap.addEventListener('keydown', (ev: KeyboardEvent) => {
+    if (active) ev.stopPropagation();
+  });
+
+  wrap.addEventListener('focusout', (ev: FocusEvent) => {
+    if (!active) return;
+    if (ev.target !== active.cell) return;
+    const next = ev.relatedTarget as Node | null;
+    if (next && wrap.contains(next)) return;
+    commit(null);
+  });
+
+  if (pendingCellFocus && pendingCellFocus.from === adapter.from) {
+    const pending = pendingCellFocus;
+    pendingCellFocus = null;
+    if (Date.now() - pending.at < 1500) {
+      const m = model();
+      const clampedRow = m
+        ? pending.row < 0
+          ? HEADER_ROW
+          : m.rows.length > 0
+            ? Math.min(pending.row, m.rows.length - 1)
+            : HEADER_ROW
+        : pending.row;
+      const clampedCol = m
+        ? Math.max(0, Math.min(pending.col, m.header.length - 1))
+        : pending.col;
+      requestAnimationFrame(() => {
+        if (wrap.isConnected) focusCell(clampedRow, clampedCol, 'end');
+      });
+    }
+  }
+
+  return { begin, focusCell };
+}
+
+function syncTableWidgetSearchMarks(wrap: HTMLElement, state: EditorState): HTMLElement | null {
+  const spec = activeEditorSearchSpec(state);
+  if (!spec) {
+    clearSearchMarksIn(wrap);
+    return null;
+  }
+  const marks = applySearchMarksIn(wrap, spec.search, { caseSensitive: spec.caseSensitive });
+  if (marks.length === 0) return null;
+  const from = Number(wrap.dataset.tableFrom ?? -1);
+  const to = Number(wrap.dataset.tableTo ?? -1);
+  const sel = state.selection.main;
+  if (from >= 0 && to >= from && sel.from >= from && sel.to <= to) {
+    const source = state.doc.sliceString(from, Math.min(to, state.doc.length));
+    const localOffset = Math.max(0, sel.from - from);
+    const hitLineOffset = source.slice(0, localOffset).split('\n').length - 1;
+    const targetRow = hitLineOffset <= 0 ? HEADER_ROW : hitLineOffset - 2;
+    const lineStart = source.lastIndexOf('\n', Math.max(0, localOffset - 1)) + 1;
+    const beforeInLine = source.slice(lineStart, localOffset);
+    let pipes = 0;
+    let lastPipe = -1;
+    for (let k = 0; k < beforeInLine.length; k++) {
+      if (beforeInLine[k] === '\\') {
+        k++;
+        continue;
+      }
+      if (beforeInLine[k] === '|') {
+        pipes++;
+        lastPipe = k;
+      }
+    }
+    const rawLine = source.slice(lineStart).split('\n')[0] ?? '';
+    const hasLeadingPipe = /^\s*\|/.test(rawLine);
+    const targetCol = Math.max(0, hasLeadingPipe ? pipes - 1 : pipes);
+    const cellEl = wrap.querySelector<HTMLElement>(
+      `[data-row="${targetRow}"][data-col="${targetCol}"]`,
+    );
+    if (cellEl) {
+      const cellMarks = marks.filter((m) => cellEl.contains(m));
+      if (cellMarks.length > 0) {
+        const beforeInCell = beforeInLine.slice(lastPipe + 1);
+        const ord = Math.min(
+          cellMarks.length - 1,
+          findPreviewHitsInText(beforeInCell, spec.search, Infinity, spec.caseSensitive).hits.length,
+        );
+        const chosen = cellMarks[ord] ?? cellMarks[0];
+        chosen.classList.add('ps-mark--current');
+        return chosen;
+      }
+    }
+    marks[0].classList.add('ps-mark--current');
+    return marks[0];
+  }
+  return null;
+}
+
+const tableEditorHandles = new WeakMap<HTMLElement, DomTableEditorHandle>();
+
 class TableWidget extends WidgetType {
   // Cells can hold math / code: a widget built before KaTeX or highlight.js
   // arrived must not count as equal to the one built after (render-deps.ts).
@@ -282,12 +1389,30 @@ class TableWidget extends WidgetType {
   private readonly source: string;
   private readonly imageRoot: string | null;
   private readonly filePath?: string;
+  private readonly startLine: number;
+  // Document range this widget replaces. Cell editing writes back through it;
+  // -1 means "unknown" (a widget built without one simply stays read-only).
+  private readonly from: number;
+  private readonly to: number;
+  private readonly hideSourceBtn: boolean;
 
-  constructor(source: string, imageRoot: string | null = null, filePath?: string) {
+  constructor(
+    source: string,
+    imageRoot: string | null = null,
+    filePath?: string,
+    startLine: number = 0,
+    from: number = -1,
+    to: number = -1,
+    hideSourceBtn: boolean = false,
+  ) {
     super();
     this.source = source;
     this.imageRoot = imageRoot;
     this.filePath = filePath;
+    this.startLine = startLine;
+    this.from = from;
+    this.to = to;
+    this.hideSourceBtn = hideSourceBtn;
   }
 
   eq(other: TableWidget): boolean {
@@ -295,26 +1420,238 @@ class TableWidget extends WidgetType {
       other.source === this.source &&
       other.imageRoot === this.imageRoot &&
       other.filePath === this.filePath &&
+      other.startLine === this.startLine &&
+      other.from === this.from &&
+      other.to === this.to &&
+      other.hideSourceBtn === this.hideSourceBtn &&
       other.deps === this.deps
     );
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view?: EditorView): HTMLElement {
     const wrap = document.createElement('div');
     wrap.className = 'cm-live-block cm-live-block--table';
+    // Visually align list-indented tables (e.g. pasted after Shift+Enter soft
+    // break) under the enclosing list item's body column, matching cm-live-render.
+    const indentCols = tableIndentCols(this.source);
+    if (indentCols > 0) {
+      const marginEm =
+        indentCols === 2
+          ? 0.95
+          : indentCols === 3
+            ? 1.15
+            : indentCols === 4
+              ? 1.65
+              : Math.min(8, indentCols * 0.55);
+      wrap.style.marginLeft = `${marginEm.toFixed(2)}em`;
+    }
     // Render the table source through the same markdown pipeline used by the
     // preview pane so we get GFM alignment, inline formatting, etc. for free.
-    // We strip everything except the table rows from the rendered output.
-    const rawHtml = renderMarkdown(this.source);
+    // Dedent common leading spaces/tabs so a 4-space indented table nested
+    // inside a list item is rendered as a <table> rather than an indented
+    // <pre><code> block when sliced out of its parent list context.
+    const rawHtml = renderMarkdown(dedentTableSource(this.source));
     wrap.innerHTML = rewriteImageUrls(rawHtml, this.imageRoot, this.filePath);
     installSvgImageFallbacks(wrap);
     trackImageHeights(wrap);
-    return wrap;
+    const cellEditor = this.createCellEditor(wrap, view);
+    if (cellEditor) {
+      tableEditorHandles.set(wrap, cellEditor);
+    }
+
+    if (this.startLine > 0 && !this.hideSourceBtn) {
+      const srcBtn = document.createElement('button');
+      srcBtn.type = 'button';
+      srcBtn.className = 'cm-table-source-btn';
+      srcBtn.textContent = '</> 源码';
+      srcBtn.title = '展开表格 Markdown 源码';
+      srcBtn.setAttribute('aria-label', srcBtn.title);
+      srcBtn.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+      srcBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const v = view ?? EditorView.findFromDOM(srcBtn);
+        if (!v || this.startLine < 1 || this.startLine > v.state.doc.lines) return;
+        const lineObj = v.state.doc.line(this.startLine);
+        v.dispatch({
+          selection: { anchor: lineObj.from },
+          effects: toggleTableFoldEffect.of({ line: this.startLine, collapsed: false }),
+        });
+        v.focus();
+      });
+      wrap.appendChild(srcBtn);
+    }
+
+    wrap.addEventListener('pointerdown', (ev: PointerEvent) => {
+      const target = ev.target as Element | null;
+      if (target?.closest?.('.cm-live-table__cell--editing')) {
+        ev.stopPropagation();
+      }
+    });
+
+    // #504 — Clicking a rendered table cell in Live mode places the caret at
+    // the exact Markdown table row (header or body row) and column cell offset,
+    // and anchors scrollTop so the clicked row stays under the mouse cursor
+    // instead of jumping to the very start or end of the table.
+    wrap.addEventListener('mousedown', (ev: MouseEvent) => {
+      if (ev.button !== 0 || !view || this.startLine <= 0) return;
+      const target = ev.target as Element | null;
+      if (target?.closest?.('a')) return;
+      const cell = target?.closest?.('th, td') as HTMLTableCellElement | null;
+      const tr = target?.closest?.('tr') as HTMLTableRowElement | null;
+      if (!cell && !tr) return;
+
+      // #500 — a click on a cell edits that cell in place. The caret mapping
+      // below is what used to turn the table back into source lines the moment
+      // anything needed changing; it stays as the fallback for read-only panes
+      // and for clicks that land on a row but not on a cell.
+      const beginState = cell ? cellEditor?.begin(ev, cell) : false;
+      if (beginState) {
+        if (beginState === 'started') {
+          ev.preventDefault();
+        }
+        ev.stopPropagation();
+        return;
+      }
+
+      let targetLineNum = this.startLine;
+      const sectionTag = tr?.parentElement?.tagName;
+      if (sectionTag === 'THEAD') {
+        targetLineNum = this.startLine;
+      } else if (sectionTag === 'TBODY' && tr?.parentElement) {
+        const rows = Array.from(tr.parentElement.children).filter((el) => el.tagName === 'TR');
+        const rowIdx = Math.max(0, rows.indexOf(tr));
+        targetLineNum = this.startLine + 2 + rowIdx;
+      } else if (tr) {
+        const table = tr.closest('table');
+        const allRows = table ? Array.from(table.querySelectorAll('tr')) : [];
+        const idx = allRows.indexOf(tr);
+        targetLineNum = idx <= 0 ? this.startLine : this.startLine + 1 + idx;
+      }
+      targetLineNum = Math.max(1, Math.min(view.state.doc.lines, targetLineNum));
+
+      const colIdx = cell ? Math.max(0, cell.cellIndex) : 0;
+      let clickRatio = 1;
+      if (cell) {
+        const rect = cell.getBoundingClientRect();
+        const innerLeft = rect.left + 12;
+        const innerWidth = Math.max(1, rect.width - 24);
+        clickRatio = Math.max(0, Math.min(1, (ev.clientX - innerLeft) / innerWidth));
+      }
+
+      const docLine = view.state.doc.line(targetLineNum);
+      const colOffset = findTableCellOffsetInLine(docLine.text, colIdx, clickRatio);
+      const targetPos = docLine.from + colOffset;
+      const clickClientY = ev.clientY;
+
+      ev.preventDefault();
+      ev.stopPropagation();
+      view.focus();
+      view.dispatch({
+        selection: { anchor: targetPos },
+        userEvent: 'select.pointer',
+      });
+      requestAnimationFrame(() => {
+        const coords = view.coordsAtPos(targetPos);
+        if (!coords) return;
+        const scroller = view.scrollDOM;
+        const scrollerRect = scroller.getBoundingClientRect();
+        const desiredY = Math.max(
+          scrollerRect.top + 24,
+          Math.min(scrollerRect.bottom - 24, clickClientY),
+        );
+        const delta = coords.top - desiredY;
+        if (Math.abs(delta) > 4) {
+          scroller.scrollTop += delta;
+        }
+      });
+    });
+
+      if (view) {
+        syncTableWidgetSearchMarks(wrap, view.state);
+      }
+
+      return wrap;
+    }
+
+  /**
+   * #500 — edit a table cell where it is, instead of falling back to the source.
+   */
+  private createCellEditor(
+    wrap: HTMLElement,
+    view?: EditorView,
+  ): DomTableEditorHandle | null {
+    if (!view || this.from < 0 || this.to < 0) return null;
+    return bindDomTableCellEditor(wrap, {
+      source: this.source,
+      from: this.from,
+      to: this.to,
+      isReadOnly: () => view.state.readOnly,
+      commitMarkdown: (markdown) => {
+        view.dispatch({
+          changes: { from: this.from, to: this.to, insert: markdown },
+          userEvent: 'input.table-cell',
+        });
+      },
+      exitTable: (direction) => {
+        const doc = view.state.doc;
+        if (direction === 'before') {
+          const startLineNo = doc.lineAt(Math.max(0, Math.min(this.from, doc.length))).number;
+          if (startLineNo > 1) {
+            const prevLine = doc.line(startLineNo - 1);
+            view.dispatch({ selection: { anchor: prevLine.to }, scrollIntoView: true });
+          } else {
+            view.dispatch({ selection: { anchor: 0 }, scrollIntoView: true });
+          }
+        } else if (direction === 'after') {
+          const endLineNo = doc.lineAt(Math.max(0, Math.min(this.to, doc.length))).number;
+          if (endLineNo < doc.lines) {
+            const nextLine = doc.line(endLineNo + 1);
+            view.dispatch({ selection: { anchor: nextLine.from }, scrollIntoView: true });
+          } else {
+            view.dispatch({
+              changes: { from: doc.length, to: doc.length, insert: '\n' },
+              selection: { anchor: doc.length + 1 },
+              scrollIntoView: true,
+            });
+          }
+        }
+        view.focus();
+      },
+      onUndo: () => cmUndo(view),
+      onRedo: () => cmRedo(view),
+    });
   }
 
-  ignoreEvent(): boolean {
-    return false;
+  ignoreEvent(event: Event): boolean {
+    if (event.type === 'selectionchange') return true;
+    const target = event.target as Element | null;
+    if (target?.closest?.('a')) return false;
+    return !!target?.closest?.('th, td, tr');
   }
+
+  ignoreMutation(): boolean {
+    return true;
+  }
+}
+
+function caretRangeAt(x: number, y: number): Range | null {
+  const doc = document as Document & {
+    caretRangeFromPoint?: (px: number, py: number) => Range | null;
+    caretPositionFromPoint?: (px: number, py: number) => { offsetNode: Node; offset: number } | null;
+  };
+  if (typeof doc.caretRangeFromPoint === 'function') {
+    return doc.caretRangeFromPoint(x, y);
+  }
+  const pos = doc.caretPositionFromPoint?.(x, y);
+  if (!pos) return null;
+  const range = document.createRange();
+  range.setStart(pos.offsetNode, pos.offset);
+  range.collapse(true);
+  return range;
 }
 
 /** Raw block HTML rendered with the same markdown-it pipeline as Preview.vue. */
@@ -363,13 +1700,41 @@ class HtmlBlockWidget extends WidgetType {
     }
     installSvgImageFallbacks(wrap);
     trackImageHeights(wrap);
+    this.bindDetailsToggles(wrap);
     return wrap;
+  }
+
+  /**
+   * A rendered `<details>` folds in place. Its summary is a control of the
+   * rendered view, not an editing gesture: letting the editor take the press
+   * put the caret inside the block and replaced this widget with the block's
+   * source on the very click that should have folded it, so the disclosure
+   * triangle did nothing at all.
+   */
+  private bindDetailsToggles(wrap: HTMLElement): void {
+    for (const summary of Array.from(wrap.querySelectorAll('summary'))) {
+      const details = summary.parentElement;
+      if (!(details instanceof HTMLDetailsElement)) continue;
+      summary.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      summary.addEventListener('click', (event) => {
+        // Cancel the native activation and flip `open` ourselves, so exactly
+        // one toggle happens per click whatever else handles the event.
+        event.preventDefault();
+        details.open = !details.open;
+        scheduleRelayout();
+      });
+    }
   }
 
   ignoreEvent(event: Event): boolean {
     if (event.type === 'contextmenu') return true;
     if (event instanceof MouseEvent && event.button === 2) return true;
-    return false;
+    // Summary presses belong to the disclosure (see bindDetailsToggles); every
+    // other press in the block keeps revealing the source, as before.
+    return event.target instanceof Element && event.target.closest('summary') !== null;
   }
 }
 
@@ -540,6 +1905,147 @@ function inlineMathSpans(text: string): Array<{ start: number; end: number; tex:
 // into a module-level cache; toDOM() pulls the SVG when available, falls
 // back to a "rendering…" placeholder, then dispatches `solomd:cm-relayout`
 // to ask the editor to rebuild decorations once the cache fills.
+/**
+ * #530 — Inline `+` / `−` fold toggle button on the opening ` ```mermaid `
+ * fence line so users can expand or collapse the Mermaid source code while
+ * keeping the rendered diagram below.
+ */
+class MermaidFoldToggleWidget extends WidgetType {
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly collapsed: boolean;
+
+  constructor(startLine: number, endLine: number, collapsed: boolean) {
+    super();
+    this.startLine = startLine;
+    this.endLine = endLine;
+    this.collapsed = collapsed;
+  }
+
+  eq(other: MermaidFoldToggleWidget): boolean {
+    return (
+      other.startLine === this.startLine &&
+      other.endLine === this.endLine &&
+      other.collapsed === this.collapsed
+    );
+  }
+
+  toDOM(): HTMLElement {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `cm-mermaid-fold-btn${this.collapsed ? ' is-collapsed' : ' is-expanded'}`;
+    btn.textContent = this.collapsed ? '+' : '−';
+    btn.title = this.collapsed ? '展开 Mermaid 代码' : '折叠 Mermaid 代码';
+    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-expanded', String(!this.collapsed));
+    const handleToggle = (ev: Event) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const view = EditorView.findFromDOM(btn);
+      if (!view) return;
+      const doc = view.state.doc;
+      if (this.startLine < 1 || this.startLine > doc.lines) return;
+      const nextCollapsed = !this.collapsed;
+      const openLine = doc.line(this.startLine);
+      const closeLineNo = Math.min(this.endLine, doc.lines);
+      const bodyStartPos =
+        this.startLine + 1 <= closeLineNo
+          ? doc.line(this.startLine + 1).from
+          : openLine.to;
+      const bodyEndPos = doc.line(closeLineNo).to;
+      const sel = view.state.selection.main;
+      const cursorInBody =
+        nextCollapsed &&
+        ((sel.from >= bodyStartPos && sel.from <= bodyEndPos) ||
+          (sel.to >= bodyStartPos && sel.to <= bodyEndPos));
+      view.dispatch({
+        ...(cursorInBody ? { selection: { anchor: openLine.from } } : {}),
+        effects: toggleMermaidFoldEffect.of({
+          line: this.startLine,
+          collapsed: nextCollapsed,
+        }),
+      });
+    };
+    btn.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    });
+    btn.addEventListener('click', handleToggle);
+    return btn;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+class TableFoldToggleWidget extends WidgetType {
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly collapsed: boolean;
+
+  constructor(startLine: number, endLine: number, collapsed: boolean) {
+    super();
+    this.startLine = startLine;
+    this.endLine = endLine;
+    this.collapsed = collapsed;
+  }
+
+  eq(other: TableFoldToggleWidget): boolean {
+    return (
+      other.startLine === this.startLine &&
+      other.endLine === this.endLine &&
+      other.collapsed === this.collapsed
+    );
+  }
+
+  toDOM(): HTMLElement {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `cm-mermaid-fold-btn cm-table-fold-btn${this.collapsed ? ' is-collapsed' : ' is-expanded'}`;
+    btn.textContent = this.collapsed ? '+' : '−';
+    btn.title = this.collapsed ? '展开表格源码' : '折叠并渲染表格';
+    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-expanded', String(!this.collapsed));
+    const handleToggle = (ev: Event) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const view = EditorView.findFromDOM(btn);
+      if (!view) return;
+      const doc = view.state.doc;
+      if (this.startLine < 1 || this.startLine > doc.lines) return;
+      const nextCollapsed = !this.collapsed;
+      const openLine = doc.line(this.startLine);
+      const closeLineNo = Math.min(this.endLine, doc.lines);
+      const blockFrom = openLine.from;
+      const blockTo = doc.line(closeLineNo).to;
+      const sel = view.state.selection.main;
+      const cursorInside =
+        nextCollapsed &&
+        ((sel.from >= blockFrom && sel.from <= blockTo) ||
+          (sel.to >= blockFrom && sel.to <= blockTo));
+      const safePos = blockFrom > 0 ? blockFrom - 1 : Math.min(doc.length, blockTo + 1);
+      view.dispatch({
+        ...(cursorInside ? { selection: { anchor: safePos } } : {}),
+        effects: toggleTableFoldEffect.of({
+          line: this.startLine,
+          collapsed: nextCollapsed,
+        }),
+      });
+    };
+    btn.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    });
+    btn.addEventListener('click', handleToggle);
+    return btn;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
 class MermaidWidget extends WidgetType {
   /** Whether the cache held a finished result when this widget was built. */
   private readonly settled: boolean;
@@ -552,7 +2058,7 @@ class MermaidWidget extends WidgetType {
     this.source = source;
     this.theme = theme;
     this.filePath = filePath;
-    const cached = mermaidSvgCache.get(mermaidKey(source, theme));
+    const cached = peekMermaidSvg(theme, source);
     this.settled = !!(cached && (cached.svg || cached.error));
   }
 
@@ -571,7 +2077,7 @@ class MermaidWidget extends WidgetType {
   toDOM(): HTMLElement {
     const wrap = document.createElement('div');
     wrap.className = 'cm-live-block cm-live-block--mermaid';
-    const cached = mermaidSvgCache.get(mermaidKey(this.source, this.theme));
+    const cached = peekMermaidSvg(this.theme, this.source);
     if (cached?.svg) {
       wrap.innerHTML = cached.svg;
       bindMermaidInteractions(wrap, cached.bindFunctions);
@@ -586,14 +2092,16 @@ class MermaidWidget extends WidgetType {
       wrap.textContent = `Mermaid: ${cached.error}`;
     } else {
       wrap.textContent = '⌛ Rendering Mermaid…';
-      ensureMermaidRendered(this.source, this.theme).then(() => {
+      // Only widgets CodeMirror actually mounted reach toDOM(), so this is
+      // the viewport gate: off-screen diagrams are never queued. `front`
+      // keeps a freshly scrolled-into-view diagram ahead of any background
+      // work from the preview pane.
+      void renderMermaidCached(this.theme, this.source, { front: true }).then(() => {
         // Ask the field to recompute now that the SVG cache is filled. We
         // can't hold an EditorView here (block decorations live in a state
         // field, built without a view), so signal via a window event that
         // the companion relayout plugin turns into a `relayoutEffect`.
-        try {
-          window.dispatchEvent(new CustomEvent('solomd:cm-relayout'));
-        } catch {}
+        scheduleRelayout();
       });
     }
     return wrap;
@@ -642,6 +2150,56 @@ class PlantumlWidget extends WidgetType {
       } catch {}
     });
     wrap.appendChild(img);
+    return wrap;
+  }
+
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+// #363 — ```markmap fenced mindmap rendered synchronously as a vector SVG tree.
+class MarkmapWidget extends WidgetType {
+  readonly source: string;
+
+  constructor(source: string) {
+    super();
+    this.source = source;
+  }
+
+  eq(other: MarkmapWidget): boolean {
+    return other.source === this.source;
+  }
+
+  toDOM(): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'cm-live-block cm-live-block--mermaid cm-live-block--markmap';
+    wrap.innerHTML = renderMarkmapSvg(this.source);
+    return wrap;
+  }
+
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+// Gitee #IK9BC3 — ```excalidraw fenced scene rendered synchronously as a vector SVG.
+class ExcalidrawWidget extends WidgetType {
+  readonly source: string;
+
+  constructor(source: string) {
+    super();
+    this.source = source;
+  }
+
+  eq(other: ExcalidrawWidget): boolean {
+    return other.source === this.source;
+  }
+
+  toDOM(): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'cm-live-block cm-live-block--mermaid cm-live-block--excalidraw';
+    wrap.innerHTML = renderExcalidrawSvg(this.source);
     return wrap;
   }
 
@@ -866,6 +2424,12 @@ interface BlockOptions {
    * are unaffected — they never reveal source anyway.
    */
   keepSource?: () => boolean;
+  /**
+   * #605 "Pure WYSIWYG" (`hideActiveLineMarkers && !alwaysShowMarkers`):
+   * hovering, clicking, moving the cursor, or selecting text never reveals raw
+   * Markdown syntax or `</> 源码` buttons.
+   */
+  pureWysiwyg?: () => boolean;
 }
 
 function buildBlockDecorations(state: EditorState, opts: BlockOptions): DecorationSet {
@@ -874,6 +2438,7 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
         const cursorLine = state.doc.lineAt(sel.from).number;
         const cursorLineEnd = state.doc.lineAt(sel.to).number;
         const keepSource = opts.keepSource?.() === true;
+        const pureWysiwyg = !keepSource && opts.pureWysiwyg?.() === true;
 
         // Single pass over the whole doc — for each line, decide:
         //   * is it a standalone image line we should replace? (1 line)
@@ -903,7 +2468,7 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
         const fenceBody: boolean[] = new Array(lastLine).fill(false);
         syntaxTree(state).iterate({
           enter: (node) => {
-            if (node.name !== 'FencedCode' && node.name !== 'CodeBlock') return;
+            if (node.name !== 'FencedCode') return;
             const startLine = state.doc.lineAt(node.from).number;
             const endLine = state.doc.lineAt(Math.min(node.to, doc.length)).number;
             for (let ln = startLine + 1; ln <= endLine; ln += 1) {
@@ -911,7 +2476,78 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
             }
           },
         });
+        // CodeMirror's Lezer parser only parses the first ~3KB synchronously on
+        // initial state creation, so FencedCode nodes past that viewport horizon
+        // may not exist in `syntaxTree(state)` yet. Run a fast line-level fence
+        // pass across `sourceLines` so fenced code blocks anywhere in a long
+        // document never have their inner tables/math/HTML replaced by widgets.
+        let activeFenceChar = '';
+        let activeFenceLen = 0;
+        let closeFenceRe: RegExp | null = null;
+        for (let idx = 0; idx < lastLine; idx += 1) {
+          const stripped = stripQuotePrefix(sourceLines[idx]);
+          if (!activeFenceChar) {
+            const openMatch = stripped.match(/^\s*(?:(?:[-+*]|\d+[.)])\s+)*(`{3,}|~{3,})(.*)$/);
+            if (openMatch) {
+              const marker = openMatch[1];
+              const info = openMatch[2];
+              // Backtick fences cannot contain backticks in their info string.
+              if (marker[0] !== '`' || !info.includes('`')) {
+                activeFenceChar = marker[0];
+                activeFenceLen = marker.length;
+                closeFenceRe = new RegExp(
+                  `^\\s*(?:(?:[-+*]|\\d+[.)])\\s+)*${activeFenceChar}{${activeFenceLen},}\\s*$`,
+                );
+              }
+            }
+          } else {
+            fenceBody[idx] = true;
+            if (closeFenceRe && closeFenceRe.test(stripped)) {
+              activeFenceChar = '';
+              activeFenceLen = 0;
+              closeFenceRe = null;
+            }
+          }
+        }
+        const imageRefs = extractImageReferenceDefinitions(sourceLines, fenceBody);
         let i = 1;
+
+        // #626 — Leading YAML frontmatter block (`---\n...\n---` on line 1).
+        // Replace with a collapsible properties card when the caret is outside;
+        // moving the caret into lines 1..fmEnd reveals syntax-highlighted YAML.
+        if (lastLine >= 2 && sourceLines[0].trim() === '---') {
+          let fmEndLine = 0;
+          const scanLimit = Math.min(lastLine, 200);
+          for (let ln = 2; ln <= scanLimit; ln += 1) {
+            const trimmed = sourceLines[ln - 1].trim();
+            if (trimmed === '---' || trimmed === '...') {
+              fmEndLine = ln;
+              break;
+            }
+          }
+          if (fmEndLine >= 2) {
+            const cursorInside =
+              keepSource ||
+              (cursorLine >= 1 && cursorLine <= fmEndLine) ||
+              (cursorLineEnd >= 1 && cursorLineEnd <= fmEndLine);
+            if (!cursorInside) {
+              const blockFrom = doc.line(1).from;
+              const blockTo = doc.line(fmEndLine).to;
+              const yamlBody = sourceLines.slice(1, fmEndLine - 1).join('\n');
+              const editPos = fmEndLine >= 2 ? doc.line(2).from : blockFrom;
+              builder.add(
+                blockFrom,
+                blockTo,
+                Decoration.replace({
+                  widget: new FrontmatterWidget(yamlBody, editPos),
+                  block: true,
+                }),
+              );
+            }
+            i = fmEndLine + 1;
+          }
+        }
+
         while (i <= lastLine) {
           const line = doc.line(i);
 
@@ -931,8 +2567,9 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
             const endI = htmlEndIndex + 1;
             const cursorInside =
               keepSource ||
-              (cursorLine >= i && cursorLine <= endI) ||
-              (cursorLineEnd >= i && cursorLineEnd <= endI);
+              (!pureWysiwyg &&
+                ((cursorLine >= i && cursorLine <= endI) ||
+                  (cursorLineEnd >= i && cursorLineEnd <= endI)));
             if (!cursorInside) {
               const blockFrom = line.from;
               const blockTo = doc.line(endI).to;
@@ -955,91 +2592,72 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
             continue;
           }
 
-          // Standalone HTML `<img ...>` line (#446).
+          // Standalone HTML `<img ...>` line (#446 / #561 / #605).
+          // Keep the source line visible above the rendered image by default,
+          // or replace the line completely when Pure WYSIWYG (`pureWysiwyg`) is on.
           if (/^\s*<img\b[^>]*>\s*$/i.test(line.text)) {
-            if (keepSource) {
-              builder.add(
-                line.to,
-                line.to,
-                Decoration.widget({
-                  widget: new HtmlBlockWidget(
-                    line.text,
-                    opts.getImageRoot?.() ?? null,
-                    opts.getFilePath?.(),
-                    i,
-                  ),
-                  block: true,
-                  side: 1,
-                }),
-              );
-              i += 1;
-              continue;
-            }
-            const cursorInside = i >= cursorLine && i <= cursorLineEnd;
-            if (!cursorInside) {
+            const imgHtmlWidget = new HtmlBlockWidget(
+              line.text,
+              opts.getImageRoot?.() ?? null,
+              opts.getFilePath?.(),
+              i,
+            );
+            if (pureWysiwyg) {
               builder.add(
                 line.from,
                 line.to,
-                Decoration.replace({
-                  widget: new HtmlBlockWidget(
-                    line.text,
-                    opts.getImageRoot?.() ?? null,
-                    opts.getFilePath?.(),
-                    i,
-                  ),
-                  block: true,
-                }),
+                Decoration.replace({ widget: imgHtmlWidget, block: true }),
+              );
+            } else {
+              builder.add(
+                line.to,
+                line.to,
+                Decoration.widget({ widget: imgHtmlWidget, block: true, side: 1 }),
               );
             }
             i += 1;
             continue;
           }
 
-          // Image line.
-          const imgMatch = IMAGE_LINE_RE.exec(line.text);
-          if (imgMatch) {
-            if (keepSource) {
-              // Render below the source line and leave the line alone, so
-              // clicking into it changes nothing on screen.
-              const root = opts.getImageRoot?.() ?? null;
-              const filePath = opts.getFilePath?.();
-              const src = resolveImageSrc(imgMatch[2], root, filePath);
-              const localPath = resolveImagePath(imgMatch[2], root, filePath);
-              const needsFallback =
-                isLocalSvgPath(localPath) ||
-                localPath.startsWith('saf:') ||
-                /^\/(?:storage\/emulated\/0|sdcard)\//i.test(localPath);
-              builder.add(
-                line.to,
-                line.to,
-                Decoration.widget({
-                  widget: new ImageWidget(src, imgMatch[1], needsFallback ? localPath : null, i),
-                  block: true,
-                  side: 1,
-                }),
-              );
-              i += 1;
-              continue;
-            }
-            const cursorInside = i >= cursorLine && i <= cursorLineEnd;
-            if (!cursorInside) {
-              const alt = imgMatch[1];
-              const rawSrc = imgMatch[2];
-              const root = opts.getImageRoot?.() ?? null;
-              const filePath = opts.getFilePath?.();
-              const src = resolveImageSrc(rawSrc, root, filePath);
-              const localPath = resolveImagePath(rawSrc, root, filePath);
-              const needsFallback =
-                isLocalSvgPath(localPath) ||
-                localPath.startsWith('saf:') ||
-                /^\/(?:storage\/emulated\/0|sdcard)\//i.test(localPath);
+          // #506 / #561 / #605 — Standalone Markdown image line (`![alt](url)`,
+          // `[![alt](img)](link)`, `![[1] alt](url)`, `![alt](<url>)`,
+          // `![alt][ref]`, etc.). Keep the Markdown source line visible above
+          // the rendered image widget unless Pure WYSIWYG (`pureWysiwyg`) is on.
+          const lineImages = findMarkdownImagesInLine(line.text, imageRefs);
+          const isStandaloneImage =
+            lineImages.length === 1 &&
+            line.text.slice(0, lineImages[0].start).trim() === '' &&
+            line.text.slice(lineImages[0].end).trim() === '';
+          if (isStandaloneImage) {
+            const imgSpan = lineImages[0];
+            const root = opts.getImageRoot?.() ?? null;
+            const filePath = opts.getFilePath?.();
+            const src = resolveImageSrc(imgSpan.src, root, filePath);
+            const localPath = resolveImagePath(imgSpan.src, root, filePath);
+            const needsFallback =
+              isLocalSvgPath(localPath) ||
+              localPath.startsWith('saf:') ||
+              /^\/(?:storage\/emulated\/0|sdcard)\//i.test(localPath);
+            const imageWidget = new ImageWidget(
+              src,
+              imgSpan.alt,
+              needsFallback ? localPath : null,
+              i,
+              false,
+              imgSpan.width ?? null,
+              imgSpan.height ?? null,
+            );
+            if (pureWysiwyg) {
               builder.add(
                 line.from,
                 line.to,
-                Decoration.replace({
-                  widget: new ImageWidget(src, alt, needsFallback ? localPath : null, i),
-                  block: true,
-                }),
+                Decoration.replace({ widget: imageWidget, block: true }),
+              );
+            } else {
+              builder.add(
+                line.to,
+                line.to,
+                Decoration.widget({ widget: imageWidget, block: true, side: 1 }),
               );
             }
             i += 1;
@@ -1049,14 +2667,15 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
           // v4.3.0 issue #57a / #433 — block math (`$$…$$` or `\[…\]`).
           // Recognise either inline `$$E=mc^2$$` / `\[E=mc^2\]` on a single
           // line OR a multi-line block opened with `$$` / `\[` and closed with
-          // `$$` / `\]`. We only collapse if the cursor is outside.
+          // `$$` / `\]`. We only collapse if the cursor is outside (or pureWysiwyg is on).
           const trimmedLine = line.text.trim();
           if (trimmedLine.startsWith('$$') || trimmedLine.startsWith('\\[')) {
             const isBracket = trimmedLine.startsWith('\\[');
             const closeDelim = isBracket ? '\\]' : '$$';
             // Single-line `$$ ... $$` or `\[ ... \]`?
             if (trimmedLine.endsWith(closeDelim) && trimmedLine.length > 4) {
-              const cursorInside = keepSource || cursorLine === i || cursorLineEnd === i;
+              const cursorInside =
+                keepSource || (!pureWysiwyg && (cursorLine === i || cursorLineEnd === i));
               if (!cursorInside) {
                 builder.add(
                   line.from,
@@ -1084,9 +2703,12 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
               endI += 1;
             }
             if (endI <= lastLine) {
-              const cursorInside = keepSource || (cursorLine >= i && cursorLine <= endI);
-              const cursorInsideEnd = cursorLineEnd >= i && cursorLineEnd <= endI;
-              if (!cursorInside && !cursorInsideEnd) {
+              const cursorInside =
+                keepSource ||
+                (!pureWysiwyg &&
+                  ((cursorLine >= i && cursorLine <= endI) ||
+                    (cursorLineEnd >= i && cursorLineEnd <= endI)));
+              if (!cursorInside) {
                 const blockFrom = doc.line(i).from;
                 const blockTo = doc.line(endI).to;
                 const source = doc.sliceString(blockFrom, blockTo);
@@ -1151,73 +2773,81 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
             }
           }
 
-          // v4.3.0 issue #57a — ```mermaid fenced block. Pre-render to SVG
+          // v4.3.0 issue #57a / #372 — ```mermaid fenced block. Pre-render to SVG
           // via the mermaid cache; the widget waits for the SVG and asks
           // CM to rebuild decorations once ready.
-          if (/^\s*```\s*mermaid\s*$/i.test(line.text)) {
+          if (/^\s*(`{3,}|~{3,})\s*mermaid\s*$/i.test(line.text)) {
             let endI = i + 1;
             while (endI <= lastLine) {
               const next = doc.line(endI);
-              if (/^\s*```\s*$/.test(next.text)) break;
+              if (/^\s*(`{3,}|~{3,})\s*$/.test(next.text)) break;
               endI += 1;
             }
             if (endI <= lastLine) {
-              const cursorInside = keepSource || (cursorLine >= i && cursorLine <= endI);
-              const cursorInsideEnd = cursorLineEnd >= i && cursorLineEnd <= endI;
-              if (!cursorInside && !cursorInsideEnd) {
-                // Body is between the opening and closing fence.
-                let body = '';
-                for (let k = i + 1; k < endI; k++) {
-                  body += (k > i + 1 ? '\n' : '') + doc.line(k).text;
-                }
-                const blockFrom = doc.line(i).from;
-                const blockTo = doc.line(endI).to;
-                // Kick off async render outside the build loop.
-                const mermaidTheme = opts.getMermaidTheme?.() ?? 'default';
-                ensureMermaidRendered(body, mermaidTheme);
+              // Body is between the opening and closing fence.
+              let body = '';
+              for (let k = i + 1; k < endI; k++) {
+                body += (k > i + 1 ? '\n' : '') + doc.line(k).text;
+              }
+              const blockFrom = doc.line(i).from;
+              const blockTo = doc.line(endI).to;
+              // #522 — no render kick-off here. This loop covers the whole
+              // document (state fields have no viewport), so calling it
+              // once per fence meant every diagram rendered on open. The
+              // widget's toDOM() starts the render for visible blocks only.
+              const mermaidTheme = opts.getMermaidTheme?.() ?? 'default';
+              const foldMap = state.field(mermaidFoldState, false);
+              const foldOverride = foldMap?.get(i);
+              // #530 / #536 — Keep Mermaid source folded when the cursor merely
+              // lands on or passes through the fence boundaries (line `i` or `endI`)
+              // so arrow-key navigation never causes the page to jump. Only expand
+              // when manually unfolded via the `+` button (`foldOverride === false`),
+              // when `keepSource` is true, or when selection is strictly on an
+              // inner body line (`i + 1 .. endI - 1`, e.g. right after `/mermaid`).
+              const cursorInsideBody =
+                !pureWysiwyg &&
+                ((cursorLine >= i + 1 && cursorLine < endI) ||
+                  (cursorLineEnd >= i + 1 && cursorLineEnd < endI));
+              const defaultCollapsed = !keepSource;
+              const collapsed = pureWysiwyg
+                ? true
+                : cursorInsideBody
+                  ? false
+                  : foldOverride !== undefined
+                    ? foldOverride
+                    : defaultCollapsed;
+              if (!pureWysiwyg) {
                 builder.add(
                   blockFrom,
+                  blockFrom,
+                  Decoration.widget({
+                    widget: new MermaidFoldToggleWidget(i, endI, collapsed),
+                    side: -1,
+                  }),
+                );
+              }
+              if (collapsed) {
+                const bodyFrom =
+                  pureWysiwyg || i + 1 > endI ? blockFrom : doc.line(i + 1).from;
+                builder.add(
+                  bodyFrom,
                   blockTo,
                   Decoration.replace({
                     widget: new MermaidWidget(body, mermaidTheme, opts.getFilePath?.()),
                     block: true,
                   }),
                 );
-              }
-              i = endI + 1;
-              continue;
-            }
-          }
-
-          // v4.10 issue #163 — ```plantuml / ```puml fence (opt-in).
-          const plantumlCfg = opts.getPlantuml?.();
-          if (
-            plantumlCfg?.enabled &&
-            plantumlCfg.server &&
-            /^\s*```\s*(plantuml|puml)\s*$/i.test(line.text)
-          ) {
-            let endI = i + 1;
-            while (endI <= lastLine) {
-              const next = doc.line(endI);
-              if (/^\s*```\s*$/.test(next.text)) break;
-              endI += 1;
-            }
-            if (endI <= lastLine) {
-              const cursorInside = keepSource || (cursorLine >= i && cursorLine <= endI);
-              const cursorInsideEnd = cursorLineEnd >= i && cursorLineEnd <= endI;
-              if (!cursorInside && !cursorInsideEnd) {
-                let body = '';
-                for (let k = i + 1; k < endI; k++) {
-                  body += (k > i + 1 ? '\n' : '') + doc.line(k).text;
-                }
-                const blockFrom = doc.line(i).from;
-                const blockTo = doc.line(endI).to;
+              } else {
+                // #372 / #530 — When expanded, keep the Mermaid code block
+                // editable and render the live Mermaid diagram directly below
+                // the closing fence.
                 builder.add(
-                  blockFrom,
                   blockTo,
-                  Decoration.replace({
-                    widget: new PlantumlWidget(body, plantumlSvgUrl(plantumlCfg.server, body)),
+                  blockTo,
+                  Decoration.widget({
+                    widget: new MermaidWidget(body, mermaidTheme, opts.getFilePath?.()),
                     block: true,
+                    side: 1,
                   }),
                 );
               }
@@ -1226,35 +2856,279 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
             }
           }
 
-          // Table block — header + separator + ≥1 body row (including inside blockquotes, #480).
+          // #363 — ```markmap / ```mm fenced mindmap block.
+          if (/^\s*(`{3,}|~{3,})\s*(markmap|mm)\s*$/i.test(line.text)) {
+            let endI = i + 1;
+            while (endI <= lastLine) {
+              const next = doc.line(endI);
+              if (/^\s*(`{3,}|~{3,})\s*$/.test(next.text)) break;
+              endI += 1;
+            }
+            if (endI <= lastLine) {
+              let body = '';
+              for (let k = i + 1; k < endI; k++) {
+                body += (k > i + 1 ? '\n' : '') + doc.line(k).text;
+              }
+              const blockFrom = doc.line(i).from;
+              const blockTo = doc.line(endI).to;
+              const foldMap = state.field(mermaidFoldState, false);
+              const foldOverride = foldMap?.get(i);
+              const cursorInsideBody =
+                !pureWysiwyg &&
+                ((cursorLine >= i + 1 && cursorLine < endI) ||
+                  (cursorLineEnd >= i + 1 && cursorLineEnd < endI));
+              const defaultCollapsed = !keepSource;
+              const collapsed = pureWysiwyg
+                ? true
+                : cursorInsideBody
+                  ? false
+                  : foldOverride !== undefined
+                    ? foldOverride
+                    : defaultCollapsed;
+              if (!pureWysiwyg) {
+                builder.add(
+                  blockFrom,
+                  blockFrom,
+                  Decoration.widget({
+                    widget: new MermaidFoldToggleWidget(i, endI, collapsed),
+                    side: -1,
+                  }),
+                );
+              }
+              if (collapsed) {
+                const bodyFrom =
+                  pureWysiwyg || i + 1 > endI ? blockFrom : doc.line(i + 1).from;
+                builder.add(
+                  bodyFrom,
+                  blockTo,
+                  Decoration.replace({
+                    widget: new MarkmapWidget(body),
+                    block: true,
+                  }),
+                );
+              } else {
+                builder.add(
+                  blockTo,
+                  blockTo,
+                  Decoration.widget({
+                    widget: new MarkmapWidget(body),
+                    block: true,
+                    side: 1,
+                  }),
+                );
+              }
+              i = endI + 1;
+              continue;
+            }
+          }
+
+          // Gitee #IK9BC3 — ```excalidraw fenced drawing block.
+          if (/^\s*(`{3,}|~{3,})\s*excalidraw\s*$/i.test(line.text)) {
+            let endI = i + 1;
+            while (endI <= lastLine) {
+              const next = doc.line(endI);
+              if (/^\s*(`{3,}|~{3,})\s*$/.test(next.text)) break;
+              endI += 1;
+            }
+            if (endI <= lastLine) {
+              let body = '';
+              for (let k = i + 1; k < endI; k++) {
+                body += (k > i + 1 ? '\n' : '') + doc.line(k).text;
+              }
+              const blockFrom = doc.line(i).from;
+              const blockTo = doc.line(endI).to;
+              const foldMap = state.field(mermaidFoldState, false);
+              const foldOverride = foldMap?.get(i);
+              const cursorInsideBody =
+                !pureWysiwyg &&
+                ((cursorLine >= i + 1 && cursorLine < endI) ||
+                  (cursorLineEnd >= i + 1 && cursorLineEnd < endI));
+              const defaultCollapsed = !keepSource;
+              const collapsed = pureWysiwyg
+                ? true
+                : cursorInsideBody
+                  ? false
+                  : foldOverride !== undefined
+                    ? foldOverride
+                    : defaultCollapsed;
+              if (!pureWysiwyg) {
+                builder.add(
+                  blockFrom,
+                  blockFrom,
+                  Decoration.widget({
+                    widget: new MermaidFoldToggleWidget(i, endI, collapsed),
+                    side: -1,
+                  }),
+                );
+              }
+              if (collapsed) {
+                const bodyFrom =
+                  pureWysiwyg || i + 1 > endI ? blockFrom : doc.line(i + 1).from;
+                builder.add(
+                  bodyFrom,
+                  blockTo,
+                  Decoration.replace({
+                    widget: new ExcalidrawWidget(body),
+                    block: true,
+                  }),
+                );
+              } else {
+                builder.add(
+                  blockTo,
+                  blockTo,
+                  Decoration.widget({
+                    widget: new ExcalidrawWidget(body),
+                    block: true,
+                    side: 1,
+                  }),
+                );
+              }
+              i = endI + 1;
+              continue;
+            }
+          }
+
+          // v4.10 issue #163 / #536 — ```plantuml / ```puml fence (opt-in).
+          const plantumlCfg = opts.getPlantuml?.();
+          if (
+            plantumlCfg?.enabled &&
+            plantumlCfg.server &&
+            /^\s*(`{3,}|~{3,})\s*(plantuml|puml)\s*$/i.test(line.text)
+          ) {
+            let endI = i + 1;
+            while (endI <= lastLine) {
+              const next = doc.line(endI);
+              if (/^\s*(`{3,}|~{3,})\s*$/.test(next.text)) break;
+              endI += 1;
+            }
+            if (endI <= lastLine) {
+              let body = '';
+              for (let k = i + 1; k < endI; k++) {
+                body += (k > i + 1 ? '\n' : '') + doc.line(k).text;
+              }
+              const blockFrom = doc.line(i).from;
+              const blockTo = doc.line(endI).to;
+              const foldMap = state.field(mermaidFoldState, false);
+              const foldOverride = foldMap?.get(i);
+              const cursorInsideBody =
+                !pureWysiwyg &&
+                ((cursorLine >= i + 1 && cursorLine < endI) ||
+                  (cursorLineEnd >= i + 1 && cursorLineEnd < endI));
+              const defaultCollapsed = !keepSource;
+              const collapsed = pureWysiwyg
+                ? true
+                : cursorInsideBody
+                  ? false
+                  : foldOverride !== undefined
+                    ? foldOverride
+                    : defaultCollapsed;
+              if (!pureWysiwyg) {
+                builder.add(
+                  blockFrom,
+                  blockFrom,
+                  Decoration.widget({
+                    widget: new MermaidFoldToggleWidget(i, endI, collapsed),
+                    side: -1,
+                  }),
+                );
+              }
+              if (collapsed) {
+                const bodyFrom =
+                  pureWysiwyg || i + 1 > endI ? blockFrom : doc.line(i + 1).from;
+                builder.add(
+                  bodyFrom,
+                  blockTo,
+                  Decoration.replace({
+                    widget: new PlantumlWidget(body, plantumlSvgUrl(plantumlCfg.server, body)),
+                    block: true,
+                  }),
+                );
+              } else {
+                builder.add(
+                  blockTo,
+                  blockTo,
+                  Decoration.widget({
+                    widget: new PlantumlWidget(body, plantumlSvgUrl(plantumlCfg.server, body)),
+                    block: true,
+                    side: 1,
+                  }),
+                );
+              }
+              i = endI + 1;
+              continue;
+            }
+          }
+
+          // Table block — header + separator + ≥0 body rows (including inside blockquotes, #480).
           const tableQuoteDepth = quoteDepth(line.text);
-          if (isPipeRow(line.text, tableQuoteDepth) && i + 1 <= lastLine) {
+          if (
+            isPipeRow(line.text, tableQuoteDepth) &&
+            !isSeparatorRow(line.text, tableQuoteDepth) &&
+            i + 1 <= lastLine
+          ) {
             const sepLine = doc.line(i + 1);
-            if (isSeparatorRow(sepLine.text, tableQuoteDepth) && i + 2 <= lastLine) {
-              // Walk forward as long as we keep seeing pipe rows at the same quote depth.
+            if (isSeparatorRow(sepLine.text, tableQuoteDepth)) {
+              // Walk forward as long as we keep seeing pipe rows at the same quote depth,
+              // stopping if a new adjacent table (header + separator row) begins immediately.
               let endI = i + 2;
               while (endI <= lastLine) {
                 const next = doc.line(endI);
                 if (!isPipeRow(next.text, tableQuoteDepth)) break;
+                if (
+                  !isSeparatorRow(next.text, tableQuoteDepth) &&
+                  endI + 1 <= lastLine &&
+                  isSeparatorRow(doc.line(endI + 1).text, tableQuoteDepth)
+                ) {
+                  break;
+                }
                 endI += 1;
               }
-              const tableEnd = endI - 1; // last pipe row
-              if (tableEnd >= i + 2) {
-                const cursorInside =
-                  keepSource ||
-                  (cursorLine >= i && cursorLine <= tableEnd
-                    ? true
-                    : cursorLineEnd >= i && cursorLineEnd <= tableEnd);
-                if (!cursorInside) {
-                  const blockFrom = doc.line(i).from;
-                  const blockTo = doc.line(tableEnd).to;
-                  const source = doc.sliceString(blockFrom, blockTo);
+              const tableEnd = endI - 1; // last pipe row (or separator row for header-only tables)
+              if (tableEnd >= i + 1) {
+                const blockFrom = doc.line(i).from;
+                const blockTo = doc.line(tableEnd).to;
+                const source = doc.sliceString(blockFrom, blockTo);
+                // #500 / #605 — Standard and list-indented GFM tables stay rendered in
+                // Live Edit mode so cells are edited in place like Excel (Nomo,
+                // NoteGen, VNote, Typora). In Pure WYSIWYG mode (`pureWysiwyg`),
+                // tables stay rendered at all times without the `</> 源码` button.
+                const canInlineEdit = tableQuoteDepth === 0 && parseTable(source) !== null;
+                const tableFoldMap = state.field(tableFoldState, false);
+                const tableFoldOverride = tableFoldMap?.get(i);
+                const cursorInsideTable =
+                  (cursorLine >= i && cursorLine <= tableEnd) ||
+                  (cursorLineEnd >= i && cursorLineEnd <= tableEnd);
+                const defaultTableCollapsed =
+                  !keepSource && (pureWysiwyg || canInlineEdit || !cursorInsideTable);
+                const tableCollapsed = pureWysiwyg
+                  ? true
+                  : tableFoldOverride !== undefined
+                    ? tableFoldOverride
+                    : defaultTableCollapsed;
+                if (tableCollapsed) {
                   builder.add(
                     blockFrom,
                     blockTo,
                     Decoration.replace({
-                      widget: new TableWidget(source, opts.getImageRoot?.() ?? null, opts.getFilePath?.()),
+                      widget: new TableWidget(
+                        source,
+                        opts.getImageRoot?.() ?? null,
+                        opts.getFilePath?.(),
+                        i,
+                        blockFrom,
+                        blockTo,
+                        pureWysiwyg,
+                      ),
                       block: true,
+                    }),
+                  );
+                } else {
+                  builder.add(
+                    blockFrom,
+                    blockFrom,
+                    Decoration.widget({
+                      widget: new TableFoldToggleWidget(i, tableEnd, false),
+                      side: -1,
                     }),
                   );
                 }
@@ -1264,26 +3138,95 @@ function buildBlockDecorations(state: EditorState, opts: BlockOptions): Decorati
             }
           }
 
-          // v4.5.5 — inline math `$…$` on an otherwise-plain line. Render each
-          // span while the caret is off this line (same reveal model as the
-          // block widgets above: move the caret onto the line to edit source).
-          // Cheap pre-check: only the (rare) lines that actually contain a `$`
-          // pay for the inline-math regex + code-span mask. Plain prose lines
-          // — the overwhelming majority in a large doc — short-circuit here, so
-          // this whole-doc pass doesn't get measurably slower (#5 perf).
-          const inlineCursorHere = keepSource || (i >= cursorLine && i <= cursorLineEnd);
-          if (
-            !inlineCursorHere &&
-            (line.text.indexOf('$') !== -1 ||
+          // #506 — When `keepSource` is enabled and this non-standalone line
+          // (e.g. a list item `- ![alt](url)` or blockquote `> ![alt](url)`)
+          // carries a Markdown image, render it below the source line.
+          if (keepSource && lineImages.length > 0) {
+            const firstImg = lineImages[0];
+            const root = opts.getImageRoot?.() ?? null;
+            const filePath = opts.getFilePath?.();
+            const src = resolveImageSrc(firstImg.src, root, filePath);
+            const localPath = resolveImagePath(firstImg.src, root, filePath);
+            const needsFallback =
+              isLocalSvgPath(localPath) ||
+              localPath.startsWith('saf:') ||
+              /^\/(?:storage\/emulated\/0|sdcard)\//i.test(localPath);
+            builder.add(
+              line.to,
+              line.to,
+              Decoration.widget({
+                widget: new ImageWidget(
+                  src,
+                  firstImg.alt,
+                  needsFallback ? localPath : null,
+                  i,
+                  false,
+                  firstImg.width ?? null,
+                  firstImg.height ?? null,
+                ),
+                block: true,
+                side: 1,
+              }),
+            );
+            i += 1;
+            continue;
+          }
+
+          // v4.5.5 / #506 / #605 — inline math (`$…$`) and inline / list-item /
+          // blockquote images (`- ![alt](url)`, `> ![alt](url)`, inline `![alt](url)`)
+          // on an otherwise-plain line.
+          const inlineCursorHere =
+            keepSource || (!pureWysiwyg && i >= cursorLine && i <= cursorLineEnd);
+          if (!inlineCursorHere) {
+            const hasMathCandidate =
+              line.text.indexOf('$') !== -1 ||
               line.text.indexOf('\\(') !== -1 ||
-              line.text.indexOf('\\[') !== -1)
-          ) {
-            for (const span of inlineMathSpans(line.text)) {
-              builder.add(
-                line.from + span.start,
-                line.from + span.end,
-                Decoration.replace({ widget: new InlineMathWidget(span.tex) }),
-              );
+              line.text.indexOf('\\[') !== -1;
+            if (lineImages.length > 0 || hasMathCandidate) {
+              const inlineSpans: Array<{ start: number; end: number; deco: Decoration }> = [];
+              const root = lineImages.length > 0 ? (opts.getImageRoot?.() ?? null) : null;
+              const filePath = lineImages.length > 0 ? opts.getFilePath?.() : undefined;
+              for (const imgSpan of lineImages) {
+                const src = resolveImageSrc(imgSpan.src, root, filePath);
+                const localPath = resolveImagePath(imgSpan.src, root, filePath);
+                const needsFallback =
+                  isLocalSvgPath(localPath) ||
+                  localPath.startsWith('saf:') ||
+                  /^\/(?:storage\/emulated\/0|sdcard)\//i.test(localPath);
+                inlineSpans.push({
+                  start: imgSpan.start,
+                  end: imgSpan.end,
+                  deco: Decoration.replace({
+                    widget: new ImageWidget(
+                      src,
+                      imgSpan.alt,
+                      needsFallback ? localPath : null,
+                      i,
+                      true,
+                      imgSpan.width ?? null,
+                      imgSpan.height ?? null,
+                    ),
+                  }),
+                });
+              }
+              if (hasMathCandidate) {
+                for (const mathSpan of inlineMathSpans(line.text)) {
+                  const overlapsImage = lineImages.some(
+                    (im) => mathSpan.start < im.end && mathSpan.end > im.start,
+                  );
+                  if (!overlapsImage) {
+                    inlineSpans.push({
+                      start: mathSpan.start,
+                      end: mathSpan.end,
+                      deco: Decoration.replace({ widget: new InlineMathWidget(mathSpan.tex) }),
+                    });
+                  }
+                }
+              }
+              inlineSpans.sort((a, b) => a.start - b.start);
+              for (const item of inlineSpans) {
+                builder.add(line.from + item.start, line.from + item.end, item.deco);
+              }
             }
           }
 
@@ -1310,13 +3253,51 @@ export function liveBlocksExtension(opts: BlockOptions = {}) {
       if (frozen) return frozen;
       if (isImeSafeFlushTransaction(tr)) return buildBlockDecorations(tr.state, opts);
       if (tr.docChanged) return buildBlockDecorations(tr.state, opts);
-      if (tr.effects.some((e) => e.is(relayoutEffect))) {
-        return buildBlockDecorations(tr.state, opts);
-      }
       if (isDragEndTransaction(tr)) return buildBlockDecorations(tr.state, opts);
-      if (tr.selection && !isDragging(tr.state)) {
+      // Freeze block widget replacements completely during pointer drag so
+      // incremental Lezer parsing (~700 lines into a large file) or async
+      // Mermaid relayouts cannot mount/unmount widgets mid-drag and shift the
+      // document height under the pointer. `isDragEndTransaction` above flushes
+      // the final state as soon as the pointer is released.
+      if (isDragging(tr.state)) {
+        return deco.map(tr.changes);
+      }
+      if (
+        tr.effects.some(
+          (e) =>
+            e.is(relayoutEffect) ||
+            e.is(toggleMermaidFoldEffect) ||
+            e.is(toggleTableFoldEffect) ||
+            e.is(resetBlockFoldOverridesEffect),
+        )
+      ) {
         return buildBlockDecorations(tr.state, opts);
       }
+      if (tr.selection) {
+        // `buildBlockDecorations` only depends on the 1-indexed start/end line
+        // numbers of `selection.main` (and ignores selection altogether when
+        // `keepSource` is active). Skipping intra-line selection updates avoids
+        // rebuilding all block decorations on every character typed in Find
+        // (`a` -> `ab` -> `abc`) or intra-line `Enter` match jumps.
+        if (opts.keepSource?.() === true || opts.pureWysiwyg?.() === true) {
+          return deco.map(tr.changes);
+        }
+        const prevSel = tr.startState.selection.main;
+        const nextSel = tr.state.selection.main;
+        const prevFromLine = tr.startState.doc.lineAt(prevSel.from).number;
+        const prevToLine = tr.startState.doc.lineAt(prevSel.to).number;
+        const nextFromLine = tr.state.doc.lineAt(nextSel.from).number;
+        const nextToLine = tr.state.doc.lineAt(nextSel.to).number;
+        if (prevFromLine !== nextFromLine || prevToLine !== nextToLine) {
+          return buildBlockDecorations(tr.state, opts);
+        }
+      }
+      // Note: Do NOT rebuild full-document block decorations on background
+      // incremental Lezer `syntaxTree` parse slices (`!tr.docChanged`).
+      // `buildBlockDecorations` already performs a complete synchronous
+      // line-level fence scan across all lines on `create` and `docChanged`;
+      // rebuilding on every background parse chunk froze Find scrolling on
+      // large `.md` files.
       return deco.map(tr.changes);
     },
     provide: (f) => EditorView.decorations.from(f),
@@ -1361,13 +3342,39 @@ export function liveBlocksExtension(opts: BlockOptions = {}) {
       // tldraw boards never reveal their source (no cursor-inside gating in
       // buildBlockDecorations), so parking the caret inside one just hides
       // it — let the default motion hop over the fence instead.
-      if ((d.spec as { widget?: unknown }).widget instanceof TldrawWidget) return;
+      const widget = (d.spec as { widget?: unknown }).widget;
+      if (widget instanceof TldrawWidget) return;
       const a = doc.lineAt(from).number;
       const b = doc.lineAt(to).number;
       const jumpedOver = forward
         ? fromLine.number < a && toLineNo > b
         : fromLine.number > b && toLineNo < a;
       if (!jumpedOver) return;
+      if (widget instanceof TableWidget) {
+        const parsed = parseTable(doc.sliceString(from, to));
+        const targetRow = forward
+          ? HEADER_ROW
+          : parsed && parsed.rows.length > 0
+            ? parsed.rows.length - 1
+            : HEADER_ROW;
+        const wrapEl = view.dom.querySelector<HTMLElement>(
+          `.cm-live-block--table[data-table-from="${from}"]`,
+        );
+        const handle = wrapEl ? tableEditorHandles.get(wrapEl) : null;
+        if (handle && handle.focusCell(targetRow, 0, 'end')) {
+          handled = true;
+          return false;
+        }
+        requestTableCellFocus(from, targetRow, 0);
+        const edge = doc.line(forward ? a : b);
+        view.dispatch({
+          selection: { anchor: edge.from },
+          scrollIntoView: true,
+          userEvent: 'select',
+        });
+        handled = true;
+        return false;
+      }
       const edge = doc.line(forward ? a : b);
       const col = Math.min(sel.head - fromLine.from, edge.length);
       view.dispatch({
@@ -1413,7 +3420,8 @@ export function liveBlocksExtension(opts: BlockOptions = {}) {
     let retarget: number | null = null;
     deco.between(0, doc.length, (from, to, d) => {
       if (!(d.spec as { block?: boolean }).block) return;
-      if ((d.spec as { widget?: unknown }).widget instanceof TldrawWidget) return;
+      const widget = (d.spec as { widget?: unknown }).widget;
+      if (widget instanceof TldrawWidget || widget instanceof TableWidget) return;
       const a = doc.lineAt(from).number;
       const b = doc.lineAt(to).number;
       const forwardHop = fromNo === a - 1 && toNo === b + 1;
@@ -1428,7 +3436,50 @@ export function liveBlocksExtension(opts: BlockOptions = {}) {
     return [tr, { selection: EditorSelection.cursor(retarget), scrollIntoView: true, sequential: true }];
   });
 
-  return [field, relayout, blockArrowKeymap, vimBlockHop];
+  const tableSearchHighlighter = ViewPlugin.fromClass(
+    class {
+      constructor(view: EditorView) {
+        this.sync(view, false);
+      }
+      update(update: ViewUpdate) {
+        const queryChanged =
+          update.transactions.some((tr) =>
+            tr.effects.some((e) => e.is(setSearchQuery) || e.is(setExternalSearchQueryEffect)),
+          ) || searchPanelOpen(update.startState) !== searchPanelOpen(update.state);
+        if (queryChanged || update.docChanged || update.selectionSet || update.viewportChanged) {
+          this.sync(update.view, queryChanged || update.selectionSet);
+        }
+      }
+      sync(view: EditorView, scrollCurrent: boolean) {
+        const tables = view.dom.querySelectorAll<HTMLElement>('.cm-live-block--table');
+        if (tables.length === 0) return;
+        let currentMark: HTMLElement | null = null;
+        for (const wrap of Array.from(tables)) {
+          const hit = syncTableWidgetSearchMarks(wrap, view.state);
+          if (hit) currentMark = hit;
+        }
+        if (scrollCurrent && currentMark) {
+          requestAnimationFrame(() => {
+            if (currentMark?.isConnected) {
+              try {
+                currentMark.scrollIntoView({ block: 'center', behavior: 'auto' });
+              } catch {}
+            }
+          });
+        }
+      }
+    },
+  );
+
+  return [
+    mermaidFoldState,
+    tableFoldState,
+    field,
+    relayout,
+    tableSearchHighlighter,
+    blockArrowKeymap,
+    vimBlockHop,
+  ];
 }
 
 /** Suggested CSS — pulled out so the editor's theme owns the rule set. */
@@ -1450,6 +3501,12 @@ export const liveBlocksTheme = EditorView.theme({
     borderRadius: '6px',
     display: 'block',
   },
+  '.cm-live-block--image-inline': {
+    display: 'inline-block',
+    verticalAlign: 'middle',
+    maxWidth: '100%',
+    padding: '0.25em 0',
+  },
   '.cm-live-block--html': {
     maxWidth: '100%',
     overflowX: 'auto',
@@ -1460,6 +3517,7 @@ export const liveBlocksTheme = EditorView.theme({
     borderRadius: '6px',
   },
   '.cm-live-block--html table': {
+    width: '100%',
     borderCollapse: 'collapse',
   },
   '.cm-live-block--html th, .cm-live-block--html td': {
@@ -1470,6 +3528,33 @@ export const liveBlocksTheme = EditorView.theme({
     color: 'var(--text-faint)',
     fontStyle: 'italic',
   },
+  '.cm-live-block--table': {
+    position: 'relative',
+  },
+  '.cm-table-source-btn': {
+    position: 'absolute',
+    top: '4px',
+    right: '4px',
+    padding: '2px 6px',
+    border: '1px solid var(--border)',
+    borderRadius: '4px',
+    background: 'color-mix(in srgb, var(--bg-elev) 90%, transparent)',
+    color: 'var(--text-muted)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '11px',
+    lineHeight: '1.3',
+    cursor: 'pointer',
+    opacity: '0',
+    transition: 'opacity 0.15s, color 0.15s, border-color 0.15s',
+    zIndex: '2',
+  },
+  '.cm-live-block--table:hover .cm-table-source-btn, .cm-table-source-btn:focus-visible': {
+    opacity: '1',
+  },
+  '.cm-table-source-btn:hover': {
+    color: 'var(--accent)',
+    borderColor: 'var(--accent)',
+  },
   '.cm-live-block--table blockquote': {
     margin: '0.2em 0',
     paddingLeft: '1em',
@@ -1477,6 +3562,7 @@ export const liveBlocksTheme = EditorView.theme({
     color: 'var(--text-muted)',
   },
   '.cm-live-block--table table': {
+    width: '100%',
     borderCollapse: 'collapse',
     margin: '0.4em 0',
     fontSize: '0.95em',
@@ -1487,10 +3573,27 @@ export const liveBlocksTheme = EditorView.theme({
     border: '1px solid var(--border)',
     padding: '6px 12px',
     textAlign: 'left',
+    minWidth: '48px',
+  },
+  '.cm-live-block--html th::after, .cm-live-block--html td::after, .cm-live-block--table th::after, .cm-live-block--table td::after': {
+    content: '"\\00a0"',
+    display: 'inline-block',
+    width: '0',
+    overflow: 'hidden',
+    visibility: 'hidden',
   },
   '.cm-live-block--table thead th': {
     background: 'var(--bg-elev)',
     fontWeight: '600',
+  },
+  '.cm-live-block--table .cm-live-table__cell--editing': {
+    outline: '2px solid var(--accent)',
+    outlineOffset: '-2px',
+    background: 'var(--bg)',
+    whiteSpace: 'pre-wrap',
+    cursor: 'text',
+    userSelect: 'text',
+    WebkitUserSelect: 'text',
   },
   // v4.3.0 issue #57a — paddings fold in the 0.6em that used to come from the
   // shared margin (see #155 note above) so the visual rhythm is unchanged.
@@ -1499,13 +3602,51 @@ export const liveBlocksTheme = EditorView.theme({
     overflowX: 'auto',
     textAlign: 'center',
   },
+  // #573 — Inline \dfrac / \frac inside consecutive list items or lines
+  // overflows a `display: inline` (line-height: 1.2) span and collides
+  // vertically. Promoting fraction-bearing inline math to `inline-block`
+  // with vertical margin makes the line box expand to fit the fraction.
+  '.cm-live-inline-math:has(.mfrac)': {
+    display: 'inline-block',
+    margin: '0.2em 0',
+  },
+  // #530 — Left-align Mermaid diagrams like images (instead of centered), and
+  // style the `+` / `−` fold toggle button on the opening ` ```mermaid ` line.
   '.cm-live-block--mermaid': {
-    padding: '1.2em 0',
-    textAlign: 'center',
+    padding: '0.8em 0 1.2em 0',
+    textAlign: 'left',
   },
   '.cm-live-block--mermaid svg': {
     maxWidth: '100%',
     height: 'auto',
+    display: 'block',
+    margin: '0',
+  },
+  '.cm-mermaid-fold-btn': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '16px',
+    height: '16px',
+    marginRight: '6px',
+    padding: '0',
+    border: '1px solid var(--border)',
+    borderRadius: '3px',
+    background: 'color-mix(in srgb, var(--bg-elev) 85%, transparent)',
+    color: 'var(--text-muted)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '12px',
+    fontWeight: '600',
+    lineHeight: '1',
+    cursor: 'pointer',
+    userSelect: 'none',
+    verticalAlign: 'middle',
+    transition: 'color 0.15s, border-color 0.15s, background 0.15s',
+  },
+  '.cm-mermaid-fold-btn:hover': {
+    color: 'var(--accent)',
+    borderColor: 'var(--accent)',
+    background: 'color-mix(in srgb, var(--accent-soft) 50%, var(--bg-elev))',
   },
   // v4.10 #163
   '.cm-live-block--plantuml': {

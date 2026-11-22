@@ -13,6 +13,8 @@ import { readText as readClipboardText } from '@tauri-apps/plugin-clipboard-mana
 import { setMarkdownHardBreaks, setMarkdownAutoNumberHeadings, setMarkdownSmartQuotes } from './lib/markdown';
 import { openNewWindow } from './lib/new-window';
 import { ensureSpellDict } from './lib/spell-suggest';
+import { buildInsertTableSnippet } from './lib/table-cell-edit';
+import { getActiveTableCellSession } from './lib/cm-live-blocks';
 import Toolbar from './components/Toolbar.vue';
 import TelemetryBanner from './components/TelemetryBanner.vue';
 import TileRoot from './components/TileRoot.vue';
@@ -50,13 +52,16 @@ import { usePhoneStore } from './stores/phone';
 // v4.6 F5 — Saved filtered views (sidebar panel + filtered list + editor).
 import ViewNoteList from './components/ViewNoteList.vue';
 import ViewEditorDialog from './components/ViewEditorDialog.vue';
+import TemplatePickerDialog from './components/TemplatePickerDialog.vue';
 import { VIEW_OPEN_EVENT, VIEW_CLOSE_EVENT } from './composables/useSavedViews';
 import GlobalSearch from './components/GlobalSearch.vue';
 import ReadingView from './components/ReadingView.vue';
 import UnsavedDialog from './components/UnsavedDialog.vue';
 import FileChangedDialog from './components/FileChangedDialog.vue';
 import Toast from './components/Toast.vue';
+import WikiLinkHoverPreview from './components/WikiLinkHoverPreview.vue';
 import KeyboardBar from './components/KeyboardBar.vue';
+import FormatBar from './components/FormatBar.vue';
 import { forceKeyboardBarPreview } from './lib/platform';
 import {
   resizeOriginHeight,
@@ -247,6 +252,33 @@ function onImageUrlConfirm(url: string, alt: string) {
     }),
   );
 }
+// #500 — "Insert Table" dialog (with 8x8 hover grid + Rows × Columns inputs).
+const insertTableDialogOpen = ref(false);
+function onOpenInsertTableDialog() {
+  insertTableDialogOpen.value = true;
+}
+// #535 & #359 & #572 — "Custom / Batch Export" dialog
+const customExportDialogOpen = ref(false);
+const customExportPreset = ref<{
+  scope?: 'current' | 'folder';
+  format?: 'pdf' | 'html' | 'docx' | 'epub' | 'odt' | 'latex' | 'rtf' | 'png' | 'textpack';
+} | null>(null);
+function onOpenCustomExportDialog(e?: Event) {
+  const detail = (e as CustomEvent | undefined)?.detail;
+  customExportPreset.value = detail && typeof detail === 'object' ? detail : null;
+  customExportDialogOpen.value = true;
+}
+function onInsertTableConfirm(rows: number, cols: number, align: 'left' | 'center' | 'right' | null = null) {
+  insertTableDialogOpen.value = false;
+  window.dispatchEvent(
+    new CustomEvent('solomd:insert-markdown', {
+      detail: {
+        snippet: buildInsertTableSnippet(rows, cols, align),
+        paneId: tiles.focusedPaneId,
+      },
+    }),
+  );
+}
 // When a caller wants the Settings panel to land on a specific category
 // (e.g. the AI button → `integrations`), set this before opening; the
 // SettingsPanel watches it and switches activeCategory accordingly.
@@ -423,6 +455,10 @@ const { component: AgentSetupWizardC, open: wizardLazyOpen } = useLazyComponent(
   () => import('./components/AgentSetupWizard.vue'), () => wizardOpen.value);
 const { component: ImageUrlDialogC, open: imageUrlLazyOpen } = useLazyComponent(
   () => import('./components/ImageUrlDialog.vue'), () => imageUrlDialogOpen.value);
+const { component: InsertTableDialogC, open: insertTableLazyOpen } = useLazyComponent(
+  () => import('./components/InsertTableDialog.vue'), () => insertTableDialogOpen.value);
+const { component: CustomExportDialogC, open: customExportLazyOpen } = useLazyComponent(
+  () => import('./components/CustomExportDialog.vue'), () => customExportDialogOpen.value);
 const { component: AndroidFolderPickerC, open: androidPickerLazyOpen } = useLazyComponent(
   () => import('./components/AndroidFolderPicker.vue'), () => androidPickerOpen.value);
 
@@ -804,7 +840,15 @@ watchEffect(() => {
 watchEffect(() => {
   document.documentElement.style.setProperty(
     '--content-font-size',
-    `${settings.previewFontSize || 15}px`,
+    `${settings.previewFontSize || settings.fontSize || 16}px`,
+  );
+  document.documentElement.style.setProperty(
+    '--editor-line-height',
+    String(settings.lineHeight || 1.8),
+  );
+  document.documentElement.style.setProperty(
+    '--paragraph-spacing',
+    `${settings.paragraphSpacing ?? 0.9}em`,
   );
 });
 
@@ -888,8 +932,58 @@ watchEffect(() => {
   document.documentElement.setAttribute('data-theme', dataThemeFor(settings.theme, !!settings.customCssPath));
   // 5.0 tokens: the exact default palette stays out of a marketplace theme's way.
   document.documentElement.toggleAttribute('data-custom-theme', !!settings.customCssPath);
+  const dark = themeFamily(settings.theme) === 'dark';
+  const customBg = (dark ? settings.customBgDark : settings.customBgLight)?.trim() || '';
+  const customText = (dark ? settings.customTextDark : settings.customTextLight)?.trim() || '';
+  const customHighlight = (dark ? settings.customHighlightDark : settings.customHighlightLight)?.trim() || '';
+  const customActiveLine = (dark ? settings.customActiveLineDark : settings.customActiveLineLight)?.trim() || '';
+  const customCodeBg = (dark ? settings.customCodeBgDark : settings.customCodeBgLight)?.trim() || '';
+  const customQuoteBg = (dark ? settings.customQuoteBgDark : settings.customQuoteBgLight)?.trim() || '';
+  const rootStyle = document.documentElement.style;
+  if (customBg && !settings.customCssPath) {
+    rootStyle.setProperty('--bg', customBg);
+    rootStyle.setProperty('--custom-bg', customBg);
+    rootStyle.setProperty('--bg-elev', `color-mix(in srgb, ${customBg} 94%, ${dark ? '#ffffff' : '#000000'})`);
+    rootStyle.setProperty('--bg-sidebar', `color-mix(in srgb, ${customBg} 96%, #000000)`);
+  } else {
+    rootStyle.removeProperty('--bg');
+    rootStyle.removeProperty('--custom-bg');
+    rootStyle.removeProperty('--bg-elev');
+    rootStyle.removeProperty('--bg-sidebar');
+  }
+  if (customText && !settings.customCssPath) {
+    rootStyle.setProperty('--text', customText);
+    rootStyle.setProperty('--custom-text', customText);
+  } else {
+    rootStyle.removeProperty('--text');
+    rootStyle.removeProperty('--custom-text');
+  }
+  if (customHighlight) {
+    rootStyle.setProperty('--custom-highlight', customHighlight);
+    rootStyle.setProperty('--mark-bg', `color-mix(in srgb, ${customHighlight} ${dark ? '52%' : '62%'}, transparent)`);
+  } else {
+    rootStyle.removeProperty('--custom-highlight');
+    rootStyle.removeProperty('--mark-bg');
+  }
+  if (customActiveLine) {
+    rootStyle.setProperty('--custom-active-line', customActiveLine);
+    rootStyle.setProperty('--active-line-bg', `color-mix(in srgb, ${customActiveLine} ${dark ? '30%' : '38%'}, transparent)`);
+  } else {
+    rootStyle.removeProperty('--custom-active-line');
+    rootStyle.removeProperty('--active-line-bg');
+  }
+  if (customCodeBg && !settings.customCssPath) {
+    rootStyle.setProperty('--md-code-bg', customCodeBg);
+  } else {
+    rootStyle.removeProperty('--md-code-bg');
+  }
+  if (customQuoteBg && !settings.customCssPath) {
+    rootStyle.setProperty('--md-quote-bg', customQuoteBg);
+  } else {
+    rootStyle.removeProperty('--md-quote-bg');
+  }
   if (isIOS()) {
-    invoke('ios_set_appearance', { dark: themeFamily(settings.theme) === 'dark' }).catch(() => {});
+    invoke('ios_set_appearance', { dark }).catch(() => {});
   }
   const overriddenBy = settings.customCssPath;
   if (!themeAppliedOnce) {
@@ -902,6 +996,20 @@ watchEffect(() => {
     useToastsStore().warning(t('settings.customThemeOverrides', { name }), 6000);
   });
 });
+
+// #604 — Keep desktop window floating above other windows when Always on Top is toggled.
+watch(
+  () => settings.alwaysOnTop,
+  (pinned) => {
+    if (isMobile()) return;
+    try {
+      void getCurrentWindow().setAlwaysOnTop(pinned).catch(() => {});
+    } catch {
+      /* non-Tauri test/browser harness */
+    }
+  },
+  { immediate: true },
+);
 
 // v2.0: keep the Rust workspace index in sync with the active folder.
 watchEffect(() => {
@@ -925,6 +1033,15 @@ watchEffect(() => {
   properties.setFolder(workspace.currentFolder).catch(() => {});
 });
 
+// #173: auto-discover `<workspace>/.solomd/plugins/*.json` when opening a vault.
+watchEffect(() => {
+  const folder = workspace.currentFolder;
+  if (!folder || folder.startsWith('saf:') || folder.startsWith('content://')) return;
+  void import('./lib/user-plugins').then(({ syncWorkspacePlugins }) => {
+    syncWorkspacePlugins(folder).catch(() => {});
+  });
+});
+
 // v2.4: push the active folder into the capture endpoint's view of the
 // world, so the localhost HTTP server knows where to write captured notes
 // (or returns 503 when no folder is open).
@@ -942,6 +1059,7 @@ watchEffect(() => {
 // every change. Passing null unregisters, which is what "off" has to mean for
 // a chord that would otherwise stay stolen from every other application.
 watchEffect(() => {
+  if (isMobile()) return;
   const accel = settings.quickCaptureEnabled ? settings.quickCaptureShortcut : null;
   invoke('quick_capture_set_shortcut', { accelerator: accel })
     .then(() => {
@@ -1082,7 +1200,6 @@ const updateCheck = useUpdateCheck();
 const INSERT_SNIPPETS: Record<string, string> = {
   'insert.mathBlock': '\n$$\n$|$\n$$\n',
   'insert.mathInline': '$$|$$',
-  'insert.table': '\n| $|$ | Header |\n| --- | --- |\n| cell | cell |\n',
   'insert.mermaid': MERMAID_INSERT_SNIPPET,
   'insert.hr': '\n---\n',
 };
@@ -1147,6 +1264,10 @@ function dispatchMenuAction(id: string) {
   }
   if (id.startsWith('theme.set:')) {
     settings.setTheme(id.slice('theme.set:'.length) as Theme);
+    return;
+  }
+  if (id === 'insert.table') {
+    insertTableDialogOpen.value = true;
     return;
   }
   if (INSERT_SNIPPETS[id]) {
@@ -1217,10 +1338,13 @@ function dispatchMenuAction(id: string) {
     case 'editor.aiRewrite':
       window.dispatchEvent(new CustomEvent('solomd:toolbar-ai-rewrite'));
       return;
-    // Same routing as the Ctrl+F shortcut: preview has its own find, every
-    // editor mode opens the editor's find/replace bar.
+    // Same routing as the Ctrl+F shortcut: preview / reading has its own find,
+    // every editor mode opens the editor's find/replace bar.
     case 'edit.find':
-      if (settings.viewMode === 'preview' && tabs.activeTab?.language === 'markdown') {
+      if (
+        (settings.viewMode === 'preview' || settings.viewMode === 'reading') &&
+        tabs.activeTab?.language === 'markdown'
+      ) {
         window.dispatchEvent(new CustomEvent('solomd:preview-search', { detail: { paneId: tiles.focusedPaneId } }));
       } else {
         window.dispatchEvent(new CustomEvent('solomd:editor-find', { detail: { paneId: tiles.focusedPaneId } }));
@@ -1254,9 +1378,21 @@ function dispatchMenuAction(id: string) {
         })
         .catch(() => {});
       return;
-    case 'edit.selectAll':
+    case 'edit.selectAll': {
+      const cellSession = getActiveTableCellSession();
+      if (cellSession?.cellEl?.isConnected) {
+        const sel = window.getSelection();
+        if (sel) {
+          const range = document.createRange();
+          range.selectNodeContents(cellSession.cellEl);
+          sel.removeAllRanges();
+          sel.addRange(range);
+          return;
+        }
+      }
       document.execCommand('selectAll');
       return;
+    }
   }
   // A bindable action: exactly what its shortcut does. `false` means it
   // declined (e.g. formatting while a settings field has focus) — that is an
@@ -1420,31 +1556,55 @@ onMounted(async () => {
   // CSS vars (the .app padding uses max(env, var)). Physical px → CSS px via
   // devicePixelRatio. Runs only on Android; failures leave the vars unset (0).
   if (isAndroid()) {
-    try {
-      const insets = await invoke<{ top: number; bottom: number }>('android_system_insets');
-      const dpr = window.devicePixelRatio || 1;
-      const root = document.documentElement;
-      root.style.setProperty('--android-safe-top', `${Math.round((insets.top || 0) / dpr)}px`);
-      root.style.setProperty('--android-safe-bottom', `${Math.round((insets.bottom || 0) / dpr)}px`);
-    } catch (e) {
-      console.warn('android_system_insets failed', e);
-    }
+    const refreshAndroidInsets = async () => {
+      try {
+        const insets = await invoke<{ top: number; bottom: number }>('android_system_insets');
+        const dpr = window.devicePixelRatio || 1;
+        const root = document.documentElement;
+        const topPx = settings.mobileHideStatusBar ? 0 : Math.round((insets.top || 0) / dpr);
+        // #479 — Remove the redundant bottom blank row in both portrait and
+        // landscape on Android/HarmonyOS devices; also honor mobileHideStatusBar.
+        root.style.setProperty('--android-safe-top', `${topPx}px`);
+        root.style.setProperty('--android-safe-bottom', '0px');
+      } catch (e) {
+        console.warn('android_system_insets failed', e);
+      }
+    };
+    void refreshAndroidInsets();
+    watch(() => settings.mobileHideStatusBar, () => void refreshAndroidInsets());
+    window.addEventListener('resize', () => void refreshAndroidInsets());
+    window.addEventListener('orientationchange', () => {
+      setTimeout(() => void refreshAndroidInsets(), 150);
+    });
 
     // #148 — restore a previously-opened SAF vault. The tree URI + name are
     // persisted in the workspace store; the OS-level grant is separately
     // persisted (takePersistableUriPermission). If that grant is gone (revoked,
     // or a fresh install), drop the stale vault so the user gets a clean "Open
     // Folder" prompt instead of a tree that errors on every read.
-    if (workspace.safTreeUri) {
-      try {
-        const { safPersistedTrees } = await import('./lib/saf-fs');
-        const held = await safPersistedTrees();
-        if (!held.includes(workspace.safTreeUri)) {
-          workspace.setFolder(null);
+    if (workspace.safTreeUri || (workspace.currentFolder && workspace.currentFolder.startsWith('saf:'))) {
+      const checkUri = workspace.safTreeUri;
+      const curFolder = workspace.currentFolder;
+      void (async () => {
+        try {
+          const { safPersistedTrees, safRecoverVaultForPath } = await import('./lib/saf-fs');
+          if (checkUri) {
+            const held = await safPersistedTrees();
+            if (!held.includes(checkUri)) {
+              workspace.setFolder(null);
+            }
+          } else if (curFolder && curFolder.startsWith('saf:')) {
+            const recovered = await safRecoverVaultForPath(curFolder);
+            if (recovered) {
+              workspace.setSafVault(recovered.treeUri, curFolder, recovered.name);
+            } else {
+              workspace.setFolder(null);
+            }
+          }
+        } catch (e) {
+          console.warn('SAF vault restore check failed', e);
         }
-      } catch (e) {
-        console.warn('SAF vault restore check failed', e);
-      }
+      })();
     }
 
     // #148 — resolve a SAF folder pick after the system picker returns. The
@@ -1452,31 +1612,47 @@ onMounted(async () => {
     // (onActivityResult → native AtomicReference) can't be awaited inline; we
     // drain it on resume. The 'solomd:saf-picking' flag (set in openFolder)
     // scopes this to an in-flight pick.
-    const resolveSafPick = async () => {
+    let resolvingSafPick = false;
+    const resolveSafPick = async (maxAttempts = 16) => {
+      if (resolvingSafPick) return;
       if (localStorage.getItem('solomd:saf-picking') !== '1') return;
-      const { safResolvePicked } = await import('./lib/saf-fs');
-      for (let i = 0; i < 12; i++) {
-        let r: Awaited<ReturnType<typeof safResolvePicked>>;
-        try {
-          r = await safResolvePicked();
-        } catch {
-          return;
+      resolvingSafPick = true;
+      try {
+        const { safResolvePicked } = await import('./lib/saf-fs');
+        for (let i = 0; i < maxAttempts; i++) {
+          let r: Awaited<ReturnType<typeof safResolvePicked>>;
+          try {
+            r = await safResolvePicked();
+          } catch {
+            return;
+          }
+          if (r === 'pending') {
+            await new Promise((res) => setTimeout(res, 300));
+            continue;
+          }
+          localStorage.removeItem('solomd:saf-picking');
+          if (r) {
+            workspace.setSafVault(r.treeUri, `saf:${r.rootDocId}`, r.name);
+            if (!settings.showFileTree) settings.toggleFileTree();
+          }
+          return; // resolved (folder or cancel)
         }
-        if (r === 'pending') {
-          await new Promise((res) => setTimeout(res, 300));
-          continue;
-        }
-        localStorage.removeItem('solomd:saf-picking');
-        if (r) {
-          workspace.setSafVault(r.treeUri, `saf:${r.rootDocId}`, r.name);
-          if (!settings.showFileTree) settings.toggleFileTree();
-        }
-        return; // resolved (folder or cancel)
+      } finally {
+        resolvingSafPick = false;
       }
-      // still pending after retries — leave the flag so the next resume retries
+      // still pending after retries — leave the flag so the next resume/ready event retries
     };
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') void resolveSafPick();
+    });
+    window.addEventListener('focus', () => {
+      void resolveSafPick();
+    });
+    window.addEventListener('solomd:saf-pick-ready', () => {
+      void resolveSafPick(8);
+    });
+    window.addEventListener('solomd:saf-pick-poll', () => {
+      void resolveSafPick(200);
     });
     void resolveSafPick();
   }
@@ -1572,13 +1748,15 @@ onMounted(async () => {
     console.debug('deep-link plugin not active', err);
   }
 
-  try {
-    const pending = await invoke<string[]>('drain_pending_opens');
-    for (const p of pending || []) {
-      await files.openPath(p, { bypassNewWindow: true });
+  if (!isMobile()) {
+    try {
+      const pending = await invoke<string[]>('drain_pending_opens');
+      for (const p of pending || []) {
+        await files.openPath(p, { bypassNewWindow: true });
+      }
+    } catch (err) {
+      console.warn('drain_pending_opens failed', err);
     }
-  } catch (err) {
-    console.warn('drain_pending_opens failed', err);
   }
 
   // New-window launched via `?path=<encoded>` (used by the "open in new
@@ -1637,6 +1815,8 @@ onMounted(async () => {
   // can detach it — otherwise every HMR remount stacks another listener.
   window.addEventListener('solomd:open-agent-wizard', onOpenAgentWizard);
   window.addEventListener('solomd:open-image-url-dialog', onOpenImageUrlDialog);
+  window.addEventListener('solomd:open-insert-table-dialog', onOpenInsertTableDialog);
+  window.addEventListener('solomd:open-custom-export', onOpenCustomExportDialog);
 
   // Initialize tile layout: validate persisted state or create default
   tiles.validate(tabs.tabs);
@@ -1659,7 +1839,11 @@ onMounted(async () => {
       // Editors sync their document into the store on a debounce; text typed
       // just before the close would otherwise miss the persist below.
       flushPendingEdits();
-      if (!(await confirmCloseWithUnsavedTabs(me === 'main'))) return;
+      const needsPrompt =
+        me !== 'main' ||
+        !settings.restoreSession ||
+        tabs.tabs.some((t) => t.content !== t.savedContent && (t as any).saveFailed);
+      if (needsPrompt && !(await confirmCloseWithUnsavedTabs(me === 'main'))) return;
       if (me !== 'main') {
         if (isAuxLabel(me)) windowsStore.unregister(me);
       } else {
@@ -1744,19 +1928,20 @@ onMounted(async () => {
 
 async function checkForUpdatesNow(): Promise<void> {
   try {
-    const { checkForUpdateOnStartup, openReleaseUrl } = await import('./lib/check-update');
+    const { checkForUpdateOnStartup } = await import('./lib/check-update');
+    const { runDirectUpdateInstall } = await import('./composables/useUpdateCheck');
     const result = await checkForUpdateOnStartup();
-    if (result && result.hasUpdate) {
+    if (result && result.hasUpdate && result.latest) {
       const toastsStore = (await import('./stores/toasts')).useToastsStore();
       const { useI18n } = await import('./i18n');
-      const { t: tr } = useI18n();
-      // #171 — no auto-opening the browser (it yanks the user out of
-      // whatever they're writing). The toast lingers; clicking it opens
-      // the download page.
-      toastsStore.success(
+      const { t: tr, lang } = useI18n();
+      const actionLabel = lang.value === 'zh' ? '立即升级' : 'Update';
+      toastsStore.push(
         tr('settings.updateAvailable', { version: result.latest || '' }),
-        12000,
-        () => { void openReleaseUrl(result.url); },
+        'success',
+        15000,
+        () => { void runDirectUpdateInstall(result.latest!); },
+        { actionLabel },
       );
     }
   } catch { /* silent */ }
@@ -1922,6 +2107,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('solomd:open-settings', onOpenSettingsEvent as EventListener);
   window.removeEventListener('solomd:open-agent-wizard', onOpenAgentWizard);
   window.removeEventListener('solomd:open-image-url-dialog', onOpenImageUrlDialog);
+  window.removeEventListener('solomd:open-insert-table-dialog', onOpenInsertTableDialog);
+  window.removeEventListener('solomd:open-custom-export', onOpenCustomExportDialog);
   if (unlistenOpened) {
     unlistenOpened();
     unlistenOpened = null;
@@ -2132,13 +2319,26 @@ watch(
     }
   },
 );
+const toolbarMenuOpen = ref(false);
+window.addEventListener('solomd:toolbar-menu-state', (e) => {
+  toolbarMenuOpen.value = Boolean((e as CustomEvent<boolean>).detail);
+});
+window.addEventListener('solomd:menu-history-back', () => {
+  phoneHistoryOps++;
+});
+function onTabletScrimClick() {
+  window.dispatchEvent(new Event('solomd:close-menus'));
+  if (settings.showFileTree) settings.toggleFileTree();
+}
 window.addEventListener('popstate', () => {
   if (phoneHistoryOps > 0) {
     phoneHistoryOps--;
     return;
   }
+  const hadMenu = toolbarMenuOpen.value;
+  window.dispatchEvent(new Event('solomd:close-menus'));
+  if (hadMenu) return;
   if (isNarrow.value && phone.view !== 'home') {
-    window.dispatchEvent(new Event('solomd:close-menus'));
     phone.show('home');
   }
 });
@@ -2509,6 +2709,19 @@ const viewOpen = ref(false);
  */
 const savedViewsStore = useSavedViewsStore();
 const viewPaneVisible = computed(() => viewOpen.value && !!savedViewsStore.activeView);
+const showFormatBar = computed(
+  () =>
+    (settings.formatBar || settings.showFormattingBar) &&
+    !settings.toolbarHidden &&
+    !isMobile() &&
+    tabs.activeTab?.language === 'markdown' &&
+    settings.viewMode !== 'preview' &&
+    settings.viewMode !== 'reading' &&
+    !basesOpen.value &&
+    !inboxViewOpen.value &&
+    !typeLensOpen.value &&
+    !viewPaneVisible.value,
+);
 const aiHasKey = ref(false);
 async function refreshAiHasKey() {
   if (!settings.aiEnabled) { aiHasKey.value = false; return; }
@@ -2536,29 +2749,26 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
     }"
   >
     <!--
-      v2.4 reading mode swaps out the entire toolbar / sidebar / status-bar
-      stack for a single ReadingView component. We keep all the modal
-      dialogs (settings, palette, etc.) mounted at the bottom so the user
-      can still summon them from inside reading mode if needed.
+      v2.4 reading mode shows a single ReadingView component while keeping the
+      workspace shell mounted via v-show (#512 / #516) so the editor's undo/redo
+      stack and scroll/DOM state survive entering and leaving reading mode.
     -->
-    <template v-if="settings.viewMode === 'reading'">
-      <ReadingView />
-    </template>
-    <template v-else>
-      <!-- 5.0 window (docs/v5-ui-spec.md §3): on Windows a 44px frameless title
-           bar spans the window; below it — and on every other platform at the
-           top — the sidebar runs full height beside a column holding the 52px
-           header and the workspace. On macOS the traffic lights sit in the
-           sidebar's top inset, or over the header when the sidebar is hidden. -->
-      <Toolbar
-        v-if="winTitleBar"
-        variant="titlebar"
-        @open-palette="paletteOpen = true"
-        @open-settings="openSettingsAt()"
-        @open-help="helpOpen = true"
-        @open-search="toggleGlobalSearch()"
-      />
-      <div class="shell">
+    <ReadingView v-if="settings.viewMode === 'reading'" />
+    <!-- 5.0 window (docs/v5-ui-spec.md §3): on Windows a 44px frameless title
+         bar spans the window; below it — and on every other platform at the
+         top — the sidebar runs full height beside a column holding the 52px
+         header and the workspace. On macOS the traffic lights sit in the
+         sidebar's top inset, or over the header when the sidebar is hidden. -->
+    <Toolbar
+      v-if="winTitleBar"
+      v-show="settings.viewMode !== 'reading'"
+      variant="titlebar"
+      @open-palette="paletteOpen = true"
+      @open-settings="openSettingsAt()"
+      @open-help="helpOpen = true"
+      @open-search="toggleGlobalSearch()"
+    />
+    <div v-show="settings.viewMode !== 'reading'" class="shell">
         <!-- #168 — on a phone the side panes float over the editor instead of
              stealing its width; this catches the tap that dismisses them. -->
         <div
@@ -2568,10 +2778,10 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
           @click="closeNarrowDrawer"
         />
         <div
-          v-if="isTabletOverlay && !isNarrow && settings.showFileTree"
-          class="workspace__scrim"
+          v-if="isTabletOverlay && !isNarrow && (settings.showFileTree || toolbarMenuOpen)"
+          class="workspace__scrim workspace__scrim--tablet"
           aria-hidden="true"
-          @click="settings.toggleFileTree()"
+          @click="onTabletScrimClick"
         />
         <!-- 5.0 §8 — phone: 笔记 home / search screens with the bottom bar. -->
         <div v-if="isNarrow && phone.view !== 'editor'" class="phone-screen">
@@ -2601,6 +2811,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
         @open-help="helpOpen = true"
         @open-search="toggleGlobalSearch()"
       />
+      <FormatBar v-if="showFormatBar" />
       <TelemetryBanner />
       <div class="workspace">
         <div v-if="dockDragging" class="agent-dock-zones">
@@ -2693,7 +2904,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
             <TypeLensView v-else-if="typeLensOpen" :type-name="typeLensName" />
             <ViewNoteList v-else-if="viewPaneVisible" />
             <TileRoot v-else :node="tiles.root" @cursor="onCursor" @selection="onSelection" />
-            <StatsPill v-if="!basesOpen && !inboxViewOpen && !typeLensOpen && !viewPaneVisible" :line="cursorLine" :col="cursorCol" :selection-text="selectionText" />
+            <StatsPill v-if="!basesOpen && !inboxViewOpen && !typeLensOpen && !viewPaneVisible && settings.showWritingStats" :line="cursorLine" :col="cursorCol" :selection-text="selectionText" />
           </div>
           <div
             v-if="agentBottomVisible"
@@ -2851,7 +3062,6 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
         </div>
         <div v-if="sidebarCtx" class="sidebar-ctx__backdrop" @click="closeSidebarCtx" />
       </Teleport>
-    </template>
 
     <AIRewriteOverlay
       v-if="!IS_APP_STORE_BUILD"
@@ -2898,9 +3108,24 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       @confirm="onImageUrlConfirm"
       @cancel="imageUrlDialogOpen = false"
     />
+    <component
+      :is="InsertTableDialogC"
+      v-if="InsertTableDialogC"
+      :open="insertTableLazyOpen"
+      @confirm="onInsertTableConfirm"
+      @cancel="insertTableDialogOpen = false"
+    />
+    <component
+      :is="CustomExportDialogC"
+      v-if="CustomExportDialogC"
+      :open="customExportLazyOpen"
+      :preset="customExportPreset"
+      @close="customExportDialogOpen = false"
+    />
     <SessionRestoreDialog />
     <!-- v4.6 F5 — saved-view create/edit modal (self-mounts via window events). -->
     <ViewEditorDialog />
+    <TemplatePickerDialog />
     <WhiteboardOverlay />
     <FileChangedDialog
       :open="fileChangedOpen"
@@ -2910,6 +3135,7 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
       @cancel="onFileChangedAction('cancel')"
     />
     <Toast />
+    <WikiLinkHoverPreview />
     <Transition name="zoom-hud-fade">
       <div v-if="zoomHudText" class="zoom-hud" role="status" aria-live="polite">
         {{ zoomHudText }}
@@ -3120,6 +3346,12 @@ watchEffect(() => { void settings.aiEnabled; void settings.aiProvider; refreshAi
   background: rgba(0, 0, 0, 0.32);
   border: 0;
   padding: 0;
+}
+/* #518 — on tablet portrait overlay, the scrim sits below the header toolbar
+   (z-index: 20) so tapping a toolbar menu button reaches the button directly
+   instead of being swallowed by the scrim. */
+.workspace__scrim--tablet {
+  z-index: 19;
 }
 /* The editor keeps the full width underneath the drawer. */
 .app--narrow .content {

@@ -44,7 +44,7 @@ function ctx(over: Partial<MenuContext> = {}): MenuContext {
     state: {
       autoSave: false, viewMode: 'edit', focusMode: true, typewriter: false, spellCheck: true,
       livePreview: true, fitWidth: false, dark: false, theme: 'light',
-      wordWrap: true, lineNumbers: false, autoGit: false,
+      wordWrap: true, lineNumbers: false, autoGit: false, alwaysOnTop: false,
       panes: {
         outline: true, inspector: false, backlinks: true, relationships: false, neighborhood: false,
         tags: false, tasks: true, types: false, history: false, savedViews: false, agent: false,
@@ -120,7 +120,7 @@ test('C1 section 四 / 六 / Part-1 commands all have a menu entry', () => {
   const required = [
     // File
     'file.new', 'file.newText', 'file.newInFolder', 'window.new', 'file.open', 'file.openFolder',
-    'daily.openToday', 'file.save', 'file.saveAs', 'file.autoSave', 'file.import', 'export.html',
+    'daily.openToday', 'file.save', 'file.saveAs', 'file.saveAll', 'file.autoSave', 'file.import', 'export.html',
     'export.docx', 'export.pdfPrint', 'export.pdf', 'export.image', 'export.copyHtml', 'export.copyMd',
     'file.print', 'inbox.toggle', 'file.openExternal', 'settings.open', 'file.closeTab', 'tab.reopenClosed', 'file.exit',
     // Edit
@@ -161,7 +161,7 @@ test('every menu id is something App.vue can dispatch', () => {
     'insert.mermaid', 'insert.hr',
     // palette commands
     'export.html', 'export.docx', 'export.pdf', 'export.image', 'clean.aiArtifacts',
-    'view.toggleSpellCheck', 'view.toggleLivePreview', 'view.toggleFitWidth', 'pomodoro.open',
+    'view.toggleSpellCheck', 'view.toggleLivePreview', 'view.toggleFitWidth', 'view.toggleFormatBar', 'pomodoro.open',
     'editor.insertImage', 'editor.insertImageUrl',
     // palette commands reached through the dispatchMenuAction fallback
     ...PALETTE_MENU_IDS,
@@ -286,7 +286,7 @@ test('menu coverage: the new submenus hold what they should', () => {
   assert.ok(itemIds(submenu(m, 'theme')!.items).includes('theme.customCss'));
   // Shortcuts survive the move into submenus.
   assert.equal(itemShortcut(find(m, 'daily.openToday'), ctx()), 'Ctrl+D');
-  assert.equal(itemShortcut(find(m, 'inbox.toggle'), ctx()), 'Ctrl+E');
+  assert.equal(itemShortcut(find(m, 'inbox.toggle'), ctx()), '');
   assert.equal(itemShortcut(find(m, 'view.toggleInspector'), ctx()), 'Ctrl+Shift+I');
   assert.equal(find(m, 'fold.level2').label, 'Show Down to Level 2');
 });
